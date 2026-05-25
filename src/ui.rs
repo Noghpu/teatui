@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::app::{App, Screen};
-use crate::generate::{FORM_FIELDS, Focus};
+use crate::generate::{FieldId, Focus};
 
 pub fn render(frame: &mut Frame, app: &App) {
     let [main_area, status_area, help_area] = Layout::vertical([
@@ -149,42 +149,24 @@ fn render_work(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             Line::from(""),
             Line::from("Select a mode on the left.".dim()),
         ],
-        Screen::Generate => FORM_FIELDS
+        Screen::Generate => FieldId::ALL
             .iter()
             .enumerate()
-            .map(|(index, field)| {
+            .map(|(index, field_id)| {
                 let generate = app.generate();
-                let value = match *field {
-                    "head" => generate.form.head.display_value().to_string(),
-                    "branch name" => generate.form.branch_name.display_value().to_string(),
-                    "base" => generate.form.base.display_value().to_string(),
-                    "title" => generate.form.title.display_value().to_string(),
-                    "description" => generate.form.description.display_value().to_string(),
-                    "labels" => generate.form.labels.display_value().to_string(),
-                    "assignees" => generate.form.assignees.display_value().to_string(),
-                    "milestone" => generate.form.milestone.display_value().to_string(),
-                    _ => String::new(),
-                };
-                let error_count = match *field {
-                    "head" => generate.form.head.errors.len(),
-                    "branch name" => generate.form.branch_name.errors.len(),
-                    "base" => generate.form.base.errors.len(),
-                    "title" => generate.form.title.errors.len(),
-                    "description" => generate.form.description.errors.len(),
-                    "labels" => generate.form.labels.errors.len(),
-                    "assignees" => generate.form.assignees.errors.len(),
-                    "milestone" => generate.form.milestone.errors.len(),
-                    _ => 0,
-                };
+                let field = generate.form.field(*field_id);
+                let label = field_id.label();
+                let value = field.display_value();
+                let error_count = field.errors.len();
                 let marker = if index == generate.selected_field {
                     ">"
                 } else {
                     " "
                 };
                 let line = if error_count > 0 {
-                    format!("{marker} {field}: {value} ({error_count} errors)")
+                    format!("{marker} {label}: {value} ({error_count} errors)")
                 } else {
-                    format!("{marker} {field}: {value}")
+                    format!("{marker} {label}: {value}")
                 };
                 if index == generate.selected_field && app.focus() == Focus::Form {
                     Line::from(line.bold().cyan())
@@ -240,7 +222,7 @@ fn render_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 Line::from(format!("stats: {}", revset.stats()).dim()),
                 Line::from(""),
                 Line::from(format!("phase: {:?}", app.generate().phase).dim()),
-                Line::from(format!("input mode: {:?}", app.generate().input_mode).dim()),
+                Line::from(format!("input mode: {:?}", app.input_mode()).dim()),
                 Line::from(format!(
                     "focused field: {}",
                     app.generate().selected_field_name()

@@ -30,6 +30,7 @@ pub enum GeneratePhase {
 
 #[derive(Debug, Clone, Default)]
 pub struct FieldState {
+    initial: String,
     pub value: String,
     pub buffer: String,
     pub dirty: bool,
@@ -40,6 +41,7 @@ impl FieldState {
     pub fn new(value: impl Into<String>) -> Self {
         let value = value.into();
         Self {
+            initial: value.clone(),
             buffer: value.clone(),
             value,
             dirty: false,
@@ -48,11 +50,33 @@ impl FieldState {
     }
 
     pub fn display_value(&self) -> &str {
-        if self.dirty {
-            &self.buffer
-        } else {
-            &self.value
+        &self.buffer
+    }
+
+    pub fn begin_edit(&mut self) {
+        self.buffer.clone_from(&self.value);
+    }
+
+    pub fn insert(&mut self, ch: char) {
+        self.buffer.push(ch);
+        self.dirty = self.buffer != self.initial;
+    }
+
+    pub fn backspace(&mut self) {
+        self.buffer.pop();
+        self.dirty = self.buffer != self.initial;
+    }
+
+    pub fn commit(&mut self) {
+        if self.value != self.buffer {
+            self.value.clone_from(&self.buffer);
         }
+        self.dirty = self.value != self.initial;
+    }
+
+    pub fn cancel(&mut self) {
+        self.buffer.clone_from(&self.value);
+        self.dirty = self.value != self.initial;
     }
 }
 
@@ -90,6 +114,72 @@ impl PrForm {
 impl Default for PrForm {
     fn default() -> Self {
         Self::new("", "", "")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldId {
+    Head,
+    BranchName,
+    Base,
+    Title,
+    Description,
+    Labels,
+    Assignees,
+    Milestone,
+}
+
+impl FieldId {
+    pub const ALL: [Self; 8] = [
+        Self::Head,
+        Self::BranchName,
+        Self::Base,
+        Self::Title,
+        Self::Description,
+        Self::Labels,
+        Self::Assignees,
+        Self::Milestone,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Head => "head",
+            Self::BranchName => "branch name",
+            Self::Base => "base",
+            Self::Title => "title",
+            Self::Description => "description",
+            Self::Labels => "labels",
+            Self::Assignees => "assignees",
+            Self::Milestone => "milestone",
+        }
+    }
+}
+
+impl PrForm {
+    pub fn field(&self, id: FieldId) -> &FieldState {
+        match id {
+            FieldId::Head => &self.head,
+            FieldId::BranchName => &self.branch_name,
+            FieldId::Base => &self.base,
+            FieldId::Title => &self.title,
+            FieldId::Description => &self.description,
+            FieldId::Labels => &self.labels,
+            FieldId::Assignees => &self.assignees,
+            FieldId::Milestone => &self.milestone,
+        }
+    }
+
+    pub fn field_mut(&mut self, id: FieldId) -> &mut FieldState {
+        match id {
+            FieldId::Head => &mut self.head,
+            FieldId::BranchName => &mut self.branch_name,
+            FieldId::Base => &mut self.base,
+            FieldId::Title => &mut self.title,
+            FieldId::Description => &mut self.description,
+            FieldId::Labels => &mut self.labels,
+            FieldId::Assignees => &mut self.assignees,
+            FieldId::Milestone => &mut self.milestone,
+        }
     }
 }
 
@@ -147,22 +237,9 @@ impl RevsetSummary {
     }
 }
 
-pub const FORM_FIELDS: [&str; 8] = [
-    "head",
-    "branch name",
-    "base",
-    "title",
-    "description",
-    "labels",
-    "assignees",
-    "milestone",
-];
-
 #[derive(Debug, Clone)]
 pub struct GenerateState {
     pub phase: GeneratePhase,
-    pub input_mode: InputMode,
-    pub focus: Focus,
     pub selected_revset: usize,
     pub selected_field: usize,
     pub revsets: Vec<RevsetSummary>,
@@ -196,8 +273,6 @@ impl GenerateState {
 
         Self {
             phase: GeneratePhase::SelectingRevset,
-            input_mode: InputMode::Normal,
-            focus: Focus::Menu,
             selected_revset: 0,
             selected_field: 0,
             revsets,
@@ -211,7 +286,47 @@ impl GenerateState {
         &self.revsets[self.selected_revset]
     }
 
+    pub fn selected_field(&self) -> FieldId {
+        FieldId::ALL[self.selected_field]
+    }
+
     pub fn selected_field_name(&self) -> &'static str {
-        FORM_FIELDS[self.selected_field]
+        self.selected_field().label()
+    }
+
+    pub fn move_revset_up(&mut self) {
+        self.selected_revset = self.selected_revset.saturating_sub(1);
+    }
+
+    pub fn move_revset_down(&mut self) {
+        self.selected_revset = (self.selected_revset + 1).min(self.revsets.len().saturating_sub(1));
+    }
+
+    pub fn move_field_up(&mut self) {
+        self.selected_field = self.selected_field.saturating_sub(1);
+    }
+
+    pub fn move_field_down(&mut self) {
+        self.selected_field = (self.selected_field + 1).min(FieldId::ALL.len().saturating_sub(1));
+    }
+
+    pub fn begin_editing_selected_field(&mut self) {
+        self.form.field_mut(self.selected_field()).begin_edit();
+    }
+
+    pub fn insert_into_selected_field(&mut self, ch: char) {
+        self.form.field_mut(self.selected_field()).insert(ch);
+    }
+
+    pub fn backspace_selected_field(&mut self) {
+        self.form.field_mut(self.selected_field()).backspace();
+    }
+
+    pub fn commit_selected_field(&mut self) {
+        self.form.field_mut(self.selected_field()).commit();
+    }
+
+    pub fn cancel_selected_field(&mut self) {
+        self.form.field_mut(self.selected_field()).cancel();
     }
 }

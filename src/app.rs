@@ -1,11 +1,12 @@
 use std::path::PathBuf;
 
 use color_eyre::eyre::Result;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::action::{Action, Direction};
 use crate::config::Config;
 use crate::event::{AppEvent, EventHandler, JobResult, JobStatus};
-use crate::generate::{FORM_FIELDS, Focus, GeneratePhase, GenerateState, InputMode};
+use crate::generate::{Focus, GeneratePhase, GenerateState, InputMode};
 use crate::tui::Tui;
 use crate::ui;
 
@@ -122,8 +123,10 @@ impl App {
         Ok(())
     }
 
-    fn handle_key(&self, key: crossterm::event::KeyEvent) -> Action {
-        use crossterm::event::KeyCode;
+    fn handle_key(&self, key: KeyEvent) -> Action {
+        if self.input_mode == InputMode::Editing {
+            return self.handle_edit_key(key);
+        }
 
         match key.code {
             KeyCode::Char('q') => Action::Quit,
@@ -139,137 +142,155 @@ impl App {
         }
     }
 
+    fn handle_edit_key(&self, key: KeyEvent) -> Action {
+        match key.code {
+            KeyCode::Esc => Action::CancelEdit,
+            KeyCode::Enter => Action::CommitEdit,
+            KeyCode::Backspace => Action::Backspace,
+            KeyCode::Char(ch)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                Action::InsertChar(ch)
+            }
+            _ => Action::Tick,
+        }
+    }
+
     fn update(&mut self, action: Action) {
         match action {
             Action::Quit => self.should_quit = true,
-            Action::Back => {
-                if self.input_mode == InputMode::Editing {
-                    self.input_mode = InputMode::Normal;
-                    return;
-                }
-
-                match self.screen {
-                    Screen::Landing => {}
-                    Screen::Generate | Screen::PullRequests | Screen::Issues => {
-                        self.screen = Screen::Landing;
-                        self.focus = Focus::Menu;
-                        self.input_mode = InputMode::Normal;
-                    }
-                }
-            }
-            Action::Navigate(Direction::Up) => match self.screen {
-                Screen::Generate if self.focus == Focus::Form => {
-                    self.generate.selected_field = self.generate.selected_field.saturating_sub(1);
-                }
-                Screen::Landing => {
-                    self.landing.selected_entry = self.landing.selected_entry.saturating_sub(1);
-                }
-                Screen::PullRequests => {
-                    self.pull_requests.selected_item =
-                        self.pull_requests.selected_item.saturating_sub(1);
-                }
-                Screen::Issues => {
-                    self.issues.selected_item = self.issues.selected_item.saturating_sub(1);
-                }
-                _ => {
-                    self.generate.selected_revset = self.generate.selected_revset.saturating_sub(1);
-                }
-            },
-            Action::Navigate(Direction::Down) => match self.screen {
-                Screen::Generate if self.focus == Focus::Form => {
-                    if self.generate.selected_field < FORM_FIELDS.len().saturating_sub(1) {
-                        self.generate.selected_field += 1;
-                    }
-                }
-                Screen::Landing => {
-                    if self.landing.selected_entry < 2 {
-                        self.landing.selected_entry += 1;
-                    }
-                }
-                Screen::PullRequests => {
-                    if self.pull_requests.selected_item < 2 {
-                        self.pull_requests.selected_item += 1;
-                    }
-                }
-                Screen::Issues => {
-                    if self.issues.selected_item < 2 {
-                        self.issues.selected_item += 1;
-                    }
-                }
-                _ => {
-                    if self.generate.selected_revset < self.generate.revsets.len().saturating_sub(1)
-                    {
-                        self.generate.selected_revset += 1;
-                    }
-                }
-            },
-            Action::Focus(Direction::Up) => {
-                self.focus = match self.focus {
-                    Focus::Menu => Focus::Menu,
-                    Focus::Form => Focus::Menu,
-                    Focus::Preview => Focus::Form,
-                };
-            }
-            Action::Focus(Direction::Down) => {
-                self.focus = match self.focus {
-                    Focus::Menu => Focus::Form,
-                    Focus::Form => Focus::Preview,
-                    Focus::Preview => Focus::Preview,
-                };
-            }
-            Action::Select => match self.screen {
-                Screen::Landing => {
-                    self.screen = match self.landing.selected_entry {
-                        0 => Screen::Generate,
-                        1 => Screen::PullRequests,
-                        _ => Screen::Issues,
-                    };
-                    self.focus = Focus::Menu;
-                    self.input_mode = InputMode::Normal;
-                    if self.screen == Screen::Generate {
-                        self.generate.phase = GeneratePhase::SelectingRevset;
-                    }
-                }
-                Screen::Generate if self.focus == Focus::Menu => {
-                    self.focus = Focus::Form;
-                    self.generate.focus = Focus::Form;
-                    self.generate.phase = GeneratePhase::EditingForm;
-                    self.generate.selected_field = 0;
-                    self.input_mode = InputMode::Normal;
-                }
-                Screen::Generate if self.focus == Focus::Form => {
-                    self.input_mode = InputMode::Editing;
-                }
-                _ => {}
-            },
-            Action::Edit => {
-                if self.screen == Screen::Generate && self.focus == Focus::Form {
-                    self.input_mode = InputMode::Editing;
-                    self.generate.focus = Focus::Form;
-                }
-            }
-            Action::Generate => {
-                if self.screen == Screen::Generate {
-                    self.generate.phase = GeneratePhase::Generating;
-                    self.logs.entries.push(format!(
-                        "generate prompt for revset {}",
-                        self.generate.selected_revset().label()
-                    ));
-                }
-            }
-            Action::JobResult(result) => {
-                self.jobs.status = result.status;
-                self.jobs.last_result = Some(result.clone());
-                self.logs.entries.push(format!(
-                    "job {} finished with {:?}",
-                    result.name, result.status
-                ));
-            }
+            Action::Back => self.back(),
+            Action::Navigate(direction) => self.navigate(direction),
+            Action::Focus(direction) => self.move_focus(direction),
+            Action::Select => self.select(),
+            Action::Edit => self.begin_editing_form_field(),
+            Action::InsertChar(ch) => self.generate.insert_into_selected_field(ch),
+            Action::Backspace => self.generate.backspace_selected_field(),
+            Action::CommitEdit => self.finish_editing(true),
+            Action::CancelEdit => self.finish_editing(false),
+            Action::Generate => self.generate_pr(),
+            Action::JobResult(result) => self.record_job_result(result),
             Action::Error(msg) => {
                 tracing::error!("Error: {}", msg);
             }
             Action::Tick | Action::Render => {}
         }
+    }
+
+    fn back(&mut self) {
+        match self.screen {
+            Screen::Landing => {}
+            Screen::Generate | Screen::PullRequests | Screen::Issues => {
+                self.screen = Screen::Landing;
+                self.focus = Focus::Menu;
+                self.input_mode = InputMode::Normal;
+            }
+        }
+    }
+
+    fn navigate(&mut self, direction: Direction) {
+        match (self.screen, self.focus, direction) {
+            (Screen::Generate, Focus::Form, Direction::Up) => self.generate.move_field_up(),
+            (Screen::Generate, Focus::Form, Direction::Down) => self.generate.move_field_down(),
+            (Screen::Generate, _, Direction::Up) => self.generate.move_revset_up(),
+            (Screen::Generate, _, Direction::Down) => self.generate.move_revset_down(),
+            (Screen::Landing, _, Direction::Up) => {
+                self.landing.selected_entry = self.landing.selected_entry.saturating_sub(1);
+            }
+            (Screen::Landing, _, Direction::Down) => {
+                self.landing.selected_entry = (self.landing.selected_entry + 1).min(2);
+            }
+            (Screen::PullRequests, _, Direction::Up) => {
+                self.pull_requests.selected_item =
+                    self.pull_requests.selected_item.saturating_sub(1);
+            }
+            (Screen::PullRequests, _, Direction::Down) => {
+                self.pull_requests.selected_item = (self.pull_requests.selected_item + 1).min(2);
+            }
+            (Screen::Issues, _, Direction::Up) => {
+                self.issues.selected_item = self.issues.selected_item.saturating_sub(1);
+            }
+            (Screen::Issues, _, Direction::Down) => {
+                self.issues.selected_item = (self.issues.selected_item + 1).min(2);
+            }
+        }
+    }
+
+    fn move_focus(&mut self, direction: Direction) {
+        self.focus = match (self.focus, direction) {
+            (Focus::Menu, Direction::Up) => Focus::Menu,
+            (Focus::Menu, Direction::Down) => Focus::Form,
+            (Focus::Form, Direction::Up) => Focus::Menu,
+            (Focus::Form, Direction::Down) => Focus::Preview,
+            (Focus::Preview, Direction::Up) => Focus::Form,
+            (Focus::Preview, Direction::Down) => Focus::Preview,
+        };
+    }
+
+    fn select(&mut self) {
+        match self.screen {
+            Screen::Landing => self.open_selected_landing_entry(),
+            Screen::Generate if self.focus == Focus::Menu => self.select_revset(),
+            Screen::Generate if self.focus == Focus::Form => self.begin_editing_form_field(),
+            _ => {}
+        }
+    }
+
+    fn open_selected_landing_entry(&mut self) {
+        self.screen = match self.landing.selected_entry {
+            0 => Screen::Generate,
+            1 => Screen::PullRequests,
+            _ => Screen::Issues,
+        };
+        self.focus = Focus::Menu;
+        self.input_mode = InputMode::Normal;
+        if self.screen == Screen::Generate {
+            self.generate.phase = GeneratePhase::SelectingRevset;
+        }
+    }
+
+    fn select_revset(&mut self) {
+        self.focus = Focus::Form;
+        self.generate.phase = GeneratePhase::EditingForm;
+        self.generate.selected_field = 0;
+        self.input_mode = InputMode::Normal;
+    }
+
+    fn begin_editing_form_field(&mut self) {
+        if self.screen == Screen::Generate && self.focus == Focus::Form {
+            self.generate.begin_editing_selected_field();
+            self.input_mode = InputMode::Editing;
+        }
+    }
+
+    fn finish_editing(&mut self, commit: bool) {
+        if self.screen == Screen::Generate && self.focus == Focus::Form {
+            if commit {
+                self.generate.commit_selected_field();
+            } else {
+                self.generate.cancel_selected_field();
+            }
+        }
+        self.input_mode = InputMode::Normal;
+    }
+
+    fn generate_pr(&mut self) {
+        if self.screen == Screen::Generate {
+            self.generate.phase = GeneratePhase::Generating;
+            self.logs.entries.push(format!(
+                "generate prompt for revset {}",
+                self.generate.selected_revset().label()
+            ));
+        }
+    }
+
+    fn record_job_result(&mut self, result: JobResult) {
+        self.jobs.status = result.status;
+        self.jobs.last_result = Some(result.clone());
+        self.logs.entries.push(format!(
+            "job {} finished with {:?}",
+            result.name, result.status
+        ));
     }
 
     pub fn screen(&self) -> Screen {
