@@ -2,6 +2,7 @@ mod action;
 mod app;
 mod config;
 mod event;
+mod generate;
 mod logging;
 mod tui;
 mod ui;

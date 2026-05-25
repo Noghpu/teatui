@@ -6,7 +6,8 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
 
-use crate::app::{App, Pane, Screen};
+use crate::app::{App, Screen};
+use crate::generate::{FORM_FIELDS, Focus};
 
 pub fn render(frame: &mut Frame, app: &App) {
     let [main_area, status_area, help_area] = Layout::vertical([
@@ -32,29 +33,26 @@ pub fn render(frame: &mut Frame, app: &App) {
 
 fn render_menu(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let items: Vec<ListItem> = match app.screen() {
-        Screen::Landing => app
-            .landing_entries()
+        Screen::Landing => ["Generate PR", "Manage PRs", "Manage Issues"]
             .iter()
             .enumerate()
-            .map(|(index, screen)| {
-                let label = format!(
-                    "{} {}",
-                    if index == app.selected_landing_entry_index() {
-                        ">"
-                    } else {
-                        " "
-                    },
-                    screen.title()
-                );
-                if index == app.selected_landing_entry_index() {
-                    ListItem::new(label.bold().cyan())
+            .map(|(index, label)| {
+                let marker = if index == app.landing().selected_entry {
+                    ">"
                 } else {
-                    ListItem::new(label.dim())
+                    " "
+                };
+                let line = format!("{marker} {label}");
+                if index == app.landing().selected_entry {
+                    ListItem::new(line.bold().cyan())
+                } else {
+                    ListItem::new(line.dim())
                 }
             })
             .collect(),
         Screen::Generate => app
-            .revsets()
+            .generate()
+            .revsets
             .iter()
             .enumerate()
             .map(|(index, revset)| {
@@ -64,31 +62,44 @@ fn render_menu(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                     revset.bookmarks().join(", ")
                 };
                 let label = format!("{}  {}", revset.label(), bookmarks);
-                if index == app.selected_revset_index() {
+                if index == app.generate().selected_revset {
                     ListItem::new(label.bold().cyan())
                 } else {
                     ListItem::new(label.dim())
                 }
             })
             .collect(),
-        Screen::PullRequests | Screen::Issues => app
-            .secondary_items()
+        Screen::PullRequests => ["Open items", "Filter", "Comment"]
             .iter()
             .enumerate()
             .map(|(index, item)| {
-                let label = format!(
-                    "{} {}",
-                    if index == app.selected_secondary_item_index() {
-                        ">"
-                    } else {
-                        " "
-                    },
-                    item
-                );
-                if index == app.selected_secondary_item_index() {
-                    ListItem::new(label.bold().cyan())
+                let marker = if index == app.pull_requests().selected_item {
+                    ">"
                 } else {
-                    ListItem::new(label.dim())
+                    " "
+                };
+                let line = format!("{marker} {item}");
+                if index == app.pull_requests().selected_item {
+                    ListItem::new(line.bold().cyan())
+                } else {
+                    ListItem::new(line.dim())
+                }
+            })
+            .collect(),
+        Screen::Issues => ["Open items", "Filter", "Comment"]
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let marker = if index == app.issues().selected_item {
+                    ">"
+                } else {
+                    " "
+                };
+                let line = format!("{marker} {item}");
+                if index == app.issues().selected_item {
+                    ListItem::new(line.bold().cyan())
+                } else {
+                    ListItem::new(line.dim())
                 }
             })
             .collect(),
@@ -103,7 +114,7 @@ fn render_menu(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(focused_title(title, app.focused_pane() == Pane::Menu)),
+            .title(focused_title(title, app.focus() == Focus::Menu)),
     );
 
     frame.render_widget(list, area);
@@ -114,38 +125,68 @@ fn render_work(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Screen::Landing => vec![
             Line::from("teatui".bold()),
             Line::from(""),
-            Line::from("jj workspace: detected".dim()),
-            Line::from("Gitea remote: pending".dim()),
-            Line::from("tea auth: pending".dim()),
-            Line::from("Ollama: pending".dim()),
+            Line::from(match &app.repo().workspace_root {
+                Some(path) => format!("Workspace: {}", path.display()),
+                None => "Workspace: pending".to_string(),
+            }),
+            status_line("Workspace", app.repo().inside_workspace, "detected"),
+            status_line("Gitea remote", app.repo().gitea_remote.is_some(), "pending"),
+            status_line(
+                "tea auth",
+                app.repo().tea_authenticated.unwrap_or(false),
+                "pending",
+            ),
+            status_line(
+                "Ollama",
+                app.repo().ollama_reachable.unwrap_or(false),
+                "pending",
+            ),
+            Line::from(match &app.repo().base_branch {
+                Some(branch) => format!("Base branch: {}", branch),
+                None => "Base branch: pending".to_string(),
+            }),
+            Line::from(format!("Logs: {}", app.logs().entries.len())),
             Line::from(""),
             Line::from("Select a mode on the left.".dim()),
         ],
-        Screen::Generate => app
-            .form_fields()
+        Screen::Generate => FORM_FIELDS
             .iter()
             .enumerate()
             .map(|(index, field)| {
+                let generate = app.generate();
                 let value = match *field {
-                    "head" => app.selected_revset().label().to_string(),
-                    "branch name" => app
-                        .selected_revset()
-                        .bookmarks()
-                        .first()
-                        .cloned()
-                        .unwrap_or_default(),
-                    "base" => "main@origin".to_string(),
-                    "title" | "description" => String::new(),
-                    "labels" | "assignees" | "milestone" => "optional".to_string(),
+                    "head" => generate.form.head.display_value().to_string(),
+                    "branch name" => generate.form.branch_name.display_value().to_string(),
+                    "base" => generate.form.base.display_value().to_string(),
+                    "title" => generate.form.title.display_value().to_string(),
+                    "description" => generate.form.description.display_value().to_string(),
+                    "labels" => generate.form.labels.display_value().to_string(),
+                    "assignees" => generate.form.assignees.display_value().to_string(),
+                    "milestone" => generate.form.milestone.display_value().to_string(),
                     _ => String::new(),
                 };
-                let marker = if index == app.selected_field_index() {
+                let error_count = match *field {
+                    "head" => generate.form.head.errors.len(),
+                    "branch name" => generate.form.branch_name.errors.len(),
+                    "base" => generate.form.base.errors.len(),
+                    "title" => generate.form.title.errors.len(),
+                    "description" => generate.form.description.errors.len(),
+                    "labels" => generate.form.labels.errors.len(),
+                    "assignees" => generate.form.assignees.errors.len(),
+                    "milestone" => generate.form.milestone.errors.len(),
+                    _ => 0,
+                };
+                let marker = if index == generate.selected_field {
                     ">"
                 } else {
                     " "
                 };
-                let line = format!("{marker} {field}: {value}");
-                if index == app.selected_field_index() {
+                let line = if error_count > 0 {
+                    format!("{marker} {field}: {value} ({error_count} errors)")
+                } else {
+                    format!("{marker} {field}: {value}")
+                };
+                if index == generate.selected_field && app.focus() == Focus::Form {
                     Line::from(line.bold().cyan())
                 } else {
                     Line::from(line.dim())
@@ -175,7 +216,7 @@ fn render_work(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let form = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(focused_title(title, app.focused_pane() == Pane::Form)),
+            .title(focused_title(title, app.focus() == Focus::Form)),
     );
     frame.render_widget(form, area);
 }
@@ -189,8 +230,8 @@ fn render_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             Line::from("Press Enter to open the selected mode.".dim()),
         ],
         Screen::Generate => {
-            let revset = app.selected_revset();
-            vec![
+            let revset = app.generate().selected_revset();
+            let mut lines = vec![
                 Line::from("Selected Revset".bold()),
                 Line::from(""),
                 Line::from(format!("revset: {}", revset.label()).cyan()),
@@ -198,9 +239,51 @@ fn render_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 Line::from(format!("bookmarks: {}", revset.bookmarks().join(", ")).dim()),
                 Line::from(format!("stats: {}", revset.stats()).dim()),
                 Line::from(""),
-                Line::from("Press Enter on the revset list to move to the PR form.".dim()),
-                Line::from("Press g from navigation mode to generate using all form values.".dim()),
-            ]
+                Line::from(format!("phase: {:?}", app.generate().phase).dim()),
+                Line::from(format!("input mode: {:?}", app.generate().input_mode).dim()),
+                Line::from(format!(
+                    "focused field: {}",
+                    app.generate().selected_field_name()
+                )),
+            ];
+
+            if let Some(draft) = &app.generate().draft {
+                lines.push(Line::from(""));
+                lines.push(Line::from("Draft".bold()));
+                lines.push(Line::from(format!("branch: {}", draft.branch_name)));
+                lines.push(Line::from(format!("title: {}", draft.title)));
+                lines.push(Line::from(format!("body chars: {}", draft.body.len())).dim());
+                lines.push(Line::from(format!(
+                    "review notes: {}",
+                    draft.review_notes.len()
+                )));
+                lines.push(Line::from(format!(
+                    "raw response chars: {}",
+                    draft.raw_model_response.len()
+                )));
+            }
+
+            lines.push(Line::from(format!(
+                "review summary: {}",
+                app.generate().review.summary
+            )));
+            lines.push(Line::from(format!(
+                "review notes: {}",
+                app.generate().review.notes.len()
+            )));
+            lines.push(Line::from(format!(
+                "review warnings: {}",
+                app.generate().review.warnings.len()
+            )));
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(
+                "Press Enter on the revset list to move to the PR form.".dim(),
+            ));
+            lines.push(Line::from(
+                "Press g from navigation mode to generate using all form values.".dim(),
+            ));
+            lines
         }
         Screen::PullRequests => vec![
             Line::from("PR Preview".bold()),
@@ -216,16 +299,21 @@ fn render_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         ],
     };
 
-    let preview = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(
-        focused_title("Preview", app.focused_pane() == Pane::Preview),
-    ));
+    let preview = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(focused_title("Preview", app.focus() == Focus::Preview)),
+    );
     frame.render_widget(preview, area);
 }
 
 fn render_status(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let status = Line::from(vec![
-        " NORMAL ".bold().on_cyan(),
+        format!(" {} ", format!("{:?}", app.input_mode()).to_uppercase())
+            .bold()
+            .on_cyan(),
         format!(" {} ", app.screen().title()).dim(),
+        format!(" job:{:?} ", app.jobs().status).dim(),
         " jj + tea + ollama ".dim(),
     ]);
     frame.render_widget(Paragraph::new(status), area);
@@ -256,5 +344,13 @@ fn focused_title(title: &'static str, focused: bool) -> Line<'static> {
         title.bold().cyan().into()
     } else {
         title.dim().into()
+    }
+}
+
+fn status_line(label: &'static str, active: bool, fallback: &'static str) -> Line<'static> {
+    if active {
+        Line::from(format!("{label}: detected"))
+    } else {
+        Line::from(format!("{label}: {fallback}")).dim()
     }
 }

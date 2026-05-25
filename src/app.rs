@@ -1,8 +1,11 @@
+use std::path::PathBuf;
+
 use color_eyre::eyre::Result;
 
 use crate::action::{Action, Direction};
 use crate::config::Config;
-use crate::event::{AppEvent, EventHandler};
+use crate::event::{AppEvent, EventHandler, JobResult, JobStatus};
+use crate::generate::{FORM_FIELDS, Focus, GeneratePhase, GenerateState, InputMode};
 use crate::tui::Tui;
 use crate::ui;
 
@@ -25,75 +28,58 @@ impl Screen {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pane {
-    Menu,
-    Form,
-    Preview,
+#[derive(Debug, Default, Clone)]
+pub struct RepoState {
+    pub workspace_root: Option<PathBuf>,
+    pub inside_workspace: bool,
+    pub gitea_remote: Option<String>,
+    pub tea_authenticated: Option<bool>,
+    pub ollama_reachable: Option<bool>,
+    pub base_branch: Option<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct LogState {
+    pub entries: Vec<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct LandingState {
+    pub selected_entry: usize,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ListState {
+    pub selected_item: usize,
 }
 
 #[derive(Debug, Clone)]
-pub struct RevsetSummary {
-    label: String,
-    description: String,
-    bookmarks: Vec<String>,
-    stats: String,
+pub struct JobRegistry {
+    pub status: JobStatus,
+    pub last_result: Option<JobResult>,
 }
 
-impl RevsetSummary {
-    fn new(label: &str, description: &str, bookmarks: &[&str], stats: &str) -> Self {
+impl Default for JobRegistry {
+    fn default() -> Self {
         Self {
-            label: label.into(),
-            description: description.into(),
-            bookmarks: bookmarks
-                .iter()
-                .map(|bookmark| (*bookmark).into())
-                .collect(),
-            stats: stats.into(),
+            status: JobStatus::Idle,
+            last_result: None,
         }
     }
-
-    pub fn label(&self) -> &str {
-        &self.label
-    }
-
-    pub fn description(&self) -> &str {
-        &self.description
-    }
-
-    pub fn bookmarks(&self) -> &[String] {
-        &self.bookmarks
-    }
-
-    pub fn stats(&self) -> &str {
-        &self.stats
-    }
 }
-
-const FORM_FIELDS: [&str; 8] = [
-    "head",
-    "branch name",
-    "base",
-    "title",
-    "description",
-    "labels",
-    "assignees",
-    "milestone",
-];
-
-const LANDING_ENTRIES: [Screen; 3] = [Screen::Generate, Screen::PullRequests, Screen::Issues];
-
-const SECONDARY_ITEMS: [&str; 3] = ["Open items", "Filter", "Comment"];
 
 pub struct App {
     config: Config,
     screen: Screen,
-    focused_pane: Pane,
-    selected_landing_entry: usize,
-    revsets: Vec<RevsetSummary>,
-    selected_revset: usize,
-    selected_field: usize,
-    selected_secondary_item: usize,
+    focus: Focus,
+    input_mode: InputMode,
+    repo: RepoState,
+    landing: LandingState,
+    generate: GenerateState,
+    pull_requests: ListState,
+    issues: ListState,
+    logs: LogState,
+    jobs: JobRegistry,
     should_quit: bool,
 }
 
@@ -102,26 +88,15 @@ impl App {
         Self {
             config,
             screen: Screen::Landing,
-            focused_pane: Pane::Menu,
-            selected_landing_entry: 0,
-            revsets: vec![
-                RevsetSummary::new(
-                    "@",
-                    "Current working copy change",
-                    &["teatui-ui"],
-                    "3 files changed, +142 -12",
-                ),
-                RevsetSummary::new(
-                    "heads(trunk()..)",
-                    "Current stack above trunk",
-                    &[],
-                    "8 files changed, +426 -38",
-                ),
-                RevsetSummary::new("@-", "Parent change", &["main@origin"], "clean baseline"),
-            ],
-            selected_revset: 0,
-            selected_field: 0,
-            selected_secondary_item: 0,
+            focus: Focus::Menu,
+            input_mode: InputMode::Normal,
+            repo: RepoState::default(),
+            landing: LandingState::default(),
+            generate: GenerateState::demo(),
+            pull_requests: ListState::default(),
+            issues: ListState::default(),
+            logs: LogState::default(),
+            jobs: JobRegistry::default(),
             should_quit: false,
         }
     }
@@ -134,6 +109,7 @@ impl App {
                 AppEvent::Tick => Action::Tick,
                 AppEvent::Key(key) => self.handle_key(key),
                 AppEvent::Resize(_, _) => Action::Render,
+                AppEvent::Job(result) => Action::JobResult(result),
             };
 
             self.update(action);
@@ -166,78 +142,128 @@ impl App {
     fn update(&mut self, action: Action) {
         match action {
             Action::Quit => self.should_quit = true,
-            Action::Back => match self.screen {
-                Screen::Landing => {}
-                Screen::Generate | Screen::PullRequests | Screen::Issues => {
-                    self.screen = Screen::Landing;
-                    self.focused_pane = Pane::Menu;
+            Action::Back => {
+                if self.input_mode == InputMode::Editing {
+                    self.input_mode = InputMode::Normal;
+                    return;
+                }
+
+                match self.screen {
+                    Screen::Landing => {}
+                    Screen::Generate | Screen::PullRequests | Screen::Issues => {
+                        self.screen = Screen::Landing;
+                        self.focus = Focus::Menu;
+                        self.input_mode = InputMode::Normal;
+                    }
+                }
+            }
+            Action::Navigate(Direction::Up) => match self.screen {
+                Screen::Generate if self.focus == Focus::Form => {
+                    self.generate.selected_field = self.generate.selected_field.saturating_sub(1);
+                }
+                Screen::Landing => {
+                    self.landing.selected_entry = self.landing.selected_entry.saturating_sub(1);
+                }
+                Screen::PullRequests => {
+                    self.pull_requests.selected_item =
+                        self.pull_requests.selected_item.saturating_sub(1);
+                }
+                Screen::Issues => {
+                    self.issues.selected_item = self.issues.selected_item.saturating_sub(1);
+                }
+                _ => {
+                    self.generate.selected_revset = self.generate.selected_revset.saturating_sub(1);
                 }
             },
-            Action::Navigate(Direction::Up) => {
-                if self.screen == Screen::Generate && self.focused_pane == Pane::Form {
-                    self.selected_field = self.selected_field.saturating_sub(1);
-                } else if self.screen == Screen::Landing {
-                    self.selected_landing_entry = self.selected_landing_entry.saturating_sub(1);
-                } else if self.screen == Screen::PullRequests || self.screen == Screen::Issues {
-                    self.selected_secondary_item = self.selected_secondary_item.saturating_sub(1);
-                } else {
-                    self.selected_revset = self.selected_revset.saturating_sub(1);
+            Action::Navigate(Direction::Down) => match self.screen {
+                Screen::Generate if self.focus == Focus::Form => {
+                    if self.generate.selected_field < FORM_FIELDS.len().saturating_sub(1) {
+                        self.generate.selected_field += 1;
+                    }
                 }
-            }
-            Action::Navigate(Direction::Down) => {
-                if self.screen == Screen::Generate && self.focused_pane == Pane::Form {
-                    if self.selected_field < FORM_FIELDS.len().saturating_sub(1) {
-                        self.selected_field += 1;
+                Screen::Landing => {
+                    if self.landing.selected_entry < 2 {
+                        self.landing.selected_entry += 1;
                     }
-                } else if self.screen == Screen::Landing {
-                    if self.selected_landing_entry < LANDING_ENTRIES.len().saturating_sub(1) {
-                        self.selected_landing_entry += 1;
-                    }
-                } else if self.screen == Screen::PullRequests || self.screen == Screen::Issues {
-                    if self.selected_secondary_item < SECONDARY_ITEMS.len().saturating_sub(1) {
-                        self.selected_secondary_item += 1;
-                    }
-                } else if self.selected_revset < self.revsets.len().saturating_sub(1) {
-                    self.selected_revset += 1;
                 }
-            }
+                Screen::PullRequests => {
+                    if self.pull_requests.selected_item < 2 {
+                        self.pull_requests.selected_item += 1;
+                    }
+                }
+                Screen::Issues => {
+                    if self.issues.selected_item < 2 {
+                        self.issues.selected_item += 1;
+                    }
+                }
+                _ => {
+                    if self.generate.selected_revset < self.generate.revsets.len().saturating_sub(1)
+                    {
+                        self.generate.selected_revset += 1;
+                    }
+                }
+            },
             Action::Focus(Direction::Up) => {
-                self.focused_pane = match self.focused_pane {
-                    Pane::Menu => Pane::Menu,
-                    Pane::Form => Pane::Menu,
-                    Pane::Preview => Pane::Form,
+                self.focus = match self.focus {
+                    Focus::Menu => Focus::Menu,
+                    Focus::Form => Focus::Menu,
+                    Focus::Preview => Focus::Form,
                 };
             }
             Action::Focus(Direction::Down) => {
-                self.focused_pane = match self.focused_pane {
-                    Pane::Menu => Pane::Form,
-                    Pane::Form => Pane::Preview,
-                    Pane::Preview => Pane::Preview,
+                self.focus = match self.focus {
+                    Focus::Menu => Focus::Form,
+                    Focus::Form => Focus::Preview,
+                    Focus::Preview => Focus::Preview,
                 };
             }
-            Action::Select => {
-                if self.screen == Screen::Landing {
-                    self.screen = LANDING_ENTRIES[self.selected_landing_entry];
-                    self.focused_pane = Pane::Menu;
-                } else if self.screen == Screen::Generate && self.focused_pane == Pane::Menu {
-                    self.focused_pane = Pane::Form;
-                    self.selected_field = 0;
-                } else if self.focused_pane == Pane::Form {
-                    tracing::info!("Edit field: {}", self.selected_field_name());
+            Action::Select => match self.screen {
+                Screen::Landing => {
+                    self.screen = match self.landing.selected_entry {
+                        0 => Screen::Generate,
+                        1 => Screen::PullRequests,
+                        _ => Screen::Issues,
+                    };
+                    self.focus = Focus::Menu;
+                    self.input_mode = InputMode::Normal;
+                    if self.screen == Screen::Generate {
+                        self.generate.phase = GeneratePhase::SelectingRevset;
+                    }
                 }
-            }
+                Screen::Generate if self.focus == Focus::Menu => {
+                    self.focus = Focus::Form;
+                    self.generate.focus = Focus::Form;
+                    self.generate.phase = GeneratePhase::EditingForm;
+                    self.generate.selected_field = 0;
+                    self.input_mode = InputMode::Normal;
+                }
+                Screen::Generate if self.focus == Focus::Form => {
+                    self.input_mode = InputMode::Editing;
+                }
+                _ => {}
+            },
             Action::Edit => {
-                if self.screen == Screen::Generate && self.focused_pane == Pane::Form {
-                    tracing::info!("Edit field: {}", self.selected_field_name());
+                if self.screen == Screen::Generate && self.focus == Focus::Form {
+                    self.input_mode = InputMode::Editing;
+                    self.generate.focus = Focus::Form;
                 }
             }
             Action::Generate => {
                 if self.screen == Screen::Generate {
-                    tracing::info!(
-                        "Generate PR prompt for revset: {}",
-                        self.selected_revset().label()
-                    );
+                    self.generate.phase = GeneratePhase::Generating;
+                    self.logs.entries.push(format!(
+                        "generate prompt for revset {}",
+                        self.generate.selected_revset().label()
+                    ));
                 }
+            }
+            Action::JobResult(result) => {
+                self.jobs.status = result.status;
+                self.jobs.last_result = Some(result.clone());
+                self.logs.entries.push(format!(
+                    "job {} finished with {:?}",
+                    result.name, result.status
+                ));
             }
             Action::Error(msg) => {
                 tracing::error!("Error: {}", msg);
@@ -250,48 +276,40 @@ impl App {
         self.screen
     }
 
-    pub fn landing_entries(&self) -> &'static [Screen] {
-        &LANDING_ENTRIES
+    pub fn focus(&self) -> Focus {
+        self.focus
     }
 
-    pub fn selected_landing_entry_index(&self) -> usize {
-        self.selected_landing_entry
+    pub fn input_mode(&self) -> InputMode {
+        self.input_mode
     }
 
-    pub fn revsets(&self) -> &[RevsetSummary] {
-        &self.revsets
+    pub fn repo(&self) -> &RepoState {
+        &self.repo
     }
 
-    pub fn selected_revset_index(&self) -> usize {
-        self.selected_revset
+    pub fn landing(&self) -> &LandingState {
+        &self.landing
     }
 
-    pub fn selected_revset(&self) -> &RevsetSummary {
-        &self.revsets[self.selected_revset]
+    pub fn generate(&self) -> &GenerateState {
+        &self.generate
     }
 
-    pub fn form_fields(&self) -> &'static [&'static str] {
-        &FORM_FIELDS
+    pub fn pull_requests(&self) -> &ListState {
+        &self.pull_requests
     }
 
-    pub fn selected_field_index(&self) -> usize {
-        self.selected_field
+    pub fn issues(&self) -> &ListState {
+        &self.issues
     }
 
-    pub fn selected_field_name(&self) -> &'static str {
-        FORM_FIELDS[self.selected_field]
+    pub fn logs(&self) -> &LogState {
+        &self.logs
     }
 
-    pub fn focused_pane(&self) -> Pane {
-        self.focused_pane
-    }
-
-    pub fn secondary_items(&self) -> &'static [&'static str] {
-        &SECONDARY_ITEMS
-    }
-
-    pub fn selected_secondary_item_index(&self) -> usize {
-        self.selected_secondary_item
+    pub fn jobs(&self) -> &JobRegistry {
+        &self.jobs
     }
 
     #[allow(dead_code)]

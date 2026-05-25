@@ -10,6 +10,7 @@ pub enum Action {
     Edit,
     Generate,
     Back,
+    JobResult(crate::event::JobResult),
     Error(String),
 }
 
