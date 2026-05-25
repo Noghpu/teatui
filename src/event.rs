@@ -6,6 +6,8 @@ use futures::StreamExt;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::{select, time::interval_at};
 
+use crate::repo::RepoState;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobResult {
     pub id: u64,
@@ -36,21 +38,28 @@ pub enum AppEvent {
     Key(KeyEvent),
     Resize(u16, u16),
     Job(JobResult),
+    Repo(Box<RepoState>),
 }
 
 pub struct EventHandler {
     events: EventStream,
     tick: tokio::time::Interval,
     jobs: UnboundedReceiver<JobResult>,
+    repo: UnboundedReceiver<Box<RepoState>>,
 }
 
 impl EventHandler {
-    pub fn new(tick_rate: Duration, jobs: UnboundedReceiver<JobResult>) -> Self {
+    pub fn new(
+        tick_rate: Duration,
+        jobs: UnboundedReceiver<JobResult>,
+        repo: UnboundedReceiver<Box<RepoState>>,
+    ) -> Self {
         let start = Instant::now() + tick_rate;
         Self {
             events: EventStream::new(),
             tick: interval_at(start.into(), tick_rate),
             jobs,
+            repo,
         }
     }
 
@@ -70,6 +79,9 @@ impl EventHandler {
             }
             Some(job) = self.jobs.recv() => {
                 Ok(AppEvent::Job(job))
+            }
+            Some(repo) = self.repo.recv() => {
+                Ok(AppEvent::Repo(repo))
             }
         }
     }

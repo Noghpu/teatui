@@ -8,6 +8,7 @@ use crate::command::CommandRunner;
 use crate::config::Config;
 use crate::event::{AppEvent, EventHandler, JobResult, JobStatus};
 use crate::generate::{Focus, GeneratePhase, GenerateState, InputMode};
+use crate::repo::{RepoDiscovery, RepoState};
 use crate::tui::Tui;
 use crate::ui;
 
@@ -28,16 +29,6 @@ impl Screen {
             Self::Issues => "Manage Issues",
         }
     }
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct RepoState {
-    pub workspace_root: Option<PathBuf>,
-    pub inside_workspace: bool,
-    pub gitea_remote: Option<String>,
-    pub tea_authenticated: Option<bool>,
-    pub ollama_reachable: Option<bool>,
-    pub base_branch: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -124,6 +115,7 @@ impl JobRegistry {
 pub struct App {
     config: Config,
     command_runner: CommandRunner,
+    repo_discovery: RepoDiscovery,
     screen: Screen,
     focus: Focus,
     input_mode: InputMode,
@@ -138,14 +130,20 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: Config, command_runner: CommandRunner) -> Self {
+    pub fn new(
+        config: Config,
+        command_runner: CommandRunner,
+        repo_discovery: RepoDiscovery,
+    ) -> Self {
+        let repo = RepoState::bootstrap(&config);
         Self {
             config,
             command_runner,
+            repo_discovery,
             screen: Screen::Landing,
             focus: Focus::Menu,
             input_mode: InputMode::Normal,
-            repo: RepoState::default(),
+            repo,
             landing: LandingState::default(),
             generate: GenerateState::demo(),
             pull_requests: ListState::default(),
@@ -165,6 +163,7 @@ impl App {
                 AppEvent::Key(key) => self.handle_key(key),
                 AppEvent::Resize(_, _) => Action::Render,
                 AppEvent::Job(result) => Action::JobResult(result),
+                AppEvent::Repo(repo) => Action::RepoUpdated(repo),
             };
 
             self.update(action);
@@ -191,6 +190,7 @@ impl App {
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => Action::Focus(Direction::Down),
             KeyCode::Char('i') => Action::Edit,
             KeyCode::Char('g') => Action::Generate,
+            KeyCode::Char('r') => Action::Refresh,
             KeyCode::Enter => Action::Select,
             _ => Action::Tick,
         }
@@ -223,6 +223,8 @@ impl App {
             Action::CommitEdit => self.finish_editing(true),
             Action::CancelEdit => self.finish_editing(false),
             Action::Generate => self.generate_pr(),
+            Action::Refresh => self.refresh(),
+            Action::RepoUpdated(repo) => self.apply_repo(*repo),
             Action::JobResult(result) => self.record_job_result(result),
             Action::Error(msg) => {
                 tracing::error!("Error: {}", msg);
@@ -292,7 +294,13 @@ impl App {
 
     fn open_selected_landing_entry(&mut self) {
         self.screen = match self.landing.selected_entry {
-            0 => Screen::Generate,
+            0 if self.repo.inside_workspace => Screen::Generate,
+            0 => {
+                self.logs
+                    .entries
+                    .push("Generate PR requires a jj workspace".into());
+                Screen::Landing
+            }
             1 => Screen::PullRequests,
             _ => Screen::Issues,
         };
@@ -331,13 +339,33 @@ impl App {
     fn generate_pr(&mut self) {
         if self.screen == Screen::Generate {
             self.generate.phase = GeneratePhase::Generating;
-            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let cwd =
+                self.repo.workspace_root.clone().unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                });
             let command = self.command_runner.jj_status_command(cwd);
             let job_id = self.command_runner.spawn(command);
             self.logs.entries.push(format!(
                 "job #{job_id} collecting status for revset {}",
                 self.generate.selected_revset().label(),
             ));
+        }
+    }
+
+    pub fn refresh(&self) {
+        self.repo_discovery.refresh();
+    }
+
+    fn apply_repo(&mut self, repo: RepoState) {
+        let inside_workspace = repo.inside_workspace;
+        self.repo = repo;
+
+        if self.screen == Screen::Generate && !inside_workspace {
+            self.logs
+                .entries
+                .push("Generate PR blocked: cwd is not inside a jj workspace".into());
+            self.screen = Screen::Landing;
+            self.focus = Focus::Menu;
         }
     }
 

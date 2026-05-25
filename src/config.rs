@@ -4,7 +4,7 @@ use std::time::Duration;
 use color_eyre::eyre::{Result, WrapErr};
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
     #[serde(with = "humantime_serde")]
@@ -14,7 +14,7 @@ pub struct Config {
     pub pr: PrConfig,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct OllamaConfig {
     pub base_url: String,
@@ -29,7 +29,7 @@ pub struct CommandConfig {
     pub tea: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct PrConfig {
     pub default_base: String,

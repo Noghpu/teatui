@@ -13,7 +13,9 @@ pub enum Action {
     CommitEdit,
     CancelEdit,
     Generate,
+    Refresh,
     Back,
+    RepoUpdated(Box<crate::repo::RepoState>),
     JobResult(crate::event::JobResult),
     Error(String),
 }

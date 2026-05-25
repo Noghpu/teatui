@@ -129,22 +129,43 @@ fn render_work(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 Some(path) => format!("Workspace: {}", path.display()),
                 None => "Workspace: pending".to_string(),
             }),
-            status_line("Workspace", app.repo().inside_workspace, "detected"),
-            status_line("Gitea remote", app.repo().gitea_remote.is_some(), "pending"),
+            status_line("jj", app.repo().jj.label()),
+            status_line("git", app.repo().git.label()),
+            status_line("tea", app.repo().tea.label()),
             status_line(
-                "tea auth",
-                app.repo().tea_authenticated.unwrap_or(false),
-                "pending",
+                "Workspace",
+                if app.repo().inside_workspace {
+                    "detected"
+                } else {
+                    "missing"
+                },
             ),
-            status_line(
-                "Ollama",
-                app.repo().ollama_reachable.unwrap_or(false),
-                "pending",
-            ),
-            Line::from(match &app.repo().base_branch {
-                Some(branch) => format!("Base branch: {}", branch),
-                None => "Base branch: pending".to_string(),
+            Line::from(match &app.repo().remote {
+                Some(remote) => {
+                    let warning = remote
+                        .warning
+                        .as_ref()
+                        .map(|warning| format!(" ({warning})"))
+                        .unwrap_or_default();
+                    format!(
+                        "Remote: {}@{}{}",
+                        remote.display_name(),
+                        remote.host,
+                        warning
+                    )
+                }
+                None => "Remote: pending".to_string(),
             }),
+            Line::from(match &app.repo().remote {
+                Some(remote) => format!("Remote URL: {}", remote.raw_url),
+                None => "Remote URL: pending".to_string(),
+            }),
+            Line::from(format!("Base branch: {}", app.repo().base_branch.name)),
+            Line::from(format!(
+                "Ollama: {} {}",
+                app.repo().ollama_base_url,
+                app.repo().ollama_model
+            )),
             Line::from(format!("Logs: {}", app.logs().entries.len())),
             Line::from(""),
             Line::from("Select a mode on the left.".dim()),
@@ -205,12 +226,25 @@ fn render_work(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
 fn render_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let lines = match app.screen() {
-        Screen::Landing => vec![
-            Line::from("Landing".bold()),
-            Line::from(""),
-            Line::from("Generate PR, Manage PRs, and Manage Issues are separate modes."),
-            Line::from("Press Enter to open the selected mode.".dim()),
-        ],
+        Screen::Landing => {
+            let mut lines = vec![
+                Line::from("Landing".bold()),
+                Line::from(""),
+                Line::from("Generate PR, Manage PRs, and Manage Issues are separate modes."),
+                Line::from("Press Enter to open the selected mode.".dim()),
+            ];
+
+            let blockers = app.repo().blocker_lines();
+            if !blockers.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from("Setup blockers".bold()));
+                for blocker in blockers {
+                    lines.push(Line::from(format!("- {blocker}")).red());
+                }
+            }
+
+            lines
+        }
         Screen::Generate => {
             let revset = app.generate().selected_revset();
             let mut lines = vec![
@@ -226,6 +260,11 @@ fn render_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 Line::from(format!(
                     "focused field: {}",
                     app.generate().selected_field_name()
+                )),
+                Line::from(format!(
+                    "base branch: {} ({:?})",
+                    app.repo().base_branch.name,
+                    app.repo().base_branch.source
                 )),
             ];
 
@@ -313,6 +352,8 @@ fn render_help(frame: &mut Frame, area: ratatui::layout::Rect) {
         "edit ".dim(),
         " g ".bold().cyan(),
         "generate ".dim(),
+        " r ".bold().cyan(),
+        "refresh ".dim(),
         " Esc ".bold().cyan(),
         "back ".dim(),
         " q ".bold().cyan(),
@@ -329,10 +370,9 @@ fn focused_title(title: &'static str, focused: bool) -> Line<'static> {
     }
 }
 
-fn status_line(label: &'static str, active: bool, fallback: &'static str) -> Line<'static> {
-    if active {
-        Line::from(format!("{label}: detected"))
-    } else {
-        Line::from(format!("{label}: {fallback}")).dim()
+fn status_line(label: &'static str, value: &'static str) -> Line<'static> {
+    match value {
+        "available" | "detected" => Line::from(format!("{label}: {value}")),
+        _ => Line::from(format!("{label}: {value}")).dim(),
     }
 }
