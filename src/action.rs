@@ -7,6 +7,9 @@ pub enum Action {
     Navigate(Direction),
     Focus(Direction),
     Select,
+    Edit,
+    Generate,
+    Back,
     Error(String),
 }
 

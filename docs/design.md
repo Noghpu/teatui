@@ -96,17 +96,24 @@ Every mutating step is shown in a confirmation view before execution.
 
 ## UI Model
 
-The app uses the multi-view Ratatui component template. The UI follows a
-compact, keyboard-first layout inspired by `octo.nvim`:
+The app uses the multi-view Ratatui component template internally, but the
+first user-facing model is a focused Landing screen plus a Generate PR
+workspace. The Generate PR workspace follows a compact, keyboard-first layout
+inspired by `octo.nvim`:
 
-- Views: `Landing`, `Generate PR`, `Issues`, `PRs`, `Logs`.
-- Left navigation rail: one entry per view.
-- Center list/work area: selected workflow items or form fields.
-- Right preview pane: diff summary, generated PR body, issue body, or PR body.
+- Landing: operational dashboard and entry point.
+- Generate PR: three-pane workflow for selecting a revset, editing PR fields,
+  previewing context, generating the PR draft, and confirming execution.
+- Left pane in Generate PR: available revsets with descriptions and bookmarks,
+  not app navigation.
+- Center pane in Generate PR: PR form and field navigation.
+- Right pane in Generate PR: selected revset detail, prompt manifest, generated
+  PR draft, or command preview.
 - Bottom command/status bar: mode, current repo, background job state, help.
 
 The landing view is intentionally useful, not a marketing screen. It should show
 current repository detection, auth/tool availability, and the next likely action.
+Exiting Generate PR returns to Landing.
 
 Primary modes:
 
@@ -115,18 +122,25 @@ Primary modes:
 - `Review`: inspect generated PR output and proposed commands.
 - `Running`: background command or LLM request in progress.
 
-Initial keybindings:
+Initial keybindings outside text input:
 
 - `j`/`k` or arrows: move selection.
-- `h`/`l` or tab/backtab: move focus between panes.
-- `Enter`: open item or activate command.
-- `g`: generate PR proposal.
-- `e`: edit current generated field or comment.
+- `h`/`l` or tab/backtab: move focus between panes when that movement is valid.
+- `Enter`: select the current revset or enter/edit the focused form field.
+- `i`: enter/edit the focused form field.
+- `g`: generate PR proposal from the current form values.
 - `r`: refresh current view.
 - `c`: comment on selected issue or PR.
-- `q`: quit or close modal.
+- `Esc`: leave edit mode, close modal, or exit Generate PR back to Landing.
+- `q`: quit from Landing, or close the current modal.
 
-### View Responsibilities
+Text input handling is mode-specific. When a text field or text area is in edit
+mode, printable keys insert characters and must not trigger global keybinds.
+For example, typing `g`, `c`, `q`, `j`, or `k` into a title/body field inserts
+that character. Navigation keybinds are active only in navigation/review modes,
+not while editing text.
+
+### Screen Responsibilities
 
 #### Landing
 
@@ -150,37 +164,78 @@ Preview pane:
 
 #### Generate PR
 
-The generate view is the primary workflow. It is a small state machine rather
-than one screen.
+The Generate PR workspace is the primary workflow. It is a small state machine
+rather than one screen.
 
 States:
 
-- `Idle`: no context loaded yet.
+- `SelectingRevset`: focus starts in the left pane on available revsets.
+- `EditingForm`: focus is in the center pane, navigating or editing PR fields.
 - `ContextReady`: jj/git/tea context collected and prompt can be inspected.
 - `Generating`: Ollama request is running.
-- `DraftReady`: branch, title, body, and notes are available for review.
+- `DraftReady`: generated branch, title/body suggestions, and notes are
+  available for review.
 - `Confirming`: commands are shown before mutation.
 - `Executing`: branch, push, or `tea` command is running.
 - `Complete`: PR URL and final command log are available.
 - `Failed`: recoverable failure with retained context and draft.
 
-Work pane:
+Left pane:
 
-- Revset selector, initially current stack.
-- Optional user instruction input.
-- Action list: collect context, preview prompt, generate, edit draft, create PR.
-- Confirmation checklist for branch/push/PR creation.
+- Available revsets suitable for PR creation.
+- Each row shows a compact revset label, short description, and bookmark names
+  when present.
+- The default selection is the most likely current stack, but the user must be
+  able to move before proceeding.
+- Selecting with `Enter` moves focus to the center pane and sets the form's
+  `head` picker default to that revset.
 
-Preview pane:
+Center pane:
 
-- Context summary before generation.
-- Prompt preview when requested.
-- Generated branch/title/body after generation.
+- PR form with field navigation using `j`/`k` or arrows.
+- Minimum fields:
+  - `head`: picker, defaulting to the selected left-pane revset.
+  - `branch name`: text input, defaulting to an existing bookmark on `head` or
+    empty if no bookmark exists.
+  - `base`: picker, defaulting to `main@origin`.
+  - `title`: text input, initially empty.
+  - `description`: text area, initially empty.
+- Optional fields:
+  - `labels`: picker/multi-picker.
+  - `assignees`: picker/multi-picker.
+  - `milestone`: picker.
+- In navigation mode, `j`/`k` moves between fields and `i` or `Enter` starts
+  editing the focused field.
+- For text inputs/text areas, printable keys insert text until edit mode exits.
+- For pickers, the first implementation can use a text input with fuzzy
+  filtering over suggestions; a dropdown-like popup can replace it later if it
+  behaves better in terminal layouts.
+
+Right pane while selecting revsets:
+
+- Full description for the selected revset.
+- Bookmark list.
+- Commit/change count.
+- Diff stats.
+- Recent log entries.
+- Warnings, such as conflicted state or ambiguous stack shape.
+
+Right pane while editing/generating:
+
+- Prompt manifest before generation.
+- Prompt preview on request.
+- Generated PR draft after generation.
 - Proposed external commands before execution.
 
-#### Issues
+All form inputs are included in the generated prompt when `g` is pressed from
+navigation/review mode. User-provided form values should be treated as stronger
+intent than the model's inferred defaults. For example, a manually typed title
+should be included as a requested title, not overwritten silently.
 
-The issues view is intentionally shallow.
+#### Issues Later
+
+The issues screen is intentionally shallow and should not return as a left-pane
+navigation item inside Generate PR.
 
 Work pane:
 
@@ -197,9 +252,10 @@ Preview pane:
 Out of scope: editing metadata, closing issues, assignment, project boards,
 milestones, bulk actions.
 
-#### Pull Requests
+#### Pull Requests Later
 
-The PRs view mirrors Issues with PR-specific fields.
+The PRs screen mirrors Issues with PR-specific fields and should not return as a
+left-pane navigation item inside Generate PR.
 
 Work pane:
 
@@ -216,9 +272,11 @@ Preview pane:
 Out of scope: review approvals, line comments, merge operations, checks
 management, reviewer assignment.
 
-#### Logs
+#### Logs Later
 
-The logs view is a structured command and job history.
+The logs screen is a structured command and job history. It can be reachable
+from Landing or as a modal/popup later, but it should not occupy the Generate PR
+left pane.
 
 Work pane:
 
@@ -237,7 +295,7 @@ Preview pane:
 
 The app starts from the Ratatui component template and uses an Elm-style loop:
 
-- `App`: in-memory state, selected view, focused pane, forms, job status.
+- `App`: in-memory state, active screen, focused pane, PR form, job status.
 - `Message`: user input, timer ticks, background command results, LLM results.
 - `update`: pure state transitions plus commands to spawn async work.
 - `view`: renders lists, previews, modals, and status bars.
@@ -265,7 +323,7 @@ generic widget maps.
 struct App {
     config: Config,
     repo: RepoState,
-    active_view: View,
+    active_screen: Screen,
     focus: Focus,
     generate: GenerateState,
     issues: IssueState,
@@ -278,9 +336,15 @@ struct App {
 Important domain types:
 
 - `RepoState`: workspace root, remote URL, owner/repo, base branch, selected
-  revset, tool availability.
+  revset, available revsets, bookmarks, tool availability.
 - `GenerateState`: current phase, context bundle, generated draft, editable
-  fields, confirmation state.
+  form fields, focused field, edit mode, confirmation state.
+- `RevsetSummary`: revset expression, short description, bookmarks, change
+  count, commit IDs, diff stats, warnings.
+- `PrForm`: head revset, branch name, base revset, title, description, labels,
+  assignees, milestone.
+- `FieldState`: display value, edit buffer, dirty flag, validation errors, and
+  picker suggestions when applicable.
 - `ContextBundle`: the exact data sent to the model plus size/truncation
   metadata.
 - `GeneratedDraft`: branch name, title, body, review notes, raw model response.
@@ -298,11 +362,19 @@ KeyEvent -> Action -> update(App) -> CommandRequest? -> JobResult -> Action
 
 Examples:
 
-- `g` in Generate/Idle starts context collection.
-- `g` in Generate/ContextReady starts Ollama generation.
-- `Enter` in Generate/DraftReady opens the confirmation state.
+- `Enter` in Generate/SelectingRevset selects the highlighted revset and moves
+  focus to the center form.
+- `j`/`k` in Generate/EditingForm navigation mode moves between form fields.
+- `i` or `Enter` on a form field enters edit mode for that field.
+- Printable keys in edit mode update the field buffer and never trigger global
+  keybinds.
+- `Esc` in edit mode returns to form navigation mode without leaving Generate
+  PR.
+- `Esc` in Generate PR navigation/review mode returns to Landing.
+- `g` in Generate PR navigation/review mode collects context and sends the
+  prompt using the selected revset plus every current form value.
 - `Enter` in Generate/Confirming starts the PR execution job.
-- `r` refreshes the current view only.
+- `r` refreshes the active screen.
 - `c` in Issues/PRs opens a comment input modal.
 
 Async jobs should report progress through channels back into the event loop.
@@ -401,9 +473,11 @@ Prompt sections:
 - Output contract: strict JSON, no Markdown fence, no extra commentary.
 - Repository summary: root, remotes, trunk/base, selected revset.
 - Change metadata: jj status, log, descriptions.
+- User form values: selected head, branch name, base, title, description,
+  labels, assignees, and milestone when set.
 - Diff context: complete selected diff when size allows, otherwise summarized
   file-level context plus explicit truncation notes.
-- User intent: optional notes typed in the UI.
+- User intent: explicit PR form values and optional notes typed in the UI.
 - Writing rules: concise title, conventional branch name, PR body with summary,
   rationale, testing, risks, and review notes.
 - Safety rules: do not invent tests, reviewers, issue links, or behavior not
@@ -426,6 +500,7 @@ manifest describing what was included:
 struct PromptManifest {
     selected_revset: String,
     base_branch: String,
+    form_values: PrFormManifest,
     included_sections: Vec<PromptSection>,
     omitted_sections: Vec<OmittedSection>,
     byte_count: usize,
@@ -473,6 +548,9 @@ Diff:
 ...
 
 User instructions:
+...
+
+PR form values:
 ...
 ```
 
@@ -569,13 +647,15 @@ The next slices should keep the app usable at each step:
 
 1. Repo/tool detection in Landing with log output.
 2. Shared async command runner and job registry.
-3. jj context collection for the Generate view.
-4. Prompt manifest and prompt preview.
-5. Ollama client and strict JSON parsing.
-6. Draft review/edit state.
-7. Branch/push/`tea` execution preview and confirmation.
-8. Minimal Issues list/detail/comment.
-9. Minimal PRs list/detail/comment.
+3. Generate PR revset list in the left pane with descriptions and bookmarks.
+4. Revset detail preview in the center/right panes while selecting.
+5. Center-pane PR form with navigation mode, edit mode, and picker behavior.
+6. Prompt manifest and prompt preview using all current form values.
+7. Ollama client and strict JSON parsing.
+8. Draft review/edit state.
+9. Branch/push/`tea` execution preview and confirmation.
+10. Minimal Issues list/detail/comment.
+11. Minimal PRs list/detail/comment.
 
 ## Open Questions
 
@@ -589,13 +669,18 @@ The next slices should keep the app usable at each step:
   depending on repo configuration?
 - How large should the initial prompt byte budget be for local Ollama versus
   the on-prem model?
+- Should the Generate PR form allow manual entry of a head revset that is not
+  in the left-pane revset list?
+- Which terminal picker behavior is better for this app: fuzzy text input with
+  suggestions, or a dropdown-like popup?
 
 ## Milestones
 
 1. Project scaffold: component-template Ratatui app, docs, config skeleton.
 2. Repo detection: show current jj repo status and log in the TUI.
-3. Prompt assembly: collect context and render prompt preview.
-4. Ollama generation: call local endpoint and parse strict JSON.
-5. PR review screen: edit branch, title, and body before execution.
-6. PR execution: create branch, push, and call `tea` to open PR.
-7. Simple issue/PR listing and comment commands.
+3. Generate PR revset selector and PR form.
+4. Prompt assembly: collect context and render prompt preview.
+5. Ollama generation: call local endpoint and parse strict JSON.
+6. PR review screen: edit branch, title, and body before execution.
+7. PR execution: create branch, push, and call `tea` to open PR.
+8. Simple issue/PR listing and comment commands.
