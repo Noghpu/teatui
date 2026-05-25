@@ -1,6 +1,4 @@
-#![allow(dead_code)]
-
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -16,9 +14,10 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandKind {
     Jj,
+    #[allow(dead_code)]
     Git,
+    #[allow(dead_code)]
     Tea,
-    Custom,
 }
 
 impl CommandKind {
@@ -27,7 +26,6 @@ impl CommandKind {
             Self::Jj => "jj",
             Self::Git => "git",
             Self::Tea => "tea",
-            Self::Custom => "custom",
         }
     }
 }
@@ -66,6 +64,7 @@ impl ExternalCommand {
         self
     }
 
+    #[allow(dead_code)]
     pub fn display(&self) -> String {
         self.render(false)
     }
@@ -90,7 +89,9 @@ impl ExternalCommand {
 
 fn redact_arg(index: usize, arg: &str, args: &[String]) -> String {
     let sensitive_flag = matches!(
-        args.get(index.saturating_sub(1)).map(String::as_str),
+        args.get(index.saturating_sub(1))
+            .map(|previous| previous.to_ascii_lowercase())
+            .as_deref(),
         Some("--token" | "--password" | "--secret" | "--auth" | "--header")
     );
 
@@ -99,19 +100,29 @@ fn redact_arg(index: usize, arg: &str, args: &[String]) -> String {
     }
 
     if let Some((prefix, _)) = arg.split_once('=')
-        && matches!(
-            prefix,
-            "--token" | "--password" | "--secret" | "token" | "password" | "secret"
-        )
+        && is_sensitive_key(prefix)
     {
         return format!("{prefix}=<redacted>");
     }
 
-    if arg.contains("Authorization:") || arg.starts_with("Bearer ") {
+    let lower = arg.to_ascii_lowercase();
+    if lower.contains("authorization:") || lower.starts_with("bearer ") {
         return "<redacted>".into();
     }
 
     quote_arg(arg)
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let normalized = key
+        .trim_start_matches('-')
+        .replace(['-', '_'], "")
+        .to_ascii_lowercase();
+
+    matches!(
+        normalized.as_str(),
+        "token" | "password" | "secret" | "auth" | "apikey" | "accesstoken"
+    )
 }
 
 fn quote_arg(arg: &str) -> String {
@@ -141,8 +152,10 @@ impl CommandResult {
             name: self.kind.as_str().to_string(),
             command: self.display,
             status: self.status,
+            duration: Some(self.duration),
             stdout: self.stdout,
             stderr: self.stderr,
+            timed_out: self.timed_out,
         }
     }
 }
@@ -172,8 +185,10 @@ impl CommandRunner {
             name: command.kind.as_str().to_string(),
             command: command.redacted_display(),
             status: JobStatus::Queued,
+            duration: None,
             stdout: String::new(),
             stderr: String::new(),
+            timed_out: false,
         };
         let _ = self.job_tx.send(queued);
 
@@ -184,8 +199,10 @@ impl CommandRunner {
                 name: command.kind.as_str().to_string(),
                 command: command.redacted_display(),
                 status: JobStatus::Running,
+                duration: None,
                 stdout: String::new(),
                 stderr: String::new(),
+                timed_out: false,
             };
             let _ = job_tx.send(running);
 
@@ -206,6 +223,7 @@ impl CommandRunner {
         .with_timeout(self.default_timeout)
     }
 
+    #[allow(dead_code)]
     pub fn git_status_command(&self, cwd: impl Into<PathBuf>) -> ExternalCommand {
         ExternalCommand::new(
             CommandKind::Git,
@@ -216,6 +234,7 @@ impl CommandRunner {
         .with_timeout(self.default_timeout)
     }
 
+    #[allow(dead_code)]
     pub fn tea_status_command(&self, cwd: impl Into<PathBuf>) -> ExternalCommand {
         ExternalCommand::new(
             CommandKind::Tea,
@@ -277,14 +296,6 @@ async fn run_command(id: u64, command: ExternalCommand) -> CommandResult {
     }
 }
 
-pub fn runner_from_config(config: &Config, job_tx: UnboundedSender<JobResult>) -> CommandRunner {
-    CommandRunner::new(config, job_tx)
-}
-
-pub fn cwd_from_path(path: &Path) -> PathBuf {
-    path.to_path_buf()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,7 +310,8 @@ mod tests {
                 "--token",
                 "super-secret",
                 "--password=also-secret",
-                "Authorization: Bearer abc123",
+                "--api-key=api-secret",
+                "authorization: Bearer abc123",
             ],
             ".",
         );
@@ -308,6 +320,7 @@ mod tests {
         assert!(display.contains("tea"));
         assert!(!display.contains("super-secret"));
         assert!(!display.contains("also-secret"));
+        assert!(!display.contains("api-secret"));
         assert!(!display.contains("abc123"));
     }
 

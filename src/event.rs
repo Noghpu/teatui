@@ -12,8 +12,10 @@ pub struct JobResult {
     pub name: String,
     pub command: String,
     pub status: JobStatus,
+    pub duration: Option<Duration>,
     pub stdout: String,
     pub stderr: String,
+    pub timed_out: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

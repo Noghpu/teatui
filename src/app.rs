@@ -62,8 +62,10 @@ pub struct JobRecord {
     pub name: String,
     pub command: String,
     pub status: JobStatus,
+    pub duration: Option<std::time::Duration>,
     pub stdout: String,
     pub stderr: String,
+    pub timed_out: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -79,19 +81,39 @@ impl JobRegistry {
             name: result.name.clone(),
             command: result.command.clone(),
             status: result.status,
+            duration: result.duration,
             stdout: result.stdout.clone(),
             stderr: result.stderr.clone(),
+            timed_out: result.timed_out,
         });
 
         entry.name = result.name.clone();
         entry.command = result.command.clone();
         entry.status = result.status;
+        entry.duration = result.duration;
         entry.stdout = result.stdout.clone();
         entry.stderr = result.stderr.clone();
+        entry.timed_out = result.timed_out;
         self.last_result = Some(result);
     }
 
     pub fn status(&self) -> JobStatus {
+        if self
+            .jobs
+            .values()
+            .any(|job| job.status == JobStatus::Running)
+        {
+            return JobStatus::Running;
+        }
+
+        if self
+            .jobs
+            .values()
+            .any(|job| job.status == JobStatus::Queued)
+        {
+            return JobStatus::Queued;
+        }
+
         self.last_result
             .as_ref()
             .map(|result| result.status)
@@ -101,7 +123,6 @@ impl JobRegistry {
 
 pub struct App {
     config: Config,
-    #[allow(dead_code)]
     command_runner: CommandRunner,
     screen: Screen,
     focus: Focus,
@@ -310,9 +331,12 @@ impl App {
     fn generate_pr(&mut self) {
         if self.screen == Screen::Generate {
             self.generate.phase = GeneratePhase::Generating;
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let command = self.command_runner.jj_status_command(cwd);
+            let job_id = self.command_runner.spawn(command);
             self.logs.entries.push(format!(
-                "generate prompt for revset {}",
-                self.generate.selected_revset().label()
+                "job #{job_id} collecting status for revset {}",
+                self.generate.selected_revset().label(),
             ));
         }
     }
