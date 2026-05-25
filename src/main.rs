@@ -7,6 +7,7 @@ mod event;
 mod generate;
 mod jj;
 mod logging;
+mod ollama;
 mod prompt;
 mod repo;
 mod tui;
@@ -51,14 +52,29 @@ async fn main() -> Result<()> {
 
     let mut tui = Tui::new()?;
     let (job_tx, job_rx) = mpsc::unbounded_channel();
+    let (generation_tx, generation_rx) = mpsc::unbounded_channel();
     let (context_tx, context_rx) = mpsc::unbounded_channel();
     let (repo_tx, repo_rx) = mpsc::unbounded_channel();
     let (revset_tx, revset_rx) = mpsc::unbounded_channel();
     let runner = CommandRunner::new(&config, job_tx);
     let discovery = RepoDiscovery::new(config.clone(), repo_tx);
     let revset_discovery = RevsetDiscovery::new(&config, std::env::current_dir()?, revset_tx);
-    let events = EventHandler::new(config.tick_rate, job_rx, context_rx, repo_rx, revset_rx);
-    let mut app = App::new(config, runner, context_tx, discovery, revset_discovery);
+    let events = EventHandler::new(
+        config.tick_rate,
+        job_rx,
+        generation_rx,
+        context_rx,
+        repo_rx,
+        revset_rx,
+    );
+    let mut app = App::new(
+        config,
+        runner,
+        generation_tx,
+        context_tx,
+        discovery,
+        revset_discovery,
+    );
     app.refresh();
 
     tui.enter()?;

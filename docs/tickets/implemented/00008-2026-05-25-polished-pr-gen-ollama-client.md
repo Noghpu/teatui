@@ -2,7 +2,8 @@
 id: 00008-2026-05-25-polished-pr-gen-ollama-client
 created_at: 2026-05-25T21:55:34+02:00
 created_by_model: migration-placeholder
-state: open
+state: implemented
+state_updated_at: 2026-05-25T22:18:41+02:00
 ---
 # Ollama Client
 
@@ -68,3 +69,41 @@ Run `just verify`; include unit tests for generated JSON parsing, missing requir
 ## Risks
 - Ollama-compatible endpoints may differ slightly in response shape.
 - Timeouts and malformed output need enough raw context for debugging without exposing secrets.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: unknown
+- completed_at: 2026-05-25T22:18:41+02:00
+- state: implemented
+
+Completed:
+- Added `src/ollama.rs` with a reqwest-based Ollama client targeting `/api/generate` using non-streaming requests and low temperature.
+- Parsed strict JSON model output into `GeneratedDraft`, with local branch/title/body validation and review-note normalization.
+- Wired Generate PR to move from context-ready into generating, then into draft-ready or failed via a new generation event channel.
+- Logged raw model responses in the app log on both success and failure.
+- Added generation-failure state to keep context visible after malformed output or request errors.
+
+Deviations:
+- Used a dedicated generation event channel instead of reusing job or context plumbing.
+- Logged raw responses as line-by-line log entries rather than a single blob.
+
+Verification:
+- `just verify` passed.
+
+Files changed:
+- `Cargo.toml`
+- `Cargo.lock`
+- `src/action.rs`
+- `src/app.rs`
+- `src/event.rs`
+- `src/generate.rs`
+- `src/main.rs`
+- `src/ollama.rs`
+- `src/ui.rs`
+
+Residual risks:
+- Ollama-compatible servers may vary in wrapper response shape or endpoint behavior.
+- Full end-to-end generation still depends on a live configured Ollama endpoint at runtime.

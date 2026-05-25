@@ -8,9 +8,10 @@ use crate::action::{Action, Direction};
 use crate::command::CommandRunner;
 use crate::config::Config;
 use crate::context::{ContextCollector, ContextResult};
-use crate::event::{AppEvent, EventHandler, JobResult, JobStatus};
+use crate::event::{AppEvent, EventHandler, GenerationResult, JobResult, JobStatus};
 use crate::generate::{Focus, GeneratePhase, GenerateState, InputMode, RevsetSummary};
 use crate::jj::RevsetDiscovery;
+use crate::ollama::OllamaClient;
 use crate::repo::{RepoDiscovery, RepoState};
 use crate::tui::Tui;
 use crate::ui;
@@ -119,6 +120,7 @@ pub struct App {
     config: Config,
     #[allow(dead_code)]
     command_runner: CommandRunner,
+    generation_tx: UnboundedSender<Box<GenerationResult>>,
     context_tx: UnboundedSender<Box<ContextResult>>,
     repo_discovery: RepoDiscovery,
     revset_discovery: RevsetDiscovery,
@@ -139,6 +141,7 @@ impl App {
     pub fn new(
         config: Config,
         command_runner: CommandRunner,
+        generation_tx: UnboundedSender<Box<GenerationResult>>,
         context_tx: UnboundedSender<Box<ContextResult>>,
         repo_discovery: RepoDiscovery,
         revset_discovery: RevsetDiscovery,
@@ -147,6 +150,7 @@ impl App {
         Self {
             config,
             command_runner,
+            generation_tx,
             context_tx,
             repo_discovery,
             revset_discovery,
@@ -173,6 +177,7 @@ impl App {
                 AppEvent::Key(key) => self.handle_key(key),
                 AppEvent::Resize(_, _) => Action::Render,
                 AppEvent::Job(result) => Action::JobResult(result),
+                AppEvent::Generation(result) => Action::GenerationResult(result),
                 AppEvent::Context(context) => Action::Context(context),
                 AppEvent::Repo(repo) => Action::RepoUpdated(repo),
                 AppEvent::Revsets(revsets) => Action::RevsetsUpdated(revsets),
@@ -238,6 +243,7 @@ impl App {
             Action::Generate => self.generate_pr(),
             Action::TogglePromptView => self.toggle_prompt_view(),
             Action::Refresh => self.refresh(),
+            Action::GenerationResult(result) => self.record_generation_result(*result),
             Action::Context(context) => self.apply_context(*context),
             Action::RepoUpdated(repo) => self.apply_repo(*repo),
             Action::RevsetsUpdated(revsets) => self.apply_revsets(revsets.revsets),
@@ -369,39 +375,96 @@ impl App {
                 return;
             }
 
-            self.generate.begin_context_collection();
-            let selected_revset = self.generate.selected_revset().clone();
-            let form = self.generate.form.clone();
-            let collector = ContextCollector::new(
-                &self.config,
-                self.repo.clone(),
-                form,
-                selected_revset.clone(),
-            );
-            let tx = self.context_tx.clone();
-            self.logs.entries.push(format!(
-                "collecting context for revset {}",
-                selected_revset.label(),
-            ));
-            tokio::spawn(async move {
-                let result = tokio::task::spawn_blocking(move || collector.collect())
-                    .await
-                    .unwrap_or_else(|err| {
-                        Err(crate::context::ContextError {
-                            command: "context collection".into(),
-                            message: err.to_string(),
-                            stdout: String::new(),
-                            stderr: String::new(),
-                        })
-                    });
-
-                let context = match result {
-                    Ok(bundle) => ContextResult::ready(bundle),
-                    Err(error) => ContextResult::failed(error),
-                };
-                let _ = tx.send(Box::new(context));
-            });
+            match self.generate.phase {
+                GeneratePhase::ContextReady | GeneratePhase::DraftReady | GeneratePhase::Failed
+                    if self.generate.context.is_some() =>
+                {
+                    self.start_generation();
+                }
+                GeneratePhase::Generating => {
+                    self.logs
+                        .entries
+                        .push("generation already in progress".into());
+                }
+                _ => self.start_context_collection(),
+            }
         }
+    }
+
+    fn start_context_collection(&mut self) {
+        self.generate.begin_context_collection();
+        let selected_revset = self.generate.selected_revset().clone();
+        let form = self.generate.form.clone();
+        let collector = ContextCollector::new(
+            &self.config,
+            self.repo.clone(),
+            form,
+            selected_revset.clone(),
+        );
+        let tx = self.context_tx.clone();
+        self.logs.entries.push(format!(
+            "collecting context for revset {}",
+            selected_revset.label(),
+        ));
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || collector.collect())
+                .await
+                .unwrap_or_else(|err| {
+                    Err(crate::context::ContextError {
+                        command: "context collection".into(),
+                        message: err.to_string(),
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })
+                });
+
+            let context = match result {
+                Ok(bundle) => ContextResult::ready(bundle),
+                Err(error) => ContextResult::failed(error),
+            };
+            let _ = tx.send(Box::new(context));
+        });
+    }
+
+    fn start_generation(&mut self) {
+        let Some(prompt) = self.generate.prompt_build() else {
+            self.logs
+                .entries
+                .push("generation blocked: prompt context is unavailable".into());
+            self.generate
+                .fail_generation("prompt context is unavailable");
+            return;
+        };
+
+        let prompt_bytes = prompt.manifest.byte_count;
+        let selected_revset = self.generate.selected_revset().label().to_string();
+        let client = match OllamaClient::new(&self.config) {
+            Ok(client) => client,
+            Err(err) => {
+                self.generate.fail_generation(err.to_string());
+                self.logs
+                    .entries
+                    .push(format!("generation failed: {}", err));
+                return;
+            }
+        };
+
+        self.generate.begin_generation();
+        self.logs.entries.push(format!(
+            "sending prompt to ollama for {} ({} bytes)",
+            selected_revset, prompt_bytes
+        ));
+        self.logs.entries.push("ollama request in progress".into());
+
+        let tx = self.generation_tx.clone();
+        tokio::spawn(async move {
+            let result = client.generate_draft(&prompt).await;
+            let event = match result {
+                Ok(draft) => GenerationResult::Ready(draft),
+                Err(error) => GenerationResult::Failed(error),
+            };
+            let _ = tx.send(Box::new(event));
+        });
     }
 
     fn toggle_prompt_view(&mut self) {
@@ -444,6 +507,40 @@ impl App {
             "job #{} {} finished with {:?}",
             result.id, result.name, result.status
         ));
+    }
+
+    fn record_generation_result(&mut self, result: GenerationResult) {
+        match result {
+            GenerationResult::Ready(draft) => {
+                self.log_raw_model_response(&draft.raw_model_response);
+                self.generate.complete_generation(draft.clone());
+                self.logs.entries.push(format!(
+                    "ollama generation finished for {}",
+                    draft.branch_name
+                ));
+            }
+            GenerationResult::Failed(error) => {
+                if let Some(raw_response) = error.raw_response.as_ref() {
+                    self.log_raw_model_response(raw_response);
+                }
+                self.generate.fail_generation(error.message.clone());
+                self.logs
+                    .entries
+                    .push(format!("ollama generation failed: {}", error.message));
+            }
+        }
+    }
+
+    fn log_raw_model_response(&mut self, raw_response: &str) {
+        self.logs.entries.push("ollama raw response:".into());
+        if raw_response.trim().is_empty() {
+            self.logs.entries.push("(empty)".into());
+            return;
+        }
+
+        for line in raw_response.lines() {
+            self.logs.entries.push(line.to_string());
+        }
     }
 
     fn apply_context(&mut self, context: ContextResult) {
@@ -595,12 +692,14 @@ mod tests {
     fn test_app() -> App {
         let config = Config::default();
         let (job_tx, _job_rx) = unbounded_channel();
+        let (generation_tx, _generation_rx) = unbounded_channel();
         let (context_tx, _context_rx) = unbounded_channel();
         let (repo_tx, _repo_rx) = unbounded_channel();
         let (revset_tx, _revset_rx) = unbounded_channel();
         App::new(
             config.clone(),
             CommandRunner::new(&config, job_tx),
+            generation_tx,
             context_tx,
             RepoDiscovery::new(config.clone(), repo_tx),
             RevsetDiscovery::new(&config, ".", revset_tx),

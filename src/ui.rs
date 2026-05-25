@@ -303,6 +303,18 @@ fn render_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                     lines.push(Line::from("jj diff --stat".dim()));
                     lines.push(Line::from("jj diff".dim()));
                 }
+                GeneratePhase::Generating => {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from("Generating draft".bold()));
+                    lines.push(Line::from("Sending the assembled prompt to Ollama.".dim()));
+                    lines.push(Line::from("Waiting for a validated JSON draft.".dim()));
+                    if let Some(prompt) = app.generate().prompt_build() {
+                        lines.push(Line::from(format!(
+                            "prompt bytes: {}",
+                            prompt.manifest.byte_count
+                        )));
+                    }
+                }
                 GeneratePhase::ContextReady => {
                     if let Some(prompt) = app.generate().prompt_build() {
                         lines.push(Line::from(""));
@@ -316,6 +328,11 @@ fn render_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                     if let Some(error) = &app.generate().context_error {
                         lines.push(Line::from(""));
                         lines.push(Line::from("Context failed".bold()));
+                        lines.push(Line::from(error.clone()).red());
+                    }
+                    if let Some(error) = &app.generate().generation_error {
+                        lines.push(Line::from(""));
+                        lines.push(Line::from("Generation failed".bold()));
                         lines.push(Line::from(error.clone()).red());
                     }
                 }

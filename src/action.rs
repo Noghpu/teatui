@@ -16,6 +16,7 @@ pub enum Action {
     TogglePromptView,
     Refresh,
     Back,
+    GenerationResult(Box<crate::event::GenerationResult>),
     Context(Box<crate::context::ContextResult>),
     RepoUpdated(Box<crate::repo::RepoState>),
     RevsetsUpdated(Box<crate::generate::RevsetUpdate>),

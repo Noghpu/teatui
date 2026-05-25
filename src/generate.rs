@@ -197,7 +197,7 @@ impl PrForm {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GeneratedDraft {
     pub branch_name: String,
     pub title: String,
@@ -206,7 +206,7 @@ pub struct GeneratedDraft {
     pub raw_model_response: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DraftReview {
     pub summary: String,
     pub notes: Vec<String>,
@@ -310,6 +310,7 @@ pub struct GenerateState {
     pub context: Option<ContextBundle>,
     pub context_started_at: Option<SystemTime>,
     pub context_error: Option<String>,
+    pub generation_error: Option<String>,
     pub draft: Option<GeneratedDraft>,
     pub review: DraftReview,
     pub prompt_view: PromptView,
@@ -335,6 +336,7 @@ impl GenerateState {
             context: None,
             context_started_at: None,
             context_error: None,
+            generation_error: None,
             draft: None,
             review: DraftReview::default(),
             prompt_view: PromptView::default(),
@@ -478,19 +480,55 @@ impl GenerateState {
         self.phase = GeneratePhase::CollectingContext;
         self.context_started_at = Some(SystemTime::now());
         self.context_error = None;
+        self.generation_error = None;
         self.context = None;
+        self.draft = None;
+        self.review = DraftReview::default();
     }
 
     pub fn complete_context_collection(&mut self, context: ContextBundle) {
         self.phase = GeneratePhase::ContextReady;
         self.context_started_at = Some(context.repo_identity.collected_at);
         self.context_error = None;
+        self.generation_error = None;
         self.context = Some(context);
     }
 
     pub fn fail_context_collection(&mut self, error: impl Into<String>) {
         self.phase = GeneratePhase::Failed;
         self.context_error = Some(error.into());
+        self.generation_error = None;
+    }
+
+    pub fn begin_generation(&mut self) {
+        self.phase = GeneratePhase::Generating;
+        self.context_error = None;
+        self.generation_error = None;
+        self.draft = None;
+        self.review = DraftReview::default();
+    }
+
+    pub fn complete_generation(&mut self, draft: GeneratedDraft) {
+        self.phase = GeneratePhase::DraftReady;
+        self.generation_error = None;
+        self.review = DraftReview {
+            summary: format!("Generated draft for {}", draft.branch_name),
+            notes: draft.review_notes.clone(),
+            warnings: Vec::new(),
+        };
+        self.draft = Some(draft);
+    }
+
+    pub fn fail_generation(&mut self, error: impl Into<String>) {
+        let error = error.into();
+        self.phase = GeneratePhase::Failed;
+        self.context_error = None;
+        self.generation_error = Some(error.clone());
+        self.review = DraftReview {
+            summary: "Generation failed".into(),
+            notes: Vec::new(),
+            warnings: vec![error],
+        };
     }
 
     pub fn toggle_prompt_view(&mut self) {

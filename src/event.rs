@@ -7,7 +7,8 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::{select, time::interval_at};
 
 use crate::context::ContextResult;
-use crate::generate::RevsetUpdate;
+use crate::generate::{GeneratedDraft, RevsetUpdate};
+use crate::ollama::OllamaError;
 use crate::repo::RepoState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,15 +41,23 @@ pub enum AppEvent {
     Key(KeyEvent),
     Resize(u16, u16),
     Job(JobResult),
+    Generation(Box<GenerationResult>),
     Context(Box<ContextResult>),
     Repo(Box<RepoState>),
     Revsets(Box<RevsetUpdate>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GenerationResult {
+    Ready(GeneratedDraft),
+    Failed(OllamaError),
 }
 
 pub struct EventHandler {
     events: EventStream,
     tick: tokio::time::Interval,
     jobs: UnboundedReceiver<JobResult>,
+    generation: UnboundedReceiver<Box<GenerationResult>>,
     context: UnboundedReceiver<Box<ContextResult>>,
     repo: UnboundedReceiver<Box<RepoState>>,
     revsets: UnboundedReceiver<Box<RevsetUpdate>>,
@@ -58,6 +67,7 @@ impl EventHandler {
     pub fn new(
         tick_rate: Duration,
         jobs: UnboundedReceiver<JobResult>,
+        generation: UnboundedReceiver<Box<GenerationResult>>,
         context: UnboundedReceiver<Box<ContextResult>>,
         repo: UnboundedReceiver<Box<RepoState>>,
         revsets: UnboundedReceiver<Box<RevsetUpdate>>,
@@ -67,6 +77,7 @@ impl EventHandler {
             events: EventStream::new(),
             tick: interval_at(start.into(), tick_rate),
             jobs,
+            generation,
             context,
             repo,
             revsets,
@@ -89,6 +100,9 @@ impl EventHandler {
             }
             Some(job) = self.jobs.recv() => {
                 Ok(AppEvent::Job(job))
+            }
+            Some(generation) = self.generation.recv() => {
+                Ok(AppEvent::Generation(generation))
             }
             Some(context) = self.context.recv() => {
                 Ok(AppEvent::Context(context))
