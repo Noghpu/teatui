@@ -1,9 +1,10 @@
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use color_eyre::eyre::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::action::{Action, Direction};
+use crate::command::CommandRunner;
 use crate::config::Config;
 use crate::event::{AppEvent, EventHandler, JobResult, JobStatus};
 use crate::generate::{Focus, GeneratePhase, GenerateState, InputMode};
@@ -55,22 +56,53 @@ pub struct ListState {
 }
 
 #[derive(Debug, Clone)]
-pub struct JobRegistry {
+#[allow(dead_code)]
+pub struct JobRecord {
+    pub id: u64,
+    pub name: String,
+    pub command: String,
     pub status: JobStatus,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct JobRegistry {
+    pub jobs: BTreeMap<u64, JobRecord>,
     pub last_result: Option<JobResult>,
 }
 
-impl Default for JobRegistry {
-    fn default() -> Self {
-        Self {
-            status: JobStatus::Idle,
-            last_result: None,
-        }
+impl JobRegistry {
+    pub fn record(&mut self, result: JobResult) {
+        let entry = self.jobs.entry(result.id).or_insert_with(|| JobRecord {
+            id: result.id,
+            name: result.name.clone(),
+            command: result.command.clone(),
+            status: result.status,
+            stdout: result.stdout.clone(),
+            stderr: result.stderr.clone(),
+        });
+
+        entry.name = result.name.clone();
+        entry.command = result.command.clone();
+        entry.status = result.status;
+        entry.stdout = result.stdout.clone();
+        entry.stderr = result.stderr.clone();
+        self.last_result = Some(result);
+    }
+
+    pub fn status(&self) -> JobStatus {
+        self.last_result
+            .as_ref()
+            .map(|result| result.status)
+            .unwrap_or(JobStatus::Idle)
     }
 }
 
 pub struct App {
     config: Config,
+    #[allow(dead_code)]
+    command_runner: CommandRunner,
     screen: Screen,
     focus: Focus,
     input_mode: InputMode,
@@ -85,9 +117,10 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, command_runner: CommandRunner) -> Self {
         Self {
             config,
+            command_runner,
             screen: Screen::Landing,
             focus: Focus::Menu,
             input_mode: InputMode::Normal,
@@ -285,11 +318,10 @@ impl App {
     }
 
     fn record_job_result(&mut self, result: JobResult) {
-        self.jobs.status = result.status;
-        self.jobs.last_result = Some(result.clone());
+        self.jobs.record(result.clone());
         self.logs.entries.push(format!(
-            "job {} finished with {:?}",
-            result.name, result.status
+            "job #{} {} finished with {:?}",
+            result.id, result.name, result.status
         ));
     }
 

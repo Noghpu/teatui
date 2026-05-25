@@ -1,5 +1,6 @@
 mod action;
 mod app;
+mod command;
 mod config;
 mod event;
 mod generate;
@@ -9,8 +10,10 @@ mod ui;
 
 use clap::Parser;
 use color_eyre::eyre::Result;
+use tokio::sync::mpsc;
 
 use crate::app::App;
+use crate::command::CommandRunner;
 use crate::config::Config;
 use crate::event::EventHandler;
 use crate::logging::init_logging;
@@ -41,8 +44,10 @@ async fn main() -> Result<()> {
     tracing::info!("Starting application");
 
     let mut tui = Tui::new()?;
-    let events = EventHandler::new(config.tick_rate);
-    let mut app = App::new(config);
+    let (job_tx, job_rx) = mpsc::unbounded_channel();
+    let runner = CommandRunner::new(&config, job_tx);
+    let events = EventHandler::new(config.tick_rate, job_rx);
+    let mut app = App::new(config, runner);
 
     tui.enter()?;
     let result = app.run(&mut tui, events).await;

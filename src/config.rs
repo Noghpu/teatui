@@ -21,7 +21,7 @@ pub struct OllamaConfig {
     pub model: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct CommandConfig {
     pub jj: String,

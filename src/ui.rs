@@ -295,7 +295,7 @@ fn render_status(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             .bold()
             .on_cyan(),
         format!(" {} ", app.screen().title()).dim(),
-        format!(" job:{:?} ", app.jobs().status).dim(),
+        format!(" job:{:?} ", app.jobs().status()).dim(),
         " jj + tea + ollama ".dim(),
     ]);
     frame.render_widget(Paragraph::new(status), area);

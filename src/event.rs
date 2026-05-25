@@ -3,11 +3,14 @@ use std::time::{Duration, Instant};
 use color_eyre::eyre::Result;
 use crossterm::event::{Event, EventStream, KeyEvent};
 use futures::StreamExt;
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::{select, time::interval_at};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobResult {
+    pub id: u64,
     pub name: String,
+    pub command: String,
     pub status: JobStatus,
     pub stdout: String,
     pub stderr: String,
@@ -36,14 +39,16 @@ pub enum AppEvent {
 pub struct EventHandler {
     events: EventStream,
     tick: tokio::time::Interval,
+    jobs: UnboundedReceiver<JobResult>,
 }
 
 impl EventHandler {
-    pub fn new(tick_rate: Duration) -> Self {
+    pub fn new(tick_rate: Duration, jobs: UnboundedReceiver<JobResult>) -> Self {
         let start = Instant::now() + tick_rate;
         Self {
             events: EventStream::new(),
             tick: interval_at(start.into(), tick_rate),
+            jobs,
         }
     }
 
@@ -60,6 +65,9 @@ impl EventHandler {
             }
             _ = self.tick.tick() => {
                 Ok(AppEvent::Tick)
+            }
+            Some(job) = self.jobs.recv() => {
+                Ok(AppEvent::Job(job))
             }
         }
     }
