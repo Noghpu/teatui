@@ -1,10 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use tokio::process::Command;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::time::timeout;
 
 use crate::config::Config;
+
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolStatus {
@@ -112,26 +116,7 @@ impl RepoState {
     }
 
     pub fn blocker_lines(&self) -> Vec<String> {
-        let mut lines = Vec::new();
-
-        if !self.jj.is_available() {
-            lines.push("jj is unavailable".into());
-        }
-        if !self.inside_workspace {
-            lines.push("cwd is not inside a jj workspace".into());
-        }
-        if !self.git.is_available() {
-            lines.push("git is unavailable".into());
-        }
-        if !self.tea.is_available() {
-            lines.push("tea is unavailable".into());
-        }
-        if self.remote.is_none() {
-            lines.push("no git remote detected".into());
-        }
-
-        lines.extend(self.blockers.iter().cloned());
-        lines
+        self.blockers.clone()
     }
 }
 
@@ -161,12 +146,13 @@ impl RepoDiscovery {
 }
 
 pub async fn discover(config: Config, cwd: &Path) -> RepoState {
-    let jj = tool_status("jj").await;
-    let git = tool_status("git").await;
-    let tea = tool_status("tea").await;
+    let commands = config.commands.clone();
+    let jj = tool_status(&commands.jj).await;
+    let git = tool_status(&commands.git).await;
+    let tea = tool_status(&commands.tea).await;
 
     let workspace_root = if jj.is_available() {
-        run_output("jj", ["root"], cwd)
+        run_output(&commands.jj, ["--no-pager", "root"], cwd)
             .await
             .ok()
             .map(PathBuf::from)
@@ -177,7 +163,7 @@ pub async fn discover(config: Config, cwd: &Path) -> RepoState {
     let inside_workspace = workspace_root.is_some();
 
     let remote = if git.is_available() {
-        match run_output("git", ["remote", "get-url", "origin"], cwd).await {
+        match run_output(&commands.git, ["remote", "get-url", "origin"], cwd).await {
             Ok(url) => Some(RemoteInfo::parse(url)),
             Err(_) => None,
         }
@@ -220,16 +206,21 @@ pub async fn discover(config: Config, cwd: &Path) -> RepoState {
 }
 
 async fn tool_status(program: &str) -> ToolStatus {
-    match Command::new(program)
+    let output = Command::new(program)
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .output()
-        .await
-    {
-        Ok(_) => ToolStatus::Available,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => ToolStatus::Missing,
-        Err(err) => ToolStatus::Error(err.to_string()),
+        .output();
+
+    match timeout(DISCOVERY_TIMEOUT, output).await {
+        Ok(Ok(output)) if output.status.success() => ToolStatus::Available,
+        Ok(Ok(output)) => ToolStatus::Error(format!(
+            "`{program} --version` exited with {}",
+            output.status
+        )),
+        Ok(Err(err)) if err.kind() == std::io::ErrorKind::NotFound => ToolStatus::Missing,
+        Ok(Err(err)) => ToolStatus::Error(err.to_string()),
+        Err(_) => ToolStatus::Error(format!("`{program} --version` timed out")),
     }
 }
 
@@ -243,8 +234,11 @@ async fn run_output<const N: usize>(
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
-        .await?;
+        .output();
+
+    let output = timeout(DISCOVERY_TIMEOUT, output)
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "command timed out"))??;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -284,6 +278,9 @@ fn parse_owner_repo(host: String, path: &str) -> Option<(String, String, String)
     let mut segments = path.split('/').filter(|segment| !segment.is_empty());
     let owner = segments.next()?.to_string();
     let name = segments.next()?.to_string();
+    if segments.next().is_some() {
+        return None;
+    }
     Some((host, owner, name))
 }
 
@@ -307,5 +304,24 @@ mod tests {
         assert_eq!(remote.owner, "team");
         assert_eq!(remote.name, "project");
         assert_eq!(remote.warning, None);
+    }
+
+    #[test]
+    fn parses_ssh_remote_with_port() {
+        let remote = RemoteInfo::parse("ssh://git@code.example.com:2222/team/project.git");
+        assert_eq!(remote.host, "code.example.com:2222");
+        assert_eq!(remote.owner, "team");
+        assert_eq!(remote.name, "project");
+        assert_eq!(remote.warning, None);
+    }
+
+    #[test]
+    fn warns_on_non_owner_repo_remote_path() {
+        let remote = RemoteInfo::parse("https://code.example.com/scm/team/project.git");
+        assert!(remote.warning.is_some());
+        assert_eq!(
+            remote.raw_url,
+            "https://code.example.com/scm/team/project.git"
+        );
     }
 }
