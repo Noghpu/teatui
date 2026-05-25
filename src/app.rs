@@ -1,11 +1,13 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::collections::BTreeMap;
 
 use color_eyre::eyre::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::action::{Action, Direction};
 use crate::command::CommandRunner;
 use crate::config::Config;
+use crate::context::{ContextCollector, ContextResult};
 use crate::event::{AppEvent, EventHandler, JobResult, JobStatus};
 use crate::generate::{Focus, GeneratePhase, GenerateState, InputMode, RevsetSummary};
 use crate::jj::RevsetDiscovery;
@@ -115,7 +117,9 @@ impl JobRegistry {
 
 pub struct App {
     config: Config,
+    #[allow(dead_code)]
     command_runner: CommandRunner,
+    context_tx: UnboundedSender<Box<ContextResult>>,
     repo_discovery: RepoDiscovery,
     revset_discovery: RevsetDiscovery,
     screen: Screen,
@@ -135,6 +139,7 @@ impl App {
     pub fn new(
         config: Config,
         command_runner: CommandRunner,
+        context_tx: UnboundedSender<Box<ContextResult>>,
         repo_discovery: RepoDiscovery,
         revset_discovery: RevsetDiscovery,
     ) -> Self {
@@ -142,6 +147,7 @@ impl App {
         Self {
             config,
             command_runner,
+            context_tx,
             repo_discovery,
             revset_discovery,
             screen: Screen::Landing,
@@ -167,6 +173,7 @@ impl App {
                 AppEvent::Key(key) => self.handle_key(key),
                 AppEvent::Resize(_, _) => Action::Render,
                 AppEvent::Job(result) => Action::JobResult(result),
+                AppEvent::Context(context) => Action::Context(context),
                 AppEvent::Repo(repo) => Action::RepoUpdated(repo),
                 AppEvent::Revsets(revsets) => Action::RevsetsUpdated(revsets),
             };
@@ -229,6 +236,7 @@ impl App {
             Action::CancelEdit => self.finish_editing(false),
             Action::Generate => self.generate_pr(),
             Action::Refresh => self.refresh(),
+            Action::Context(context) => self.apply_context(*context),
             Action::RepoUpdated(repo) => self.apply_repo(*repo),
             Action::RevsetsUpdated(revsets) => self.apply_revsets(revsets.revsets),
             Action::JobResult(result) => self.record_job_result(result),
@@ -347,29 +355,50 @@ impl App {
     fn generate_pr(&mut self) {
         if self.screen == Screen::Generate {
             self.generate.validate_form();
-            let blockers = self.generate.generation_blockers();
+            let blockers = self.generate.blocking_errors();
             if !blockers.is_empty() {
-                self.logs.entries.push(format!(
-                    "Generate PR blocked by form validation: {}",
-                    blockers.join("; ")
-                ));
-                self.generate.phase = GeneratePhase::EditingForm;
+                let message = blockers.join("; ");
+                self.logs
+                    .entries
+                    .push(format!("context collection blocked: {message}"));
+                self.generate.fail_context_collection(message);
                 self.focus = Focus::Form;
                 self.update_input_mode();
                 return;
             }
 
-            self.generate.phase = GeneratePhase::Generating;
-            let cwd =
-                self.repo.workspace_root.clone().unwrap_or_else(|| {
-                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                });
-            let command = self.command_runner.jj_status_command(cwd);
-            let job_id = self.command_runner.spawn(command);
+            self.generate.begin_context_collection();
+            let selected_revset = self.generate.selected_revset().clone();
+            let form = self.generate.form.clone();
+            let collector = ContextCollector::new(
+                &self.config,
+                self.repo.clone(),
+                form,
+                selected_revset.clone(),
+            );
+            let tx = self.context_tx.clone();
             self.logs.entries.push(format!(
-                "job #{job_id} collecting status for revset {}",
-                self.generate.selected_revset().label(),
+                "collecting context for revset {}",
+                selected_revset.label(),
             ));
+            tokio::spawn(async move {
+                let result = tokio::task::spawn_blocking(move || collector.collect())
+                    .await
+                    .unwrap_or_else(|err| {
+                        Err(crate::context::ContextError {
+                            command: "context collection".into(),
+                            message: err.to_string(),
+                            stdout: String::new(),
+                            stderr: String::new(),
+                        })
+                    });
+
+                let context = match result {
+                    Ok(bundle) => ContextResult::ready(bundle),
+                    Err(error) => ContextResult::failed(error),
+                };
+                let _ = tx.send(Box::new(context));
+            });
         }
     }
 
@@ -407,6 +436,82 @@ impl App {
             "job #{} {} finished with {:?}",
             result.id, result.name, result.status
         ));
+    }
+
+    fn apply_context(&mut self, context: ContextResult) {
+        match context {
+            ContextResult::Ready(bundle) => {
+                self.generate.complete_context_collection(*bundle);
+                self.log_context_bundle();
+                self.logs.entries.push(format!(
+                    "context ready for {}",
+                    self.generate.selected_revset().label()
+                ));
+            }
+            ContextResult::Failed(error) => {
+                self.generate.fail_context_collection(error.display());
+                self.logs
+                    .entries
+                    .push(format!("context collection failed: {}", error.display()));
+                self.log_command_capture(
+                    "context failed",
+                    &error.command,
+                    &error.stdout,
+                    &error.stderr,
+                );
+            }
+        }
+    }
+
+    fn log_context_bundle(&mut self) {
+        if let Some(context) = self.generate.context.as_ref() {
+            let repo_root = context
+                .repo_identity
+                .workspace_root
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "(unknown)".into());
+            let selected_revset = context.selected_revset.label().to_string();
+            let status = context.status.clone();
+            let revset_log = context.revset_log.clone();
+            let diff_stats = context.diff_stats.clone();
+            let diff = context.diff.clone();
+
+            self.logs
+                .entries
+                .push(format!("context repo root: {repo_root}"));
+            self.logs
+                .entries
+                .push(format!("context selected revset: {selected_revset}"));
+            self.log_command_capture("jj status", &status.command, &status.stdout, &status.stderr);
+            self.log_command_capture(
+                "jj log",
+                &revset_log.command,
+                &revset_log.stdout,
+                &revset_log.stderr,
+            );
+            self.log_command_capture(
+                "jj diff --stat",
+                &diff_stats.command,
+                &diff_stats.stdout,
+                &diff_stats.stderr,
+            );
+            self.log_command_capture("jj diff", &diff.command, &diff.stdout, &diff.stderr);
+        }
+    }
+
+    fn log_command_capture(&mut self, label: &str, command: &str, stdout: &str, stderr: &str) {
+        self.logs.entries.push(format!("{label}: {command}"));
+        if !stdout.trim().is_empty() {
+            self.logs
+                .entries
+                .push(format!("{label} stdout: {}", stdout.trim()));
+        }
+        if !stderr.trim().is_empty() {
+            self.logs
+                .entries
+                .push(format!("{label} stderr: {}", stderr.trim()));
+        }
     }
 
     pub fn screen(&self) -> Screen {
@@ -471,11 +576,13 @@ mod tests {
     fn test_app() -> App {
         let config = Config::default();
         let (job_tx, _job_rx) = unbounded_channel();
+        let (context_tx, _context_rx) = unbounded_channel();
         let (repo_tx, _repo_rx) = unbounded_channel();
         let (revset_tx, _revset_rx) = unbounded_channel();
         App::new(
             config.clone(),
             CommandRunner::new(&config, job_tx),
+            context_tx,
             RepoDiscovery::new(config.clone(), repo_tx),
             RevsetDiscovery::new(&config, ".", revset_tx),
         )
@@ -535,8 +642,8 @@ mod tests {
 
         app.generate_pr();
 
-        assert_eq!(app.generate.phase, GeneratePhase::EditingForm);
+        assert_eq!(app.generate.phase, GeneratePhase::Failed);
         assert_eq!(app.focus, Focus::Form);
-        assert!(app.logs.entries[0].contains("form validation"));
+        assert!(app.logs.entries[0].contains("context collection blocked"));
     }
 }

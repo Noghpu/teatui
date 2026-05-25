@@ -15,6 +15,7 @@ pub enum Action {
     Generate,
     Refresh,
     Back,
+    Context(Box<crate::context::ContextResult>),
     RepoUpdated(Box<crate::repo::RepoState>),
     RevsetsUpdated(Box<crate::generate::RevsetUpdate>),
     JobResult(crate::event::JobResult),

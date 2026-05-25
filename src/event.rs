@@ -6,6 +6,7 @@ use futures::StreamExt;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::{select, time::interval_at};
 
+use crate::context::ContextResult;
 use crate::generate::RevsetUpdate;
 use crate::repo::RepoState;
 
@@ -39,6 +40,7 @@ pub enum AppEvent {
     Key(KeyEvent),
     Resize(u16, u16),
     Job(JobResult),
+    Context(Box<ContextResult>),
     Repo(Box<RepoState>),
     Revsets(Box<RevsetUpdate>),
 }
@@ -47,6 +49,7 @@ pub struct EventHandler {
     events: EventStream,
     tick: tokio::time::Interval,
     jobs: UnboundedReceiver<JobResult>,
+    context: UnboundedReceiver<Box<ContextResult>>,
     repo: UnboundedReceiver<Box<RepoState>>,
     revsets: UnboundedReceiver<Box<RevsetUpdate>>,
 }
@@ -55,6 +58,7 @@ impl EventHandler {
     pub fn new(
         tick_rate: Duration,
         jobs: UnboundedReceiver<JobResult>,
+        context: UnboundedReceiver<Box<ContextResult>>,
         repo: UnboundedReceiver<Box<RepoState>>,
         revsets: UnboundedReceiver<Box<RevsetUpdate>>,
     ) -> Self {
@@ -63,6 +67,7 @@ impl EventHandler {
             events: EventStream::new(),
             tick: interval_at(start.into(), tick_rate),
             jobs,
+            context,
             repo,
             revsets,
         }
@@ -84,6 +89,9 @@ impl EventHandler {
             }
             Some(job) = self.jobs.recv() => {
                 Ok(AppEvent::Job(job))
+            }
+            Some(context) = self.context.recv() => {
+                Ok(AppEvent::Context(context))
             }
             Some(repo) = self.repo.recv() => {
                 Ok(AppEvent::Repo(repo))

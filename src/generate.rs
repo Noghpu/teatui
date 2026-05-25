@@ -1,3 +1,7 @@
+use std::time::SystemTime;
+
+use crate::context::ContextBundle;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputMode {
     #[default]
@@ -20,6 +24,7 @@ pub enum GeneratePhase {
     #[default]
     SelectingRevset,
     EditingForm,
+    CollectingContext,
     ContextReady,
     Generating,
     DraftReady,
@@ -29,7 +34,7 @@ pub enum GeneratePhase {
     Failed,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FieldState {
     initial: String,
     pub value: String,
@@ -81,7 +86,7 @@ impl FieldState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrForm {
     pub head: FieldState,
     pub branch_name: FieldState,
@@ -294,6 +299,9 @@ pub struct GenerateState {
     pub selected_field: usize,
     pub revsets: Vec<RevsetSummary>,
     pub form: PrForm,
+    pub context: Option<ContextBundle>,
+    pub context_started_at: Option<SystemTime>,
+    pub context_error: Option<String>,
     pub draft: Option<GeneratedDraft>,
     pub review: DraftReview,
 }
@@ -315,6 +323,9 @@ impl GenerateState {
             selected_field: 0,
             revsets,
             form: PrForm::new(default_head, default_branch, "main@origin"),
+            context: None,
+            context_started_at: None,
+            context_error: None,
             draft: None,
             review: DraftReview::default(),
         };
@@ -446,11 +457,30 @@ impl GenerateState {
         self.form.milestone.errors.clear();
     }
 
-    pub fn generation_blockers(&self) -> Vec<String> {
+    pub fn blocking_errors(&self) -> Vec<String> {
         [&self.form.head, &self.form.branch_name, &self.form.base]
             .into_iter()
             .flat_map(|field| field.errors.iter().cloned())
             .collect()
+    }
+
+    pub fn begin_context_collection(&mut self) {
+        self.phase = GeneratePhase::CollectingContext;
+        self.context_started_at = Some(SystemTime::now());
+        self.context_error = None;
+        self.context = None;
+    }
+
+    pub fn complete_context_collection(&mut self, context: ContextBundle) {
+        self.phase = GeneratePhase::ContextReady;
+        self.context_started_at = Some(context.repo_identity.collected_at);
+        self.context_error = None;
+        self.context = Some(context);
+    }
+
+    pub fn fail_context_collection(&mut self, error: impl Into<String>) {
+        self.phase = GeneratePhase::Failed;
+        self.context_error = Some(error.into());
     }
 }
 
@@ -562,6 +592,6 @@ mod tests {
         state.validate_form();
 
         assert!(state.form.title.errors.is_empty());
-        assert!(state.generation_blockers().is_empty());
+        assert!(state.blocking_errors().is_empty());
     }
 }

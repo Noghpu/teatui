@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::app::{App, Screen};
-use crate::generate::{FieldId, Focus};
+use crate::generate::{FieldId, Focus, GeneratePhase};
 
 pub fn render(frame: &mut Frame, app: &App) {
     let [main_area, status_area, help_area] = Layout::vertical([
@@ -285,6 +285,55 @@ fn render_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 )),
             ];
 
+            match app.generate().phase {
+                GeneratePhase::CollectingContext => {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from("Collecting context".bold()));
+                    lines.push(Line::from(format!(
+                        "selected revset: {}",
+                        app.generate().selected_revset().label()
+                    )));
+                    lines.push(Line::from(format!(
+                        "base branch: {}",
+                        app.generate().form.base.display_value()
+                    )));
+                    lines.push(Line::from("jj status".dim()));
+                    lines.push(Line::from("jj log".dim()));
+                    lines.push(Line::from("jj diff --stat".dim()));
+                    lines.push(Line::from("jj diff".dim()));
+                }
+                GeneratePhase::ContextReady => {
+                    if let Some(context) = &app.generate().context {
+                        lines.push(Line::from(""));
+                        lines.push(Line::from("Context ready".bold()));
+                        lines.push(Line::from(format!(
+                            "collected at: {:?}",
+                            context.repo_identity.collected_at
+                        )));
+                        lines.push(Line::from(format!(
+                            "selected descriptions: {}",
+                            context.selected_descriptions.len()
+                        )));
+                        lines.push(Line::from(format!(
+                            "status lines: {}",
+                            context.status.parsed_lines.len()
+                        )));
+                        lines.push(Line::from(format!(
+                            "log lines: {}",
+                            context.revset_log.parsed_lines.len()
+                        )));
+                    }
+                }
+                GeneratePhase::Failed => {
+                    if let Some(error) = &app.generate().context_error {
+                        lines.push(Line::from(""));
+                        lines.push(Line::from("Context failed".bold()));
+                        lines.push(Line::from(error.clone()).red());
+                    }
+                }
+                _ => {}
+            }
+
             if let Some(draft) = &app.generate().draft {
                 lines.push(Line::from(""));
                 lines.push(Line::from("Draft".bold()));
@@ -367,6 +416,7 @@ fn render_status(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             .bold()
             .on_cyan(),
         format!(" {} ", app.screen().title()).dim(),
+        format!(" phase:{:?} ", app.generate().phase).dim(),
         format!(" job:{:?} ", app.jobs().status()).dim(),
         " jj + tea + ollama ".dim(),
     ]);

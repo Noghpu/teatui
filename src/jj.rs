@@ -27,9 +27,18 @@ impl JjCommand {
             cwd: cwd.into(),
         }
     }
+
+    pub fn display(&self) -> String {
+        format!(
+            "{} {} (cwd: {})",
+            self.program,
+            self.args.join(" "),
+            self.cwd.display()
+        )
+    }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct JjClient {
     program: String,
 }
@@ -65,6 +74,30 @@ impl JjClient {
         JjCommand::new(
             self.program.clone(),
             ["--no-pager", "diff", "-r", revset, "--stat"],
+            cwd,
+        )
+    }
+
+    pub fn status_command(&self, cwd: impl Into<PathBuf>) -> JjCommand {
+        JjCommand::new(self.program.clone(), ["--no-pager", "status"], cwd)
+    }
+
+    pub fn selected_revset_log_command(&self, cwd: impl Into<PathBuf>, revset: &str) -> JjCommand {
+        self.candidate_revsets_command(cwd, revset)
+    }
+
+    pub fn selected_revset_diff_stats_command(
+        &self,
+        cwd: impl Into<PathBuf>,
+        revset: &str,
+    ) -> JjCommand {
+        self.candidate_revsets_diff_command(cwd, revset)
+    }
+
+    pub fn selected_revset_diff_command(&self, cwd: impl Into<PathBuf>, revset: &str) -> JjCommand {
+        JjCommand::new(
+            self.program.clone(),
+            ["--no-pager", "diff", "-r", revset],
             cwd,
         )
     }
