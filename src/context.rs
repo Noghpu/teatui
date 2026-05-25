@@ -1,11 +1,13 @@
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::config::Config;
 use crate::generate::{PrForm, RevsetSummary};
 use crate::jj::{JjClient, JjCommand};
 use crate::repo::{RemoteInfo, RepoState};
+
+const CONTEXT_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandCapture {
@@ -142,30 +144,45 @@ impl ContextCollector {
 fn parse_selected_descriptions(output: &str) -> Vec<String> {
     output
         .lines()
-        .filter_map(|line| line.split_once('|'))
-        .filter_map(|(_, tail)| {
-            tail.rsplit_once('|')
-                .map(|(_, description)| description.trim())
-        })
+        .filter_map(parse_selected_description)
         .filter(|description| !description.is_empty())
-        .map(|description| description.to_string())
         .collect()
+}
+
+fn parse_selected_description(line: &str) -> Option<String> {
+    let mut parts = line.splitn(4, '|');
+    let _commit_id = parts.next()?;
+    let _change_id = parts.next()?;
+    let _bookmarks = parts.next()?;
+    Some(parts.next()?.trim().to_string())
 }
 
 fn run_capture(command: JjCommand) -> std::result::Result<CommandCapture, ContextError> {
     let command_display = command.display();
-    let output = match Command::new(&command.program)
+    let child = match Command::new(&command.program)
         .args(&command.args)
         .current_dir(&command.cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .spawn()
     {
-        Ok(output) => output,
+        Ok(child) => child,
         Err(err) => {
             return Err(ContextError {
                 command: command_display.clone(),
                 message: format!("failed to run {command_display}: {err}"),
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+        }
+    };
+
+    let output = match wait_with_timeout(child, CONTEXT_COMMAND_TIMEOUT) {
+        Ok(output) => output,
+        Err(err) => {
+            return Err(ContextError {
+                command: command_display.clone(),
+                message: format!("{command_display}: {err}"),
                 stdout: String::new(),
                 stderr: String::new(),
             });
@@ -189,6 +206,29 @@ fn run_capture(command: JjCommand) -> std::result::Result<CommandCapture, Contex
             stdout,
             stderr,
         })
+    }
+}
+
+fn wait_with_timeout(
+    mut child: std::process::Child,
+    timeout: Duration,
+) -> std::io::Result<std::process::Output> {
+    let started = std::time::Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output();
+        }
+
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("command timed out after {timeout:?}"),
+            ));
+        }
+
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -222,6 +262,13 @@ mod tests {
             parse_selected_descriptions(output),
             vec!["First line", "Second line"]
         );
+    }
+
+    #[test]
+    fn parses_selected_description_with_pipe_in_text() {
+        let output = "a|b||First | second";
+
+        assert_eq!(parse_selected_descriptions(output), vec!["First | second"]);
     }
 
     #[test]

@@ -441,6 +441,17 @@ impl App {
     fn apply_context(&mut self, context: ContextResult) {
         match context {
             ContextResult::Ready(bundle) => {
+                if bundle.repo_identity.selected_revset != self.generate.selected_revset().label() {
+                    let stale = format!(
+                        "discarded stale context for {}; selected revset is {}",
+                        bundle.repo_identity.selected_revset,
+                        self.generate.selected_revset().label()
+                    );
+                    self.logs.entries.push(stale.clone());
+                    self.generate.fail_context_collection(stale);
+                    return;
+                }
+
                 self.generate.complete_context_collection(*bundle);
                 self.log_context_bundle();
                 self.logs.entries.push(format!(
