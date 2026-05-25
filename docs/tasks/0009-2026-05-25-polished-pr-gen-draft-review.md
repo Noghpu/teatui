@@ -43,7 +43,7 @@ approval, even though branch push and PR creation remain out of scope.
 - User edits to generated draft are preserved while navigating.
 - The UI clearly says execution is not implemented yet.
 - Text does not overlap or become unreadable in ordinary terminal sizes.
-- `just fmt`, `just check`, `just clippy`, and `just test` pass.
+- `just verify` passes unless this slice only needs one focused check.
 
 ## Tests
 

@@ -44,7 +44,7 @@ blocking the UI.
 - Success stores a complete `ContextBundle`.
 - Failure keeps the selected revset and form edits intact.
 - Logs show every external command that ran.
-- `just fmt`, `just check`, and `just clippy` pass.
+- `just verify` passes unless this slice only needs one focused check.
 
 ## Tests
 

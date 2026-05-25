@@ -41,7 +41,7 @@ sections, omitted sections, byte counts, and truncation warnings.
 - The generated prompt asks for strict JSON and no Markdown fence.
 - Truncation is visible before generation.
 - Manual form values are included as explicit user intent.
-- `just fmt`, `just check`, `just clippy`, and `just test` pass.
+- `just verify` passes unless this slice only needs one focused check.
 
 ## Tests
 

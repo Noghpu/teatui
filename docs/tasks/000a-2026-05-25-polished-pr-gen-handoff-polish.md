@@ -46,8 +46,4 @@ manifest, Ollama generation, draft review/edit, logs, and recoverable errors.
 
 ## Tests
 
-- Run `just fmt`.
-- Run `just check`.
-- Run `just clippy`.
-- Run `just test`.
 - Run `just verify`.

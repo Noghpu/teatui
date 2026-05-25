@@ -38,7 +38,7 @@ Generate PR can move from `ContextReady` to `Generating` to `DraftReady` or
 - Valid model output creates a `GeneratedDraft`.
 - Invalid output leaves raw response in logs and keeps current context.
 - Timeout and connection failures are user-visible.
-- `just fmt`, `just check`, `just clippy`, and `just test` pass.
+- `just verify` passes unless this slice only needs one focused check.
 
 ## Tests
 

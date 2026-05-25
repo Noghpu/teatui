@@ -41,7 +41,7 @@ inspect enough detail to choose the stack or change that should become a PR.
 - Preview includes description, bookmarks, stats, recent log context, and
   warnings.
 - Refresh reloads revset data.
-- `just fmt`, `just check`, and `just clippy` pass.
+- `just verify` passes unless this slice only needs one focused check.
 
 ## Tests
 

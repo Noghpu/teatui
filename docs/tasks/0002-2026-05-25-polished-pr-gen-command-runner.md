@@ -40,7 +40,7 @@ rendering, preserve command logs, and return typed results to the update loop.
 - Command results arrive as typed app actions.
 - Failed commands keep stdout and stderr in logs.
 - No command is launched through PowerShell, `cmd`, or another shell.
-- `just fmt`, `just check`, and `just clippy` pass.
+- `just verify` passes unless this slice only needs one focused check.
 
 ## Tests
 

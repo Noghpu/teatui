@@ -38,7 +38,7 @@ product flow.
 - Text input mode and normal navigation mode are distinct in state.
 - The event loop supports terminal events, ticks, and future job results.
 - Existing navigation still works with placeholder data.
-- `just fmt` and `just check` pass.
+- `just verify` passes unless this slice only needs one focused check.
 
 ## Tests
 

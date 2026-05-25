@@ -48,7 +48,7 @@ keybindings.
 - `Esc` in Generate normal/review mode returns to Landing.
 - Dirty fields are tracked.
 - Validation errors are visible without blocking normal navigation.
-- `just fmt`, `just check`, `just clippy`, and `just test` pass.
+- `just verify` passes unless this slice only needs one focused check.
 
 ## Tests
 

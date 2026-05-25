@@ -11,6 +11,9 @@ Repo uses jj. Use `jj --no-pager ...`. Do not use git history/status.
 
 Command runner is `just`:
 
+- Prefer `just verify` for handoff because it bundles formatting, compile
+  check, linting, and tests. Use a single focused recipe only when exactly one
+  check is relevant, such as formatting-only docs or a narrow compile probe.
 - `just fmt`: format code.
 - `just check`: compile check.
 - `just clippy`: lint Rust.

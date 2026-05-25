@@ -39,7 +39,7 @@ Ollama endpoint/model.
 - Generate PR can refuse entry or show a clear blocker when no jj workspace is
   detected.
 - `Esc` and `q` behavior remains consistent with the design doc.
-- `just fmt`, `just check`, and `just clippy` pass.
+- `just verify` passes unless this slice only needs one focused check.
 
 ## Tests
 
