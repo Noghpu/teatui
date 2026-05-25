@@ -182,7 +182,7 @@ fn render_work(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Screen::Generate => FieldId::ALL
             .iter()
             .enumerate()
-            .map(|(index, field_id)| {
+            .flat_map(|(index, field_id)| {
                 let generate = app.generate();
                 let field = generate.form.field(*field_id);
                 let label = field_id.label();
@@ -198,11 +198,16 @@ fn render_work(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 } else {
                     format!("{marker} {label}: {value}")
                 };
+                let mut lines = Vec::with_capacity(1 + error_count);
                 if index == generate.selected_field && app.focus() == Focus::Form {
-                    Line::from(line.bold().cyan())
+                    lines.push(Line::from(line.bold().cyan()));
                 } else {
-                    Line::from(line.dim())
+                    lines.push(Line::from(line.dim()));
                 }
+                for error in &field.errors {
+                    lines.push(Line::from(format!("    - {error}")).red());
+                }
+                lines
             })
             .collect(),
         Screen::PullRequests => vec![

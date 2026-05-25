@@ -3,6 +3,7 @@ pub enum InputMode {
     #[default]
     Normal,
     Editing,
+    Review,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -308,7 +309,7 @@ impl GenerateState {
             .and_then(|revset| revset.bookmarks().first().cloned())
             .unwrap_or_default();
 
-        Self {
+        let mut state = Self {
             phase: GeneratePhase::SelectingRevset,
             selected_revset: 0,
             selected_field: 0,
@@ -316,7 +317,9 @@ impl GenerateState {
             form: PrForm::new(default_head, default_branch, "main@origin"),
             draft: None,
             review: DraftReview::default(),
-        }
+        };
+        state.validate_form();
+        state
     }
 
     pub fn with_placeholder(warning: impl Into<String>) -> Self {
@@ -371,18 +374,22 @@ impl GenerateState {
 
     pub fn insert_into_selected_field(&mut self, ch: char) {
         self.form.field_mut(self.selected_field()).insert(ch);
+        self.validate_form();
     }
 
     pub fn backspace_selected_field(&mut self) {
         self.form.field_mut(self.selected_field()).backspace();
+        self.validate_form();
     }
 
     pub fn commit_selected_field(&mut self) {
         self.form.field_mut(self.selected_field()).commit();
+        self.validate_form();
     }
 
     pub fn cancel_selected_field(&mut self) {
         self.form.field_mut(self.selected_field()).cancel();
+        self.validate_form();
     }
 
     pub fn replace_revsets(&mut self, revsets: Vec<RevsetSummary>) {
@@ -408,6 +415,7 @@ impl GenerateState {
             .position(|revset| revset.label() == previous_label)
             .unwrap_or(0);
         self.sync_head_from_selected_revset();
+        self.validate_form();
     }
 
     pub fn sync_head_from_selected_revset(&mut self) {
@@ -424,6 +432,60 @@ impl GenerateState {
                 .unwrap_or_default();
             self.form.branch_name = FieldState::new(branch_name);
         }
+        self.validate_form();
+    }
+
+    pub fn validate_form(&mut self) {
+        self.form.head.errors = required_field_errors("head", self.form.head.display_value());
+        self.form.branch_name.errors = validate_branch_name(self.form.branch_name.display_value());
+        self.form.base.errors = required_field_errors("base", self.form.base.display_value());
+        self.form.title.errors = required_field_errors("title", self.form.title.display_value());
+        self.form.description.errors.clear();
+        self.form.labels.errors.clear();
+        self.form.assignees.errors.clear();
+        self.form.milestone.errors.clear();
+    }
+}
+
+pub fn validate_branch_name(value: &str) -> Vec<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return vec!["branch name is required".into()];
+    }
+
+    let shape_ok = value.split('/').all(|segment| {
+        !segment.is_empty()
+            && !segment.starts_with('-')
+            && !segment.ends_with('-')
+            && segment
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+    }) && !value.starts_with('/')
+        && !value.ends_with('/')
+        && !value.contains("//")
+        && !value.contains("..")
+        && !value.contains("@{")
+        && !value.contains(".lock")
+        && !value.starts_with('-')
+        && !value.starts_with('.')
+        && !value.ends_with('.')
+        && !value.chars().any(char::is_whitespace)
+        && !value
+            .chars()
+            .any(|ch| matches!(ch, '\\' | '~' | '^' | ':' | '?' | '*' | '[' | ']'));
+
+    if shape_ok {
+        Vec::new()
+    } else {
+        vec!["branch name should use lowercase words separated by hyphens or slashes".into()]
+    }
+}
+
+fn required_field_errors(label: &str, value: &str) -> Vec<String> {
+    if value.trim().is_empty() {
+        vec![format!("{label} is required")]
+    } else {
+        Vec::new()
     }
 }
 
@@ -453,5 +515,36 @@ mod tests {
         state.replace_revsets(vec![revset("@"), revset("@-"), revset("heads(trunk()..)")]);
 
         assert_eq!(state.selected_revset().label(), "@-");
+    }
+
+    #[test]
+    fn field_commit_updates_value_and_dirty_state() {
+        let mut field = FieldState::new("initial");
+        field.begin_edit();
+        field.insert('x');
+        field.commit();
+
+        assert_eq!(field.value, "initialx");
+        assert_eq!(field.display_value(), "initialx");
+        assert!(field.dirty);
+    }
+
+    #[test]
+    fn field_cancel_restores_buffer_without_changing_value() {
+        let mut field = FieldState::new("initial");
+        field.begin_edit();
+        field.insert('x');
+        field.cancel();
+
+        assert_eq!(field.value, "initial");
+        assert_eq!(field.display_value(), "initial");
+        assert!(!field.dirty);
+    }
+
+    #[test]
+    fn branch_name_validation_rejects_spaces_and_uppercase() {
+        assert!(validate_branch_name("feature/foo-bar").is_empty());
+        assert!(!validate_branch_name("Feature Foo").is_empty());
+        assert!(!validate_branch_name("feature/foo..bar").is_empty());
     }
 }

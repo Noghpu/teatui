@@ -245,7 +245,7 @@ impl App {
             Screen::Generate | Screen::PullRequests | Screen::Issues => {
                 self.screen = Screen::Landing;
                 self.focus = Focus::Menu;
-                self.input_mode = InputMode::Normal;
+                self.update_input_mode();
             }
         }
     }
@@ -287,6 +287,7 @@ impl App {
             (Focus::Preview, Direction::Up) => Focus::Form,
             (Focus::Preview, Direction::Down) => Focus::Preview,
         };
+        self.update_input_mode();
     }
 
     fn select(&mut self) {
@@ -311,7 +312,7 @@ impl App {
             _ => Screen::Issues,
         };
         self.focus = Focus::Menu;
-        self.input_mode = InputMode::Normal;
+        self.update_input_mode();
         if self.screen == Screen::Generate {
             self.generate.phase = GeneratePhase::SelectingRevset;
         }
@@ -321,7 +322,7 @@ impl App {
         self.focus = Focus::Form;
         self.generate.phase = GeneratePhase::EditingForm;
         self.generate.selected_field = 0;
-        self.input_mode = InputMode::Normal;
+        self.update_input_mode();
         self.generate.sync_head_from_selected_revset();
     }
 
@@ -340,7 +341,7 @@ impl App {
                 self.generate.cancel_selected_field();
             }
         }
-        self.input_mode = InputMode::Normal;
+        self.update_input_mode();
     }
 
     fn generate_pr(&mut self) {
@@ -374,6 +375,7 @@ impl App {
                 .push("Generate PR blocked: cwd is not inside a jj workspace".into());
             self.screen = Screen::Landing;
             self.focus = Focus::Menu;
+            self.update_input_mode();
         }
     }
 
@@ -437,5 +439,77 @@ impl App {
     #[allow(dead_code)]
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    fn update_input_mode(&mut self) {
+        self.input_mode = match (self.screen, self.focus) {
+            (Screen::Generate, Focus::Preview) => InputMode::Review,
+            _ => InputMode::Normal,
+        };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use tokio::sync::mpsc::unbounded_channel;
+
+    fn test_app() -> App {
+        let config = Config::default();
+        let (job_tx, _job_rx) = unbounded_channel();
+        let (repo_tx, _repo_rx) = unbounded_channel();
+        let (revset_tx, _revset_rx) = unbounded_channel();
+        App::new(
+            config.clone(),
+            CommandRunner::new(&config, job_tx),
+            RepoDiscovery::new(config.clone(), repo_tx),
+            RevsetDiscovery::new(&config, ".", revset_tx),
+        )
+    }
+
+    #[test]
+    fn normal_mode_routes_navigation_and_actions() {
+        let app = test_app();
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty())),
+            Action::Navigate(Direction::Down)
+        );
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
+            Action::Select
+        );
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty())),
+            Action::Quit
+        );
+    }
+
+    #[test]
+    fn input_mode_routes_printable_keys_into_the_field() {
+        let mut app = test_app();
+        app.input_mode = InputMode::Editing;
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty())),
+            Action::InsertChar('g')
+        );
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty())),
+            Action::InsertChar('j')
+        );
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty())),
+            Action::InsertChar('q')
+        );
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())),
+            Action::CancelEdit
+        );
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
+            Action::CommitEdit
+        );
     }
 }
