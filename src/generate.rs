@@ -199,24 +199,47 @@ pub struct DraftReview {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevsetSummary {
     label: String,
     description: String,
     bookmarks: Vec<String>,
     stats: String,
+    commit_count: usize,
+    commit_ids: Vec<String>,
+    change_ids: Vec<String>,
+    recent_log: Vec<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevsetUpdate {
+    pub revsets: Vec<RevsetSummary>,
 }
 
 impl RevsetSummary {
-    pub fn new(label: &str, description: &str, bookmarks: &[&str], stats: &str) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        label: &str,
+        description: &str,
+        bookmarks: Vec<String>,
+        stats: &str,
+        commit_count: usize,
+        commit_ids: Vec<String>,
+        change_ids: Vec<String>,
+        recent_log: Vec<String>,
+        warnings: Vec<String>,
+    ) -> Self {
         Self {
             label: label.into(),
             description: description.into(),
-            bookmarks: bookmarks
-                .iter()
-                .map(|bookmark| (*bookmark).into())
-                .collect(),
+            bookmarks,
             stats: stats.into(),
+            commit_count,
+            commit_ids,
+            change_ids,
+            recent_log,
+            warnings,
         }
     }
 
@@ -235,6 +258,32 @@ impl RevsetSummary {
     pub fn stats(&self) -> &str {
         &self.stats
     }
+
+    pub fn commit_count(&self) -> usize {
+        self.commit_count
+    }
+
+    pub fn commit_ids(&self) -> &[String] {
+        &self.commit_ids
+    }
+
+    pub fn change_ids(&self) -> &[String] {
+        &self.change_ids
+    }
+
+    pub fn recent_log(&self) -> &[String] {
+        &self.recent_log
+    }
+
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+}
+
+impl RevsetUpdate {
+    pub fn new(revsets: Vec<RevsetSummary>) -> Self {
+        Self { revsets }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -249,37 +298,41 @@ pub struct GenerateState {
 }
 
 impl GenerateState {
-    pub fn demo() -> Self {
-        let revsets = vec![
-            RevsetSummary::new(
-                "@",
-                "Current working copy change",
-                &["teatui-ui"],
-                "3 files changed, +142 -12",
-            ),
-            RevsetSummary::new(
-                "heads(trunk()..)",
-                "Current stack above trunk",
-                &[],
-                "8 files changed, +426 -38",
-            ),
-            RevsetSummary::new("@-", "Parent change", &["main@origin"], "clean baseline"),
-        ];
-        let form = PrForm::new(
-            revsets[0].label(),
-            revsets[0].bookmarks().first().cloned().unwrap_or_default(),
-            "main@origin",
-        );
+    pub fn new(revsets: Vec<RevsetSummary>) -> Self {
+        let default_head = revsets
+            .first()
+            .map(|revset| revset.label().to_string())
+            .unwrap_or_default();
+        let default_branch = revsets
+            .first()
+            .and_then(|revset| revset.bookmarks().first().cloned())
+            .unwrap_or_default();
 
         Self {
             phase: GeneratePhase::SelectingRevset,
             selected_revset: 0,
             selected_field: 0,
             revsets,
-            form,
+            form: PrForm::new(default_head, default_branch, "main@origin"),
             draft: None,
             review: DraftReview::default(),
         }
+    }
+
+    pub fn with_placeholder(warning: impl Into<String>) -> Self {
+        let warning = warning.into();
+        let description = warning.clone();
+        Self::new(vec![RevsetSummary::new(
+            "(no revsets)",
+            &description,
+            Vec::new(),
+            "0 files changed, 0 insertions(+), 0 deletions(-)",
+            0,
+            Vec::new(),
+            Vec::new(),
+            vec![warning.clone()],
+            vec![warning],
+        )])
     }
 
     pub fn selected_revset(&self) -> &RevsetSummary {
@@ -296,10 +349,12 @@ impl GenerateState {
 
     pub fn move_revset_up(&mut self) {
         self.selected_revset = self.selected_revset.saturating_sub(1);
+        self.sync_head_from_selected_revset();
     }
 
     pub fn move_revset_down(&mut self) {
         self.selected_revset = (self.selected_revset + 1).min(self.revsets.len().saturating_sub(1));
+        self.sync_head_from_selected_revset();
     }
 
     pub fn move_field_up(&mut self) {
@@ -328,5 +383,41 @@ impl GenerateState {
 
     pub fn cancel_selected_field(&mut self) {
         self.form.field_mut(self.selected_field()).cancel();
+    }
+
+    pub fn replace_revsets(&mut self, revsets: Vec<RevsetSummary>) {
+        self.revsets = if revsets.is_empty() {
+            vec![RevsetSummary::new(
+                "(no revsets)",
+                "No jj revsets could be loaded",
+                Vec::new(),
+                "0 files changed, 0 insertions(+), 0 deletions(-)",
+                0,
+                Vec::new(),
+                Vec::new(),
+                vec!["No jj revsets could be loaded".into()],
+                vec!["No jj revsets could be loaded".into()],
+            )]
+        } else {
+            revsets
+        };
+        self.selected_revset = 0;
+        self.sync_head_from_selected_revset();
+    }
+
+    pub fn sync_head_from_selected_revset(&mut self) {
+        let selected = self.selected_revset().label().to_string();
+        if !self.form.head.dirty {
+            self.form.head = FieldState::new(selected);
+        }
+        if !self.form.branch_name.dirty {
+            let branch_name = self
+                .selected_revset()
+                .bookmarks()
+                .first()
+                .cloned()
+                .unwrap_or_default();
+            self.form.branch_name = FieldState::new(branch_name);
+        }
     }
 }

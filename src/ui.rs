@@ -57,11 +57,20 @@ fn render_menu(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             .enumerate()
             .map(|(index, revset)| {
                 let bookmarks = if revset.bookmarks().is_empty() {
-                    "no bookmark".to_string()
+                    String::new()
                 } else {
                     revset.bookmarks().join(", ")
                 };
-                let label = format!("{}  {}", revset.label(), bookmarks);
+                let label = if bookmarks.is_empty() {
+                    format!("{}  {} commits", revset.label(), revset.commit_count())
+                } else {
+                    format!(
+                        "{}  {} commits  {}",
+                        revset.label(),
+                        revset.commit_count(),
+                        bookmarks
+                    )
+                };
                 if index == app.generate().selected_revset {
                     ListItem::new(label.bold().cyan())
                 } else {
@@ -254,6 +263,9 @@ fn render_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 Line::from(format!("description: {}", revset.description())),
                 Line::from(format!("bookmarks: {}", revset.bookmarks().join(", ")).dim()),
                 Line::from(format!("stats: {}", revset.stats()).dim()),
+                Line::from(format!("commits: {}", revset.commit_count())),
+                Line::from(format!("commit ids: {}", revset.commit_ids().join(", "))),
+                Line::from(format!("change ids: {}", revset.change_ids().join(", "))),
                 Line::from(""),
                 Line::from(format!("phase: {:?}", app.generate().phase).dim()),
                 Line::from(format!("input mode: {:?}", app.input_mode()).dim()),
@@ -296,6 +308,22 @@ fn render_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 "review warnings: {}",
                 app.generate().review.warnings.len()
             )));
+
+            if !revset.recent_log().is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from("Recent log".bold()));
+                for entry in revset.recent_log() {
+                    lines.push(Line::from(entry.clone()));
+                }
+            }
+
+            if !revset.warnings().is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from("Warnings".bold()));
+                for warning in revset.warnings() {
+                    lines.push(Line::from(warning.clone()).red());
+                }
+            }
 
             lines.push(Line::from(""));
             lines.push(Line::from(

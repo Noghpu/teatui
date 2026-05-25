@@ -16,6 +16,7 @@ pub enum Action {
     Refresh,
     Back,
     RepoUpdated(Box<crate::repo::RepoState>),
+    RevsetsUpdated(Box<crate::generate::RevsetUpdate>),
     JobResult(crate::event::JobResult),
     Error(String),
 }

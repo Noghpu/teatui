@@ -7,7 +7,8 @@ use crate::action::{Action, Direction};
 use crate::command::CommandRunner;
 use crate::config::Config;
 use crate::event::{AppEvent, EventHandler, JobResult, JobStatus};
-use crate::generate::{Focus, GeneratePhase, GenerateState, InputMode};
+use crate::generate::{Focus, GeneratePhase, GenerateState, InputMode, RevsetSummary};
+use crate::jj::{JjClient, RevsetDiscovery};
 use crate::repo::{RepoDiscovery, RepoState};
 use crate::tui::Tui;
 use crate::ui;
@@ -116,6 +117,7 @@ pub struct App {
     config: Config,
     command_runner: CommandRunner,
     repo_discovery: RepoDiscovery,
+    revset_discovery: RevsetDiscovery,
     screen: Screen,
     focus: Focus,
     input_mode: InputMode,
@@ -134,18 +136,35 @@ impl App {
         config: Config,
         command_runner: CommandRunner,
         repo_discovery: RepoDiscovery,
+        revset_discovery: RevsetDiscovery,
     ) -> Self {
         let repo = RepoState::bootstrap(&config);
+        let jj_client = JjClient::new(&config);
+        let revsets = jj_client
+            .candidate_revsets(
+                repo.workspace_root
+                    .as_deref()
+                    .unwrap_or_else(|| std::path::Path::new(".")),
+            )
+            .unwrap_or_else(|err| {
+                tracing::warn!("failed to load jj revsets at startup: {}", err);
+                Vec::new()
+            });
         Self {
             config,
             command_runner,
             repo_discovery,
+            revset_discovery,
             screen: Screen::Landing,
             focus: Focus::Menu,
             input_mode: InputMode::Normal,
             repo,
             landing: LandingState::default(),
-            generate: GenerateState::demo(),
+            generate: if revsets.is_empty() {
+                GenerateState::with_placeholder("No revsets discovered at startup")
+            } else {
+                GenerateState::new(revsets)
+            },
             pull_requests: ListState::default(),
             issues: ListState::default(),
             logs: LogState::default(),
@@ -164,6 +183,7 @@ impl App {
                 AppEvent::Resize(_, _) => Action::Render,
                 AppEvent::Job(result) => Action::JobResult(result),
                 AppEvent::Repo(repo) => Action::RepoUpdated(repo),
+                AppEvent::Revsets(revsets) => Action::RevsetsUpdated(revsets),
             };
 
             self.update(action);
@@ -225,6 +245,7 @@ impl App {
             Action::Generate => self.generate_pr(),
             Action::Refresh => self.refresh(),
             Action::RepoUpdated(repo) => self.apply_repo(*repo),
+            Action::RevsetsUpdated(revsets) => self.apply_revsets(revsets.revsets),
             Action::JobResult(result) => self.record_job_result(result),
             Action::Error(msg) => {
                 tracing::error!("Error: {}", msg);
@@ -316,6 +337,7 @@ impl App {
         self.generate.phase = GeneratePhase::EditingForm;
         self.generate.selected_field = 0;
         self.input_mode = InputMode::Normal;
+        self.generate.sync_head_from_selected_revset();
     }
 
     fn begin_editing_form_field(&mut self) {
@@ -354,6 +376,7 @@ impl App {
 
     pub fn refresh(&self) {
         self.repo_discovery.refresh();
+        self.revset_discovery.refresh();
     }
 
     fn apply_repo(&mut self, repo: RepoState) {
@@ -366,6 +389,15 @@ impl App {
                 .push("Generate PR blocked: cwd is not inside a jj workspace".into());
             self.screen = Screen::Landing;
             self.focus = Focus::Menu;
+        }
+    }
+
+    fn apply_revsets(&mut self, revsets: Vec<RevsetSummary>) {
+        self.generate.replace_revsets(revsets);
+        if self.screen == Screen::Generate {
+            self.logs
+                .entries
+                .push(format!("loaded {} jj revsets", self.generate.revsets.len()));
         }
     }
 

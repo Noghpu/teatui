@@ -6,6 +6,7 @@ use futures::StreamExt;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::{select, time::interval_at};
 
+use crate::generate::RevsetUpdate;
 use crate::repo::RepoState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +40,7 @@ pub enum AppEvent {
     Resize(u16, u16),
     Job(JobResult),
     Repo(Box<RepoState>),
+    Revsets(Box<RevsetUpdate>),
 }
 
 pub struct EventHandler {
@@ -46,6 +48,7 @@ pub struct EventHandler {
     tick: tokio::time::Interval,
     jobs: UnboundedReceiver<JobResult>,
     repo: UnboundedReceiver<Box<RepoState>>,
+    revsets: UnboundedReceiver<Box<RevsetUpdate>>,
 }
 
 impl EventHandler {
@@ -53,6 +56,7 @@ impl EventHandler {
         tick_rate: Duration,
         jobs: UnboundedReceiver<JobResult>,
         repo: UnboundedReceiver<Box<RepoState>>,
+        revsets: UnboundedReceiver<Box<RevsetUpdate>>,
     ) -> Self {
         let start = Instant::now() + tick_rate;
         Self {
@@ -60,6 +64,7 @@ impl EventHandler {
             tick: interval_at(start.into(), tick_rate),
             jobs,
             repo,
+            revsets,
         }
     }
 
@@ -82,6 +87,9 @@ impl EventHandler {
             }
             Some(repo) = self.repo.recv() => {
                 Ok(AppEvent::Repo(repo))
+            }
+            Some(revsets) = self.revsets.recv() => {
+                Ok(AppEvent::Revsets(revsets))
             }
         }
     }
