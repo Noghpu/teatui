@@ -7,6 +7,7 @@ mod event;
 mod generate;
 mod jj;
 mod logging;
+mod prompt;
 mod repo;
 mod tui;
 mod ui;

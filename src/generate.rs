@@ -1,6 +1,7 @@
 use std::time::SystemTime;
 
 use crate::context::ContextBundle;
+use crate::prompt::{DEFAULT_PROMPT_BYTE_BUDGET, PromptBuild};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputMode {
@@ -32,6 +33,13 @@ pub enum GeneratePhase {
     Executing,
     Complete,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PromptView {
+    #[default]
+    Manifest,
+    Prompt,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -304,6 +312,7 @@ pub struct GenerateState {
     pub context_error: Option<String>,
     pub draft: Option<GeneratedDraft>,
     pub review: DraftReview,
+    pub prompt_view: PromptView,
 }
 
 impl GenerateState {
@@ -328,6 +337,7 @@ impl GenerateState {
             context_error: None,
             draft: None,
             review: DraftReview::default(),
+            prompt_view: PromptView::default(),
         };
         state.validate_form();
         state
@@ -481,6 +491,19 @@ impl GenerateState {
     pub fn fail_context_collection(&mut self, error: impl Into<String>) {
         self.phase = GeneratePhase::Failed;
         self.context_error = Some(error.into());
+    }
+
+    pub fn toggle_prompt_view(&mut self) {
+        self.prompt_view = match self.prompt_view {
+            PromptView::Manifest => PromptView::Prompt,
+            PromptView::Prompt => PromptView::Manifest,
+        };
+    }
+
+    pub fn prompt_build(&self) -> Option<PromptBuild> {
+        self.context
+            .as_ref()
+            .map(|context| PromptBuild::new(context, &self.form, None, DEFAULT_PROMPT_BYTE_BUDGET))
     }
 }
 

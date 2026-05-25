@@ -202,6 +202,7 @@ impl App {
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => Action::Focus(Direction::Down),
             KeyCode::Char('i') => Action::Edit,
             KeyCode::Char('g') => Action::Generate,
+            KeyCode::Char('p') => Action::TogglePromptView,
             KeyCode::Char('r') => Action::Refresh,
             KeyCode::Enter => Action::Select,
             _ => Action::Tick,
@@ -235,6 +236,7 @@ impl App {
             Action::CommitEdit => self.finish_editing(true),
             Action::CancelEdit => self.finish_editing(false),
             Action::Generate => self.generate_pr(),
+            Action::TogglePromptView => self.toggle_prompt_view(),
             Action::Refresh => self.refresh(),
             Action::Context(context) => self.apply_context(*context),
             Action::RepoUpdated(repo) => self.apply_repo(*repo),
@@ -399,6 +401,12 @@ impl App {
                 };
                 let _ = tx.send(Box::new(context));
             });
+        }
+    }
+
+    fn toggle_prompt_view(&mut self) {
+        if self.screen == Screen::Generate {
+            self.generate.toggle_prompt_view();
         }
     }
 

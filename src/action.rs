@@ -13,6 +13,7 @@ pub enum Action {
     CommitEdit,
     CancelEdit,
     Generate,
+    TogglePromptView,
     Refresh,
     Back,
     Context(Box<crate::context::ContextResult>),

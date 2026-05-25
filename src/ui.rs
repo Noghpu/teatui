@@ -7,7 +7,8 @@ use ratatui::{
 };
 
 use crate::app::{App, Screen};
-use crate::generate::{FieldId, Focus, GeneratePhase};
+use crate::generate::{FieldId, Focus, GeneratePhase, PromptView};
+use crate::prompt::PromptBuild;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let [main_area, status_area, help_area] = Layout::vertical([
@@ -303,25 +304,12 @@ fn render_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                     lines.push(Line::from("jj diff".dim()));
                 }
                 GeneratePhase::ContextReady => {
-                    if let Some(context) = &app.generate().context {
+                    if let Some(prompt) = app.generate().prompt_build() {
                         lines.push(Line::from(""));
-                        lines.push(Line::from("Context ready".bold()));
-                        lines.push(Line::from(format!(
-                            "collected at: {:?}",
-                            context.repo_identity.collected_at
-                        )));
-                        lines.push(Line::from(format!(
-                            "selected descriptions: {}",
-                            context.selected_descriptions.len()
-                        )));
-                        lines.push(Line::from(format!(
-                            "status lines: {}",
-                            context.status.parsed_lines.len()
-                        )));
-                        lines.push(Line::from(format!(
-                            "log lines: {}",
-                            context.revset_log.parsed_lines.len()
-                        )));
+                        match app.generate().prompt_view {
+                            PromptView::Manifest => lines.extend(render_prompt_manifest(&prompt)),
+                            PromptView::Prompt => lines.extend(render_prompt_text(&prompt)),
+                        }
                     }
                 }
                 GeneratePhase::Failed => {
@@ -363,28 +351,15 @@ fn render_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 app.generate().review.warnings.len()
             )));
 
-            if !revset.recent_log().is_empty() {
-                lines.push(Line::from(""));
-                lines.push(Line::from("Recent log".bold()));
-                for entry in revset.recent_log() {
-                    lines.push(Line::from(entry.clone()));
-                }
-            }
-
-            if !revset.warnings().is_empty() {
-                lines.push(Line::from(""));
-                lines.push(Line::from("Warnings".bold()));
-                for warning in revset.warnings() {
-                    lines.push(Line::from(warning.clone()).red());
-                }
-            }
-
             lines.push(Line::from(""));
             lines.push(Line::from(
                 "Press Enter on the revset list to move to the PR form.".dim(),
             ));
             lines.push(Line::from(
                 "Press g from navigation mode to generate using all form values.".dim(),
+            ));
+            lines.push(Line::from(
+                "Press p to toggle prompt manifest and prompt text.".dim(),
             ));
             lines
         }
@@ -435,6 +410,8 @@ fn render_help(frame: &mut Frame, area: ratatui::layout::Rect) {
         "edit ".dim(),
         " g ".bold().cyan(),
         "generate ".dim(),
+        " p ".bold().cyan(),
+        "prompt ".dim(),
         " r ".bold().cyan(),
         "refresh ".dim(),
         " Esc ".bold().cyan(),
@@ -458,4 +435,103 @@ fn status_line(label: &'static str, value: &'static str) -> Line<'static> {
         "available" | "detected" => Line::from(format!("{label}: {value}")),
         _ => Line::from(format!("{label}: {value}")).dim(),
     }
+}
+
+fn render_prompt_manifest(prompt: &PromptBuild) -> Vec<Line<'static>> {
+    let manifest = &prompt.manifest;
+    let mut lines = vec![
+        Line::from("Prompt manifest".bold()),
+        Line::from(""),
+        Line::from(format!("selected revset: {}", manifest.selected_revset).cyan()),
+        Line::from(format!("base branch: {}", manifest.base_branch)),
+        Line::from(format!("prompt bytes: {}", manifest.byte_count)).dim(),
+        Line::from(format!(
+            "included sections: {}",
+            manifest.included_sections.len()
+        )),
+        Line::from(format!(
+            "omitted sections: {}",
+            manifest.omitted_sections.len()
+        )),
+    ];
+
+    lines.push(Line::from(""));
+    lines.push(Line::from("Form values".bold()));
+    lines.push(Line::from(format!("head: {}", manifest.form_values.head)));
+    lines.push(Line::from(format!(
+        "branch name: {}",
+        manifest.form_values.branch_name
+    )));
+    lines.push(Line::from(format!("base: {}", manifest.form_values.base)));
+    lines.push(Line::from(format!("title: {}", manifest.form_values.title)));
+    lines.push(Line::from(format!(
+        "description: {}",
+        manifest.form_values.description
+    )));
+    lines.push(Line::from(format!(
+        "labels: {}",
+        manifest.form_values.labels
+    )));
+    lines.push(Line::from(format!(
+        "assignees: {}",
+        manifest.form_values.assignees
+    )));
+    lines.push(Line::from(format!(
+        "milestone: {}",
+        manifest.form_values.milestone
+    )));
+
+    if !manifest.truncation_warnings.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from("Truncation warnings".bold()));
+        for warning in &manifest.truncation_warnings {
+            lines.push(Line::from(warning.clone()).yellow());
+        }
+    }
+
+    if !manifest.included_sections.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from("Included sections".bold()));
+        for section in &manifest.included_sections {
+            let marker = if section.truncated {
+                " [truncated]"
+            } else {
+                ""
+            };
+            lines.push(Line::from(format!(
+                "- {} ({} bytes{})",
+                section.title, section.byte_count, marker
+            )));
+        }
+    }
+
+    if !manifest.omitted_sections.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from("Omitted sections".bold()));
+        for section in &manifest.omitted_sections {
+            lines.push(
+                Line::from(format!(
+                    "- {}: {} ({} bytes)",
+                    section.title, section.reason, section.byte_count
+                ))
+                .red(),
+            );
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from("Press p to view the full prompt text.".dim()));
+    lines
+}
+
+fn render_prompt_text(prompt: &PromptBuild) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from("Prompt text".bold()), Line::from("")];
+
+    for line in prompt.prompt.lines() {
+        lines.push(Line::from(line.to_string()));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from("Press p to return to the manifest.".dim()));
+    lines
 }
