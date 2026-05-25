@@ -439,11 +439,18 @@ impl GenerateState {
         self.form.head.errors = required_field_errors("head", self.form.head.display_value());
         self.form.branch_name.errors = validate_branch_name(self.form.branch_name.display_value());
         self.form.base.errors = required_field_errors("base", self.form.base.display_value());
-        self.form.title.errors = required_field_errors("title", self.form.title.display_value());
+        self.form.title.errors.clear();
         self.form.description.errors.clear();
         self.form.labels.errors.clear();
         self.form.assignees.errors.clear();
         self.form.milestone.errors.clear();
+    }
+
+    pub fn generation_blockers(&self) -> Vec<String> {
+        [&self.form.head, &self.form.branch_name, &self.form.base]
+            .into_iter()
+            .flat_map(|field| field.errors.iter().cloned())
+            .collect()
     }
 }
 
@@ -546,5 +553,15 @@ mod tests {
         assert!(validate_branch_name("feature/foo-bar").is_empty());
         assert!(!validate_branch_name("Feature Foo").is_empty());
         assert!(!validate_branch_name("feature/foo..bar").is_empty());
+    }
+
+    #[test]
+    fn empty_title_does_not_block_generation() {
+        let mut state = GenerateState::new(vec![revset("@")]);
+        state.form.branch_name = FieldState::new("feature/example");
+        state.validate_form();
+
+        assert!(state.form.title.errors.is_empty());
+        assert!(state.generation_blockers().is_empty());
     }
 }

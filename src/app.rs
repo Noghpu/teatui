@@ -346,6 +346,19 @@ impl App {
 
     fn generate_pr(&mut self) {
         if self.screen == Screen::Generate {
+            self.generate.validate_form();
+            let blockers = self.generate.generation_blockers();
+            if !blockers.is_empty() {
+                self.logs.entries.push(format!(
+                    "Generate PR blocked by form validation: {}",
+                    blockers.join("; ")
+                ));
+                self.generate.phase = GeneratePhase::EditingForm;
+                self.focus = Focus::Form;
+                self.update_input_mode();
+                return;
+            }
+
             self.generate.phase = GeneratePhase::Generating;
             let cwd =
                 self.repo.workspace_root.clone().unwrap_or_else(|| {
@@ -511,5 +524,19 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
             Action::CommitEdit
         );
+    }
+
+    #[test]
+    fn generate_action_stays_in_form_when_required_fields_are_invalid() {
+        let mut app = test_app();
+        app.screen = Screen::Generate;
+        app.focus = Focus::Form;
+        app.generate.form.branch_name = crate::generate::FieldState::new("");
+
+        app.generate_pr();
+
+        assert_eq!(app.generate.phase, GeneratePhase::EditingForm);
+        assert_eq!(app.focus, Focus::Form);
+        assert!(app.logs.entries[0].contains("form validation"));
     }
 }
