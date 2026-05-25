@@ -16,27 +16,43 @@ pub fn render(frame: &mut Frame, app: &App) {
     ])
     .areas(frame.area());
 
-    let [revset_area, form_area, preview_area] = Layout::horizontal([
+    let [menu_area, form_area, preview_area] = Layout::horizontal([
         Constraint::Length(28),
         Constraint::Percentage(42),
         Constraint::Fill(1),
     ])
     .areas(main_area);
 
-    render_revsets(frame, app, revset_area);
-    render_form(frame, app, form_area);
+    render_menu(frame, app, menu_area);
+    render_work(frame, app, form_area);
     render_preview(frame, app, preview_area);
     render_status(frame, app, status_area);
     render_help(frame, help_area);
 }
 
-fn render_revsets(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+fn render_menu(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let items: Vec<ListItem> = match app.screen() {
-        Screen::Landing => vec![
-            ListItem::new("> Generate PR".bold().cyan()),
-            ListItem::new("  Repo status".dim()),
-            ListItem::new("  Tool health".dim()),
-        ],
+        Screen::Landing => app
+            .landing_entries()
+            .iter()
+            .enumerate()
+            .map(|(index, screen)| {
+                let label = format!(
+                    "{} {}",
+                    if index == app.selected_landing_entry_index() {
+                        ">"
+                    } else {
+                        " "
+                    },
+                    screen.title()
+                );
+                if index == app.selected_landing_entry_index() {
+                    ListItem::new(label.bold().cyan())
+                } else {
+                    ListItem::new(label.dim())
+                }
+            })
+            .collect(),
         Screen::Generate => app
             .revsets()
             .iter()
@@ -55,28 +71,55 @@ fn render_revsets(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 }
             })
             .collect(),
+        Screen::PullRequests | Screen::Issues => app
+            .secondary_items()
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let label = format!(
+                    "{} {}",
+                    if index == app.selected_secondary_item_index() {
+                        ">"
+                    } else {
+                        " "
+                    },
+                    item
+                );
+                if index == app.selected_secondary_item_index() {
+                    ListItem::new(label.bold().cyan())
+                } else {
+                    ListItem::new(label.dim())
+                }
+            })
+            .collect(),
     };
 
     let title = match app.screen() {
-        Screen::Landing => "Landing",
+        Screen::Landing => "Modes",
         Screen::Generate => "Revsets",
+        Screen::PullRequests => "PRs",
+        Screen::Issues => "Issues",
     };
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(focused_title(title, app.focused_pane() == Pane::Revsets)),
+            .title(focused_title(title, app.focused_pane() == Pane::Menu)),
     );
 
     frame.render_widget(list, area);
 }
 
-fn render_form(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+fn render_work(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let lines = match app.screen() {
         Screen::Landing => vec![
             Line::from("teatui".bold()),
             Line::from(""),
-            Line::from("Check repo health, then enter Generate PR.".dim()),
-            Line::from("Press Enter to start from available jj revsets.".dim()),
+            Line::from("jj workspace: detected".dim()),
+            Line::from("Gitea remote: pending".dim()),
+            Line::from("tea auth: pending".dim()),
+            Line::from("Ollama: pending".dim()),
+            Line::from(""),
+            Line::from("Select a mode on the left.".dim()),
         ],
         Screen::Generate => app
             .form_fields()
@@ -109,11 +152,24 @@ fn render_form(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 }
             })
             .collect(),
+        Screen::PullRequests => vec![
+            Line::from("Manage PRs".bold()),
+            Line::from(""),
+            Line::from("List open PRs, preview details, and add a simple comment.".dim()),
+            Line::from("This mode stays intentionally small.".dim()),
+        ],
+        Screen::Issues => vec![
+            Line::from("Manage Issues".bold()),
+            Line::from(""),
+            Line::from("List open issues, preview details, and add a simple comment.".dim()),
+            Line::from("This mode stays intentionally small.".dim()),
+        ],
     };
 
     let title = match app.screen() {
         Screen::Landing => "Status",
         Screen::Generate => "PR Form",
+        Screen::PullRequests | Screen::Issues => "Work",
     };
 
     let form = Paragraph::new(lines).block(
@@ -127,9 +183,10 @@ fn render_form(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 fn render_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let lines = match app.screen() {
         Screen::Landing => vec![
-            Line::from("Landing Preview".bold()),
+            Line::from("Landing".bold()),
             Line::from(""),
-            Line::from("Repo detection, auth status, and Ollama health will appear here."),
+            Line::from("Generate PR, Manage PRs, and Manage Issues are separate modes."),
+            Line::from("Press Enter to open the selected mode.".dim()),
         ],
         Screen::Generate => {
             let revset = app.selected_revset();
@@ -145,6 +202,18 @@ fn render_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 Line::from("Press g from navigation mode to generate using all form values.".dim()),
             ]
         }
+        Screen::PullRequests => vec![
+            Line::from("PR Preview".bold()),
+            Line::from(""),
+            Line::from("Selected PR body, status, and comments will appear here."),
+            Line::from("Esc returns to Landing.".dim()),
+        ],
+        Screen::Issues => vec![
+            Line::from("Issue Preview".bold()),
+            Line::from(""),
+            Line::from("Selected issue body and comments will appear here."),
+            Line::from("Esc returns to Landing.".dim()),
+        ],
     };
 
     let preview = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(

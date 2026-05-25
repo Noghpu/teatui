@@ -10,6 +10,8 @@ use crate::ui;
 pub enum Screen {
     Landing,
     Generate,
+    PullRequests,
+    Issues,
 }
 
 impl Screen {
@@ -17,13 +19,15 @@ impl Screen {
         match self {
             Self::Landing => "Landing",
             Self::Generate => "Generate PR",
+            Self::PullRequests => "Manage PRs",
+            Self::Issues => "Manage Issues",
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
-    Revsets,
+    Menu,
     Form,
     Preview,
 }
@@ -77,13 +81,19 @@ const FORM_FIELDS: [&str; 8] = [
     "milestone",
 ];
 
+const LANDING_ENTRIES: [Screen; 3] = [Screen::Generate, Screen::PullRequests, Screen::Issues];
+
+const SECONDARY_ITEMS: [&str; 3] = ["Open items", "Filter", "Comment"];
+
 pub struct App {
     config: Config,
     screen: Screen,
     focused_pane: Pane,
+    selected_landing_entry: usize,
     revsets: Vec<RevsetSummary>,
     selected_revset: usize,
     selected_field: usize,
+    selected_secondary_item: usize,
     should_quit: bool,
 }
 
@@ -92,7 +102,8 @@ impl App {
         Self {
             config,
             screen: Screen::Landing,
-            focused_pane: Pane::Revsets,
+            focused_pane: Pane::Menu,
+            selected_landing_entry: 0,
             revsets: vec![
                 RevsetSummary::new(
                     "@",
@@ -110,6 +121,7 @@ impl App {
             ],
             selected_revset: 0,
             selected_field: 0,
+            selected_secondary_item: 0,
             should_quit: false,
         }
     }
@@ -156,14 +168,18 @@ impl App {
             Action::Quit => self.should_quit = true,
             Action::Back => match self.screen {
                 Screen::Landing => {}
-                Screen::Generate => {
+                Screen::Generate | Screen::PullRequests | Screen::Issues => {
                     self.screen = Screen::Landing;
-                    self.focused_pane = Pane::Revsets;
+                    self.focused_pane = Pane::Menu;
                 }
             },
             Action::Navigate(Direction::Up) => {
                 if self.screen == Screen::Generate && self.focused_pane == Pane::Form {
                     self.selected_field = self.selected_field.saturating_sub(1);
+                } else if self.screen == Screen::Landing {
+                    self.selected_landing_entry = self.selected_landing_entry.saturating_sub(1);
+                } else if self.screen == Screen::PullRequests || self.screen == Screen::Issues {
+                    self.selected_secondary_item = self.selected_secondary_item.saturating_sub(1);
                 } else {
                     self.selected_revset = self.selected_revset.saturating_sub(1);
                 }
@@ -173,29 +189,37 @@ impl App {
                     if self.selected_field < FORM_FIELDS.len().saturating_sub(1) {
                         self.selected_field += 1;
                     }
+                } else if self.screen == Screen::Landing {
+                    if self.selected_landing_entry < LANDING_ENTRIES.len().saturating_sub(1) {
+                        self.selected_landing_entry += 1;
+                    }
+                } else if self.screen == Screen::PullRequests || self.screen == Screen::Issues {
+                    if self.selected_secondary_item < SECONDARY_ITEMS.len().saturating_sub(1) {
+                        self.selected_secondary_item += 1;
+                    }
                 } else if self.selected_revset < self.revsets.len().saturating_sub(1) {
                     self.selected_revset += 1;
                 }
             }
             Action::Focus(Direction::Up) => {
                 self.focused_pane = match self.focused_pane {
-                    Pane::Revsets => Pane::Revsets,
-                    Pane::Form => Pane::Revsets,
+                    Pane::Menu => Pane::Menu,
+                    Pane::Form => Pane::Menu,
                     Pane::Preview => Pane::Form,
                 };
             }
             Action::Focus(Direction::Down) => {
                 self.focused_pane = match self.focused_pane {
-                    Pane::Revsets => Pane::Form,
+                    Pane::Menu => Pane::Form,
                     Pane::Form => Pane::Preview,
                     Pane::Preview => Pane::Preview,
                 };
             }
             Action::Select => {
                 if self.screen == Screen::Landing {
-                    self.screen = Screen::Generate;
-                    self.focused_pane = Pane::Revsets;
-                } else if self.focused_pane == Pane::Revsets {
+                    self.screen = LANDING_ENTRIES[self.selected_landing_entry];
+                    self.focused_pane = Pane::Menu;
+                } else if self.screen == Screen::Generate && self.focused_pane == Pane::Menu {
                     self.focused_pane = Pane::Form;
                     self.selected_field = 0;
                 } else if self.focused_pane == Pane::Form {
@@ -226,6 +250,14 @@ impl App {
         self.screen
     }
 
+    pub fn landing_entries(&self) -> &'static [Screen] {
+        &LANDING_ENTRIES
+    }
+
+    pub fn selected_landing_entry_index(&self) -> usize {
+        self.selected_landing_entry
+    }
+
     pub fn revsets(&self) -> &[RevsetSummary] {
         &self.revsets
     }
@@ -252,6 +284,14 @@ impl App {
 
     pub fn focused_pane(&self) -> Pane {
         self.focused_pane
+    }
+
+    pub fn secondary_items(&self) -> &'static [&'static str] {
+        &SECONDARY_ITEMS
+    }
+
+    pub fn selected_secondary_item_index(&self) -> usize {
+        self.selected_secondary_item
     }
 
     #[allow(dead_code)]

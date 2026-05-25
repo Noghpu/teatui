@@ -96,14 +96,17 @@ Every mutating step is shown in a confirmation view before execution.
 
 ## UI Model
 
-The app uses the multi-view Ratatui component template internally, but the
-first user-facing model is a focused Landing screen plus a Generate PR
-workspace. The Generate PR workspace follows a compact, keyboard-first layout
-inspired by `octo.nvim`:
+The app uses the multi-view Ratatui component template internally. The
+user-facing model is a minimal functional Landing screen, similar in spirit to
+the Neovim/LazyVim dashboard, plus three separate modes that can each be
+designed as their own small app:
 
-- Landing: operational dashboard and entry point.
-- Generate PR: three-pane workflow for selecting a revset, editing PR fields,
-  previewing context, generating the PR draft, and confirming execution.
+- Landing: operational dashboard and mode launcher.
+- Generate PR: primary workflow for turning a jj revset into a Gitea PR.
+- Manage PRs: simple workflow for listing PRs, viewing one, and adding a
+  comment.
+- Manage Issues: simple workflow for listing issues, viewing one, and adding a
+  comment.
 - Left pane in Generate PR: available revsets with descriptions and bookmarks,
   not app navigation.
 - Center pane in Generate PR: PR form and field navigation.
@@ -112,8 +115,10 @@ inspired by `octo.nvim`:
 - Bottom command/status bar: mode, current repo, background job state, help.
 
 The landing view is intentionally useful, not a marketing screen. It should show
-current repository detection, auth/tool availability, and the next likely action.
-Exiting Generate PR returns to Landing.
+current repository detection, auth/tool availability, and mode entrypoints.
+Every mode exits back to Landing. Future global keybinds can jump directly
+between modes, but the first implementation should make Landing the consistent
+hub.
 
 Primary modes:
 
@@ -131,7 +136,7 @@ Initial keybindings outside text input:
 - `g`: generate PR proposal from the current form values.
 - `r`: refresh current view.
 - `c`: comment on selected issue or PR.
-- `Esc`: leave edit mode, close modal, or exit Generate PR back to Landing.
+- `Esc`: leave edit mode, close modal, or exit the current mode back to Landing.
 - `q`: quit from Landing, or close the current modal.
 
 Text input handling is mode-specific. When a text field or text area is in edit
@@ -144,8 +149,8 @@ not while editing text.
 
 #### Landing
 
-The landing view is the operational dashboard. It should answer "can I generate
-a PR from here?" without requiring a command.
+The landing view is the operational dashboard and mode launcher. It should answer
+"what can I do from here?" without requiring a command.
 
 Work pane:
 
@@ -154,12 +159,16 @@ Work pane:
 - Gitea remote detection.
 - `tea` authentication status when cheaply available.
 - Ollama endpoint/model reachability.
-- Detected base branch and selected revset.
+- Detected base branch.
+- LazyVim-style entrypoints for:
+  - Generate PR.
+  - Manage PRs.
+  - Manage Issues.
 
 Preview pane:
 
 - Recent stack summary.
-- Suggested next action.
+- Suggested next action for the selected entrypoint.
 - Blocking setup errors with exact command names.
 
 #### Generate PR
@@ -232,10 +241,10 @@ navigation/review mode. User-provided form values should be treated as stronger
 intent than the model's inferred defaults. For example, a manually typed title
 should be included as a requested title, not overwritten silently.
 
-#### Issues Later
+#### Manage Issues
 
-The issues screen is intentionally shallow and should not return as a left-pane
-navigation item inside Generate PR.
+Manage Issues is a separate mode entered from Landing. It is intentionally
+shallow.
 
 Work pane:
 
@@ -252,10 +261,10 @@ Preview pane:
 Out of scope: editing metadata, closing issues, assignment, project boards,
 milestones, bulk actions.
 
-#### Pull Requests Later
+#### Manage PRs
 
-The PRs screen mirrors Issues with PR-specific fields and should not return as a
-left-pane navigation item inside Generate PR.
+Manage PRs is a separate mode entered from Landing. It mirrors Issues with
+PR-specific fields.
 
 Work pane:
 
@@ -272,11 +281,11 @@ Preview pane:
 Out of scope: review approvals, line comments, merge operations, checks
 management, reviewer assignment.
 
-#### Logs Later
+#### Logs
 
 The logs screen is a structured command and job history. It can be reachable
-from Landing or as a modal/popup later, but it should not occupy the Generate PR
-left pane.
+from Landing or as a modal/popup later, but it should not occupy the Generate PR,
+Manage PRs, or Manage Issues left panes.
 
 Work pane:
 
@@ -370,7 +379,7 @@ Examples:
   keybinds.
 - `Esc` in edit mode returns to form navigation mode without leaving Generate
   PR.
-- `Esc` in Generate PR navigation/review mode returns to Landing.
+- `Esc` in any mode navigation/review state returns to Landing.
 - `g` in Generate PR navigation/review mode collects context and sends the
   prompt using the selected revset plus every current form value.
 - `Enter` in Generate/Confirming starts the PR execution job.
@@ -645,7 +654,7 @@ Sensitive data:
 
 The next slices should keep the app usable at each step:
 
-1. Repo/tool detection in Landing with log output.
+1. Landing dashboard with repo/tool detection and three mode entrypoints.
 2. Shared async command runner and job registry.
 3. Generate PR revset list in the left pane with descriptions and bookmarks.
 4. Revset detail preview in the center/right panes while selecting.
@@ -654,8 +663,8 @@ The next slices should keep the app usable at each step:
 7. Ollama client and strict JSON parsing.
 8. Draft review/edit state.
 9. Branch/push/`tea` execution preview and confirmation.
-10. Minimal Issues list/detail/comment.
-11. Minimal PRs list/detail/comment.
+10. Minimal Manage PRs list/detail/comment mode.
+11. Minimal Manage Issues list/detail/comment mode.
 
 ## Open Questions
 
@@ -677,10 +686,10 @@ The next slices should keep the app usable at each step:
 ## Milestones
 
 1. Project scaffold: component-template Ratatui app, docs, config skeleton.
-2. Repo detection: show current jj repo status and log in the TUI.
+2. Landing dashboard: show repo/tool status and launch three modes.
 3. Generate PR revset selector and PR form.
 4. Prompt assembly: collect context and render prompt preview.
 5. Ollama generation: call local endpoint and parse strict JSON.
 6. PR review screen: edit branch, title, and body before execution.
 7. PR execution: create branch, push, and call `tea` to open PR.
-8. Simple issue/PR listing and comment commands.
+8. Simple Manage PRs and Manage Issues list/detail/comment commands.
