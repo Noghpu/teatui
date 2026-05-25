@@ -2,8 +2,8 @@
 id: 00007-2026-05-25-polished-pr-gen-prompt-manifest
 created_at: 2026-05-25T21:55:34+02:00
 created_by_model: migration-placeholder
-state: implemented
-state_updated_at: 2026-05-25T21:55:34+02:00
+state: reviewed
+state_updated_at: 2026-05-25T22:00:44+02:00
 ---
 # Prompt Manifest
 
@@ -87,3 +87,27 @@ Files changed:
 
 Residual risks:
 - Placeholder metadata may not reflect the original implementer run.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: gpt-5.5-medium
+- reviewed_at: 2026-05-25T22:00:44+02:00
+- state: reviewed
+
+Review postmortem:
+
+Facts:
+- The implemented prompt module returns both a prompt string and PromptManifest with included, omitted, byte count, form values, and truncation warning data.
+- ContextReady renders the manifest by default in the right preview pane and supports toggling to full prompt text with `p`.
+- Manual PR form fields are included in the prompt and manifest, and the prompt explicitly says to treat those entered values as user intent.
+- Prompt assembly avoids config endpoint/model values and sanitizes raw remotes in the fallback remote URL path.
+- The review found that the prompt requested strict JSON but did not explicitly say not to wrap the response in a Markdown fence.
+- The review fixed the prompt contract to require only the JSON object with no Markdown fence or commentary, and added a focused assertion for that behavior.
+- `just verify` passed after the review change.
+
+Inferences:
+- The remaining large-context behavior is acceptable for this slice because truncation and omissions are visible before generation, even though future tickets may improve selected-hunk summaries.
+- The prompt surface is ready for the next Ollama-client slice because the output contract is now explicit enough for JSON-first parsing.

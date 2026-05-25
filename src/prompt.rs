@@ -178,6 +178,7 @@ fn prompt_contract() -> String {
         r#"{"branch_name":"feature/example-branch","title":"Short PR title","body":"Markdown PR body","review_notes":["Important inference or uncertainty"]}"#,
         "",
         "Rules:",
+        "- Return only the JSON object. Do not wrap it in a Markdown fence or add commentary.",
         "- Use only the context below.",
         "- Do not invent tests, issue links, reviewers, or behavior.",
         "- If context is missing, mention the uncertainty in review_notes.",
@@ -525,6 +526,7 @@ mod tests {
                 .prompt
                 .contains("Return strict JSON matching this schema")
         );
+        assert!(build.prompt.contains("Do not wrap it in a Markdown fence"));
         assert!(build.prompt.contains("Add prompt manifest"));
         assert_eq!(build.manifest.form_values.title, "Add prompt manifest");
         assert_eq!(build.manifest.selected_revset, "@");
@@ -557,7 +559,7 @@ mod tests {
         );
 
         let form = PrForm::new("@", "feature/example", "main@origin");
-        let build = PromptBuild::new(&context, &form, None, 700);
+        let build = PromptBuild::new(&context, &form, None, 1_600);
 
         assert!(!build.manifest.truncation_warnings.is_empty());
         assert!(
