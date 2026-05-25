@@ -386,6 +386,7 @@ impl GenerateState {
     }
 
     pub fn replace_revsets(&mut self, revsets: Vec<RevsetSummary>) {
+        let previous_label = self.selected_revset().label().to_string();
         self.revsets = if revsets.is_empty() {
             vec![RevsetSummary::new(
                 "(no revsets)",
@@ -401,7 +402,11 @@ impl GenerateState {
         } else {
             revsets
         };
-        self.selected_revset = 0;
+        self.selected_revset = self
+            .revsets
+            .iter()
+            .position(|revset| revset.label() == previous_label)
+            .unwrap_or(0);
         self.sync_head_from_selected_revset();
     }
 
@@ -419,5 +424,34 @@ impl GenerateState {
                 .unwrap_or_default();
             self.form.branch_name = FieldState::new(branch_name);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn revset(label: &str) -> RevsetSummary {
+        RevsetSummary::new(
+            label,
+            "description",
+            Vec::new(),
+            "1 file changed",
+            1,
+            vec!["commit".into()],
+            vec!["change".into()],
+            vec!["commit change description".into()],
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn replace_revsets_preserves_selected_label_when_present() {
+        let mut state = GenerateState::new(vec![revset("@"), revset("@-")]);
+        state.selected_revset = 1;
+
+        state.replace_revsets(vec![revset("@"), revset("@-"), revset("heads(trunk()..)")]);
+
+        assert_eq!(state.selected_revset().label(), "@-");
     }
 }

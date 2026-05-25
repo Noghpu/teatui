@@ -69,16 +69,19 @@ impl JjClient {
         )
     }
 
-    pub fn candidate_revsets(&self, cwd: impl AsRef<Path>) -> Result<Vec<RevsetSummary>> {
+    pub fn candidate_revsets(&self, cwd: impl AsRef<Path>) -> Vec<RevsetSummary> {
         let cwd = cwd.as_ref().to_path_buf();
         let revsets = ["@", "@-", "heads(trunk()..)"];
         let mut summaries = Vec::with_capacity(revsets.len());
 
         for revset in revsets {
-            summaries.push(self.candidate_revset_summary(&cwd, revset)?);
+            summaries.push(
+                self.candidate_revset_summary(&cwd, revset)
+                    .unwrap_or_else(|err| failed_revset_summary(revset, err.to_string())),
+            );
         }
 
-        Ok(summaries)
+        summaries
     }
 
     pub fn candidate_revset_summary(
@@ -159,6 +162,20 @@ fn parse_revset_summary(
         change_ids,
         recent_log,
         warnings,
+    )
+}
+
+fn failed_revset_summary(label: &str, message: String) -> RevsetSummary {
+    RevsetSummary::new(
+        label,
+        &message,
+        Vec::new(),
+        "0 files changed, 0 insertions(+), 0 deletions(-)",
+        0,
+        Vec::new(),
+        Vec::new(),
+        vec![message.clone()],
+        vec![format!("failed to load revset {label}: {message}")],
     )
 }
 
@@ -272,21 +289,9 @@ impl RevsetDiscovery {
         tokio::spawn(async move {
             let summaries = tokio::task::spawn_blocking(move || client.candidate_revsets(&cwd))
                 .await
-                .unwrap_or_else(|err| Err(color_eyre::eyre::eyre!(err.to_string())))
                 .unwrap_or_else(|err| {
                     let message = err.to_string();
-                    let description = message.clone();
-                    vec![RevsetSummary::new(
-                        "(revset discovery failed)",
-                        &description,
-                        Vec::new(),
-                        "0 files changed, 0 insertions(+), 0 deletions(-)",
-                        0,
-                        Vec::new(),
-                        Vec::new(),
-                        vec![message.clone()],
-                        vec![message],
-                    )]
+                    vec![failed_revset_summary("(revset discovery failed)", message)]
                 });
             let _ = tx.send(Box::new(RevsetUpdate::new(summaries)));
         });
@@ -305,6 +310,15 @@ mod tests {
         assert_eq!(entry.change_id, "def456");
         assert_eq!(entry.bookmarks, vec!["bookmark-a", "bookmark-b"]);
         assert_eq!(entry.description, "Fix the parser");
+    }
+
+    #[test]
+    fn failed_revset_summary_keeps_candidate_label() {
+        let summary = failed_revset_summary("@-", "revset error".into());
+
+        assert_eq!(summary.label(), "@-");
+        assert_eq!(summary.commit_count(), 0);
+        assert!(summary.warnings()[0].contains("failed to load revset @-"));
     }
 
     #[test]

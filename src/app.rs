@@ -8,7 +8,7 @@ use crate::command::CommandRunner;
 use crate::config::Config;
 use crate::event::{AppEvent, EventHandler, JobResult, JobStatus};
 use crate::generate::{Focus, GeneratePhase, GenerateState, InputMode, RevsetSummary};
-use crate::jj::{JjClient, RevsetDiscovery};
+use crate::jj::RevsetDiscovery;
 use crate::repo::{RepoDiscovery, RepoState};
 use crate::tui::Tui;
 use crate::ui;
@@ -139,17 +139,6 @@ impl App {
         revset_discovery: RevsetDiscovery,
     ) -> Self {
         let repo = RepoState::bootstrap(&config);
-        let jj_client = JjClient::new(&config);
-        let revsets = jj_client
-            .candidate_revsets(
-                repo.workspace_root
-                    .as_deref()
-                    .unwrap_or_else(|| std::path::Path::new(".")),
-            )
-            .unwrap_or_else(|err| {
-                tracing::warn!("failed to load jj revsets at startup: {}", err);
-                Vec::new()
-            });
         Self {
             config,
             command_runner,
@@ -160,11 +149,7 @@ impl App {
             input_mode: InputMode::Normal,
             repo,
             landing: LandingState::default(),
-            generate: if revsets.is_empty() {
-                GenerateState::with_placeholder("No revsets discovered at startup")
-            } else {
-                GenerateState::new(revsets)
-            },
+            generate: GenerateState::with_placeholder("Revsets pending discovery"),
             pull_requests: ListState::default(),
             issues: ListState::default(),
             logs: LogState::default(),
