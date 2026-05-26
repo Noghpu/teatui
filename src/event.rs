@@ -7,7 +7,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::{select, time::interval_at};
 
 use crate::context::ContextResult;
-use crate::generate::{GeneratedDraft, RevsetSummary};
+use crate::generate::{GeneratedDraft, RevsetSummary, StaleCheckResult};
 use crate::ollama::OllamaError;
 use crate::repo::RepoState;
 
@@ -23,6 +23,7 @@ pub enum BackgroundEvent {
     Context(ContextResult),
     Repo(Box<RepoState>),
     Revsets(Vec<RevsetSummary>),
+    StaleCheck(StaleCheckResult),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

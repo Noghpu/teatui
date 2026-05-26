@@ -2,7 +2,8 @@
 id: 0000c-2026-05-26-2a94c3dc-pr-exec-execution-plan-and-confirming
 created_at: 2026-05-26T08:01:29+02:00
 created_by_model: claude-opus-4-7/high
-state: open
+state: implemented
+state_updated_at: 2026-05-26T08:38:53+02:00
 ---
 # ExecutionPlan and Confirming Phase
 
@@ -179,3 +180,34 @@ press `Esc` to return to DraftReady; then re-enter Confirming, press
   produces a misleading preview. Reviewer must cross-check.
 - Validation must not block on a transient empty title during draft
   retries; the check runs only on `c` press, not continuously.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: unknown
+- completed_at: 2026-05-26T08:38:53+02:00
+- state: implemented
+
+Completed:
+- Added the DraftReady -> CheckingFreshness -> Confirming flow with confirm/cancel key handling and a non-mutating Enter placeholder.
+- Added ExecutionPlan / ExecutionStep construction plus execution validation for required fields, branch shape, and shell-metacharacter checks.
+- Added async stale-context checking via jj log output comparison and surfaced the result in the preview/help UI.
+
+Deviations:
+- Kept execution itself non-mutating and limited Enter in Confirming to the placeholder log line, per this ticket's scope.
+
+Verification:
+- `just verify`
+
+Files:
+- src/generate.rs
+- src/app.rs
+- src/event.rs
+- src/action.rs
+- src/jj.rs
+- src/ui.rs
+
+Residual risks:
+- The later execution ticket must keep the preview argv aligned with the mutating implementation.

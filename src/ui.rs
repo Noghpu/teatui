@@ -7,7 +7,9 @@ use ratatui::{
 };
 
 use crate::app::{App, Screen};
-use crate::generate::{FieldId, Focus, GeneratePhase, GenerateState, PromptView};
+use crate::generate::{
+    ExecutionPlan, FieldId, Focus, GeneratePhase, GenerateState, PromptView, StaleCheckResult,
+};
 use crate::prompt::PromptBuild;
 use crate::repo::{OllamaStatus, TeaAuth, ToolStatus};
 
@@ -246,7 +248,11 @@ fn render_work(frame: &mut Frame, app: &App, area: Rect) {
     let title = match app.screen() {
         Screen::Landing => "Status",
         Screen::Generate => {
-            if app.generate().phase == GeneratePhase::DraftReady {
+            if app.generate().phase == GeneratePhase::Confirming {
+                "Execution Preview"
+            } else if app.generate().phase == GeneratePhase::CheckingFreshness {
+                "Verifying Repo Context"
+            } else if app.generate().phase == GeneratePhase::DraftReady {
                 "Draft Review"
             } else {
                 "PR Form"
@@ -360,6 +366,22 @@ fn render_help(frame: &mut Frame, app: &App, area: Rect) {
                 "cancel ".dim(),
             ])
         }
+        Screen::Generate if app.input_mode() == crate::generate::InputMode::Confirm => {
+            Line::from(vec![
+                " Enter ".bold().cyan(),
+                "execute ".dim(),
+                " Esc ".bold().cyan(),
+                "cancel ".dim(),
+            ])
+        }
+        Screen::Generate if app.generate().phase == GeneratePhase::CheckingFreshness => {
+            Line::from(vec![
+                " Esc ".bold().cyan(),
+                "cancel ".dim(),
+                " waiting ".dim(),
+                "verifying repo context ".dim(),
+            ])
+        }
         Screen::Generate if app.focus() == Focus::Preview => Line::from(vec![
             " p ".bold().cyan(),
             "toggle prompt ".dim(),
@@ -381,6 +403,8 @@ fn render_help(frame: &mut Frame, app: &App, area: Rect) {
             "edit ".dim(),
             " g ".bold().cyan(),
             "generate ".dim(),
+            " c ".bold().cyan(),
+            "confirm ".dim(),
             " p ".bold().cyan(),
             "prompt ".dim(),
             " r ".bold().cyan(),
@@ -673,6 +697,57 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
                 "The execution preview will show branch, push, and tea commands before mutation."
                     .yellow(),
             ));
+            lines.push(Line::from(
+                "Press c to validate the execution plan and check repo freshness.".dim(),
+            ));
+        }
+        GeneratePhase::CheckingFreshness => {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Checking repo freshness".bold()));
+            lines.push(Line::from(
+                generate
+                    .confirmation_summary
+                    .as_deref()
+                    .map(|summary| format!("validation: {summary}"))
+                    .unwrap_or_else(|| "validation: running".to_string()),
+            ));
+            lines.push(Line::from("freshness: verifying repo context...").yellow());
+            if let Some(draft) = generate.draft.as_ref() {
+                lines.push(Line::from(""));
+                lines.extend(render_draft_section(draft));
+            }
+            lines.push(Line::from(""));
+            lines.extend(render_recent_logs(&app.logs().entries, 6));
+            lines.push(Line::from(""));
+            lines.push(Line::from("Wait for the freshness check to finish.".dim()));
+        }
+        GeneratePhase::Confirming => {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Execution preview".bold()));
+            lines.push(Line::from(
+                generate
+                    .confirmation_summary
+                    .as_deref()
+                    .map(|summary| format!("validation: {summary}"))
+                    .unwrap_or_else(|| "validation: passed".to_string()),
+            ));
+            lines.push(match generate.freshness_result.as_ref() {
+                Some(StaleCheckResult::Fresh) => Line::from("freshness: verified").green(),
+                Some(StaleCheckResult::Stale { reason }) => {
+                    Line::from(format!("freshness: stale - {reason}")).red()
+                }
+                None => Line::from("freshness: unavailable").yellow(),
+            });
+            if let Some(plan) = generate.execution_plan.as_ref() {
+                lines.push(Line::from(""));
+                lines.extend(render_execution_plan(plan));
+            }
+            lines.push(Line::from(""));
+            lines.extend(render_recent_logs(&app.logs().entries, 6));
+            lines.push(Line::from(""));
+            lines.push(Line::from(
+                "Enter keeps this preview open and logs the execution placeholder.".yellow(),
+            ));
         }
         GeneratePhase::Failed => {
             lines.push(Line::from(""));
@@ -693,6 +768,18 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             if let Some(prompt) = generate.prompt() {
                 lines.push(Line::from(""));
                 lines.extend(render_manifest_warnings(prompt));
+            }
+            if let Some(summary) = generate.confirmation_summary.as_ref() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(format!("validation: {summary}")).cyan());
+            }
+            if let Some(result) = generate.freshness_result.as_ref() {
+                lines.push(match result {
+                    StaleCheckResult::Fresh => Line::from("freshness: verified").green(),
+                    StaleCheckResult::Stale { reason } => {
+                        Line::from(format!("freshness: stale - {reason}")).red()
+                    }
+                });
             }
             lines.push(Line::from(""));
             lines.extend(render_recent_logs(&app.logs().entries, 6));
@@ -756,6 +843,17 @@ fn render_draft_section(draft: &crate::generate::GeneratedDraft) -> Vec<Line<'st
         for note in &draft.review_notes {
             lines.push(Line::from(format!("  - {note}")));
         }
+    }
+
+    lines
+}
+
+fn render_execution_plan(plan: &ExecutionPlan) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from("Execution plan".bold())];
+
+    for (index, step) in plan.steps.iter().enumerate() {
+        lines.push(Line::from(format!("{}. {}", index + 1, step.label)).cyan());
+        lines.push(Line::from(format!("   {}", step.command.redacted_display())).dim());
     }
 
     lines

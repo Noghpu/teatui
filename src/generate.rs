@@ -1,13 +1,16 @@
 use std::time::SystemTime;
 
+use crate::command::ExternalCommand;
 use crate::context::ContextBundle;
 use crate::prompt::{DEFAULT_PROMPT_BYTE_BUDGET, PromptBuild};
+use crate::repo::RepoState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputMode {
     #[default]
     Normal,
     Editing,
+    Confirm,
 }
 
 impl InputMode {
@@ -15,6 +18,7 @@ impl InputMode {
         match self {
             Self::Normal => "NORMAL",
             Self::Editing => "EDITING",
+            Self::Confirm => "CONFIRM",
         }
     }
 }
@@ -37,6 +41,7 @@ pub enum GeneratePhase {
     ContextReady,
     Generating,
     DraftReady,
+    CheckingFreshness,
     Confirming,
     Executing,
     Complete,
@@ -52,6 +57,7 @@ impl GeneratePhase {
             Self::ContextReady => "context-ready",
             Self::Generating => "generating",
             Self::DraftReady => "draft-ready",
+            Self::CheckingFreshness => "checking-freshness",
             Self::Confirming => "confirming",
             Self::Executing => "executing",
             Self::Complete => "complete",
@@ -239,6 +245,23 @@ pub struct DraftReview {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionStep {
+    pub label: String,
+    pub command: crate::command::ExternalCommand,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ExecutionPlan {
+    pub steps: Vec<ExecutionStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaleCheckResult {
+    Fresh,
+    Stale { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevsetSummary {
     label: String,
     description: String,
@@ -326,6 +349,9 @@ pub struct GenerateState {
     pub context_error: Option<String>,
     pub generation_error: Option<String>,
     pub draft: Option<GeneratedDraft>,
+    pub execution_plan: Option<ExecutionPlan>,
+    pub confirmation_summary: Option<String>,
+    pub freshness_result: Option<StaleCheckResult>,
     pub review: DraftReview,
     pub prompt_view: PromptView,
     prompt_cache: Option<PromptBuild>,
@@ -353,6 +379,9 @@ impl GenerateState {
             context_error: None,
             generation_error: None,
             draft: None,
+            execution_plan: None,
+            confirmation_summary: None,
+            freshness_result: None,
             review: DraftReview::default(),
             prompt_view: PromptView::default(),
             prompt_cache: None,
@@ -508,6 +537,7 @@ impl GenerateState {
         self.generation_error = None;
         self.context = None;
         self.prompt_cache = None;
+        self.clear_confirmation_state();
     }
 
     pub fn complete_context_collection(&mut self, context: ContextBundle) {
@@ -517,24 +547,28 @@ impl GenerateState {
         self.generation_error = None;
         self.context = Some(context);
         self.refresh_prompt_cache();
+        self.clear_confirmation_state();
     }
 
     pub fn fail_context_collection(&mut self, error: impl Into<String>) {
         self.phase = GeneratePhase::Failed;
         self.context_error = Some(error.into());
         self.generation_error = None;
+        self.clear_confirmation_state();
     }
 
     pub fn begin_generation(&mut self) {
         self.phase = GeneratePhase::Generating;
         self.context_error = None;
         self.generation_error = None;
+        self.clear_confirmation_state();
     }
 
     pub fn complete_generation(&mut self, draft: GeneratedDraft) {
         self.phase = GeneratePhase::DraftReady;
         self.context_error = None;
         self.generation_error = None;
+        self.clear_confirmation_state();
         self.sync_form_from_draft(&draft);
         self.review = DraftReview {
             summary: format!("Generated draft for {}", draft.branch_name),
@@ -549,6 +583,7 @@ impl GenerateState {
         self.phase = GeneratePhase::Failed;
         self.context_error = None;
         self.generation_error = Some(error.clone());
+        self.clear_confirmation_state();
         if self.draft.is_none() {
             self.review = DraftReview {
                 summary: "Generation failed".into(),
@@ -565,8 +600,42 @@ impl GenerateState {
         };
     }
 
+    pub fn begin_confirmation_check(&mut self) {
+        self.phase = GeneratePhase::CheckingFreshness;
+        self.confirmation_summary = Some("validation passed".into());
+        self.freshness_result = None;
+        self.execution_plan = None;
+    }
+
+    pub fn complete_confirmation(&mut self, plan: ExecutionPlan) {
+        self.phase = GeneratePhase::Confirming;
+        self.confirmation_summary = Some("validation passed".into());
+        self.freshness_result = Some(StaleCheckResult::Fresh);
+        self.execution_plan = Some(plan);
+    }
+
+    pub fn fail_confirmation(&mut self, reason: impl Into<String>) {
+        self.phase = GeneratePhase::Failed;
+        self.confirmation_summary = Some("validation passed".into());
+        self.freshness_result = Some(StaleCheckResult::Stale {
+            reason: reason.into(),
+        });
+        self.execution_plan = None;
+    }
+
+    pub fn cancel_confirmation(&mut self) {
+        self.phase = GeneratePhase::DraftReady;
+        self.clear_confirmation_state();
+    }
+
     pub fn prompt(&self) -> Option<&PromptBuild> {
         self.prompt_cache.as_ref()
+    }
+
+    pub fn clear_confirmation_state(&mut self) {
+        self.execution_plan = None;
+        self.confirmation_summary = None;
+        self.freshness_result = None;
     }
 
     fn sync_form_from_draft(&mut self, draft: &GeneratedDraft) {
@@ -633,9 +702,181 @@ fn required_field_errors(label: &str, value: &str) -> Vec<String> {
     }
 }
 
+pub fn validate_for_execution(form: &PrForm, _repo: &RepoState) -> Result<(), Vec<String>> {
+    let mut errors = Vec::new();
+
+    push_required_error(&mut errors, "head", form.head.display_value());
+    push_required_error(&mut errors, "base", form.base.display_value());
+    push_required_error(&mut errors, "title", form.title.display_value());
+    push_required_error(&mut errors, "body", form.description.display_value());
+
+    let branch_name = form.branch_name.display_value().trim();
+    if branch_name.is_empty() {
+        errors.push("branch name is required".into());
+    } else {
+        errors.extend(
+            validate_branch_name(branch_name)
+                .into_iter()
+                .map(|message| format!("branch name: {message}")),
+        );
+    }
+
+    errors.extend(validate_no_shell_metacharacters(
+        "labels",
+        form.labels.display_value(),
+    ));
+    errors.extend(validate_no_shell_metacharacters(
+        "assignees",
+        form.assignees.display_value(),
+    ));
+    errors.extend(validate_no_shell_metacharacters(
+        "milestone",
+        form.milestone.display_value(),
+    ));
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+impl ExecutionPlan {
+    pub fn from_draft(form: &PrForm, repo: &RepoState, revset: &RevsetSummary) -> Self {
+        let cwd = repo
+            .workspace_root
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let head = form.head.display_value().trim().to_string();
+        let branch_name = form.branch_name.display_value().trim().to_string();
+        let base = if form.base.display_value().trim().is_empty() {
+            repo.base_branch.name.trim().to_string()
+        } else {
+            form.base.display_value().trim().to_string()
+        };
+
+        let bookmark_command = if revset
+            .bookmarks()
+            .iter()
+            .any(|bookmark| bookmark == &branch_name)
+        {
+            ExternalCommand::new(
+                "jj",
+                [
+                    "bookmark",
+                    "move",
+                    branch_name.as_str(),
+                    "-r",
+                    head.as_str(),
+                ],
+                &cwd,
+            )
+        } else {
+            ExternalCommand::new(
+                "jj",
+                [
+                    "bookmark",
+                    "create",
+                    branch_name.as_str(),
+                    "-r",
+                    head.as_str(),
+                ],
+                &cwd,
+            )
+        };
+
+        let mut tea_args = vec![
+            "pr".to_string(),
+            "create".to_string(),
+            "--title".to_string(),
+            form.title.display_value().trim().to_string(),
+            "--description".to_string(),
+            form.description.display_value().trim().to_string(),
+            "--base".to_string(),
+            base,
+            "--head".to_string(),
+            branch_name.clone(),
+        ];
+
+        for label in split_multi_values(form.labels.display_value()) {
+            tea_args.push("--label".into());
+            tea_args.push(label);
+        }
+        for assignee in split_multi_values(form.assignees.display_value()) {
+            tea_args.push("--assignee".into());
+            tea_args.push(assignee);
+        }
+        if let Some(milestone) = optional_single_value(form.milestone.display_value()) {
+            tea_args.push("--milestone".into());
+            tea_args.push(milestone);
+        }
+
+        Self {
+            steps: vec![
+                ExecutionStep {
+                    label: "create or move bookmark".into(),
+                    command: bookmark_command,
+                },
+                ExecutionStep {
+                    label: "push bookmark to origin".into(),
+                    command: ExternalCommand::new(
+                        "jj",
+                        ["git", "push", "--bookmark", branch_name.as_str()],
+                        &cwd,
+                    ),
+                },
+                ExecutionStep {
+                    label: "create gitea PR".into(),
+                    command: ExternalCommand::new("tea", tea_args, &cwd),
+                },
+            ],
+        }
+    }
+}
+
+fn push_required_error(errors: &mut Vec<String>, label: &str, value: &str) {
+    if value.trim().is_empty() {
+        errors.push(format!("{label} is required"));
+    }
+}
+
+fn validate_no_shell_metacharacters(label: &str, value: &str) -> Vec<String> {
+    if value.trim().is_empty() {
+        return Vec::new();
+    }
+
+    if value.chars().any(is_shell_metacharacter) {
+        vec![format!("{label} contains shell metacharacters")]
+    } else {
+        Vec::new()
+    }
+}
+
+fn is_shell_metacharacter(ch: char) -> bool {
+    matches!(ch, ';' | '&' | '|' | '`' | '$' | '<' | '>' | '\n' | '\r')
+}
+
+fn split_multi_values(value: &str) -> Vec<String> {
+    value
+        .split([',', '\n'])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn optional_single_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repo::{
+        BaseBranchInfo, BaseBranchSource, OllamaStatus, RemoteInfo, RepoState, TeaAuth,
+    };
+    use std::path::PathBuf;
 
     fn revset(label: &str) -> RevsetSummary {
         RevsetSummary::new(
@@ -649,6 +890,29 @@ mod tests {
             vec!["commit change description".into()],
             Vec::new(),
         )
+    }
+
+    fn repo_state() -> RepoState {
+        RepoState {
+            workspace_root: Some(PathBuf::from("C:/repo")),
+            inside_workspace: true,
+            jj: crate::repo::ToolStatus::Available,
+            git: crate::repo::ToolStatus::Available,
+            tea: crate::repo::ToolStatus::Available,
+            tea_auth: TeaAuth::Configured {
+                host: "code.example.com".into(),
+                user: Some("alice".into()),
+            },
+            remote: Some(RemoteInfo::parse("git@code.example.com:team/project.git")),
+            base_branch: BaseBranchInfo {
+                name: "main".into(),
+                source: BaseBranchSource::Config,
+            },
+            ollama_base_url: "http://localhost:11434".into(),
+            ollama_model: "qwen2.5-coder:latest".into(),
+            ollama: OllamaStatus::Reachable,
+            blockers: Vec::new(),
+        }
     }
 
     #[test]
@@ -796,5 +1060,88 @@ mod tests {
         assert_eq!(state.context, None);
         assert_eq!(state.draft, Some(draft));
         assert_eq!(state.review.summary, "Generated draft for feature/example");
+    }
+
+    #[test]
+    fn validate_for_execution_rejects_bad_inputs() {
+        let mut form = PrForm::new("", "", "");
+        form.branch_name = FieldState::new("Feature Bad");
+        form.labels = FieldState::new("bug;rm -rf");
+        form.assignees = FieldState::new("alice");
+        form.milestone = FieldState::new("v1");
+
+        let errors = validate_for_execution(&form, &repo_state()).expect_err("errors");
+
+        assert!(errors.iter().any(|error| error == "head is required"));
+        assert!(errors.iter().any(|error| error == "base is required"));
+        assert!(errors.iter().any(|error| error == "title is required"));
+        assert!(errors.iter().any(|error| error == "body is required"));
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("branch name: branch name should use lowercase words"))
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error == "labels contains shell metacharacters")
+        );
+    }
+
+    #[test]
+    fn execution_plan_creates_bookmark_when_missing() {
+        let form = PrForm::new("@", "feature/example", "main");
+        let mut form = form;
+        form.title = FieldState::new("Create a PR");
+        form.description = FieldState::new("Body");
+
+        let plan = ExecutionPlan::from_draft(&form, &repo_state(), &revset("@"));
+
+        assert_eq!(plan.steps.len(), 3);
+        assert_eq!(plan.steps[0].label, "create or move bookmark");
+        assert_eq!(
+            plan.steps[0].command.args,
+            vec!["bookmark", "create", "feature/example", "-r", "@"]
+        );
+        assert_eq!(
+            plan.steps[2].command.args,
+            vec![
+                "pr",
+                "create",
+                "--title",
+                "Create a PR",
+                "--description",
+                "Body",
+                "--base",
+                "main",
+                "--head",
+                "feature/example"
+            ]
+        );
+    }
+
+    #[test]
+    fn execution_plan_moves_existing_bookmark_when_present() {
+        let mut form = PrForm::new("@", "feature/example", "main");
+        form.title = FieldState::new("Create a PR");
+        form.description = FieldState::new("Body");
+        let revset = RevsetSummary::new(
+            "@",
+            "description",
+            vec!["feature/example".into()],
+            "1 file changed",
+            1,
+            vec!["commit".into()],
+            vec!["change".into()],
+            vec!["commit change description".into()],
+            Vec::new(),
+        );
+
+        let plan = ExecutionPlan::from_draft(&form, &repo_state(), &revset);
+
+        assert_eq!(
+            plan.steps[0].command.args,
+            vec!["bookmark", "move", "feature/example", "-r", "@"]
+        );
     }
 }

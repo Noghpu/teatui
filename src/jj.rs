@@ -6,6 +6,7 @@ use crate::command::{ExternalCommand, capture};
 use crate::config::Config;
 use crate::event::BackgroundEvent;
 use crate::generate::RevsetSummary;
+use crate::generate::StaleCheckResult;
 
 const CANDIDATE_REVSETS: &[&str] = &["@", "@-", "heads(trunk()..)"];
 
@@ -90,6 +91,55 @@ pub fn spawn_revset_discovery(config: &Config, cwd: PathBuf, tx: UnboundedSender
         let summaries = client.candidate_revsets(&cwd).await;
         let _ = tx.send(BackgroundEvent::Revsets(summaries));
     });
+}
+
+pub fn spawn_stale_context_check(
+    config: &Config,
+    cwd: PathBuf,
+    selected_revset: String,
+    expected_commit_ids: Vec<String>,
+    tx: UnboundedSender<BackgroundEvent>,
+) {
+    let client = JjClient::new(config);
+    tokio::spawn(async move {
+        let result = match capture(client.revset_log_command(&cwd, &selected_revset)).await {
+            Ok(log) => {
+                let actual_commit_ids = parse_revset_log_commit_ids(&log.stdout);
+                if commit_ids_match_order_independent(&expected_commit_ids, &actual_commit_ids) {
+                    StaleCheckResult::Fresh
+                } else {
+                    StaleCheckResult::Stale {
+                        reason: format!(
+                            "repo context changed for {selected_revset}; press r to refresh revsets/context"
+                        ),
+                    }
+                }
+            }
+            Err(error) => StaleCheckResult::Stale {
+                reason: format!(
+                    "freshness check failed for {selected_revset}: {}",
+                    error.display()
+                ),
+            },
+        };
+
+        let _ = tx.send(BackgroundEvent::StaleCheck(result));
+    });
+}
+
+pub fn parse_revset_log_commit_ids(output: &str) -> Vec<String> {
+    parse_log_entries(output)
+        .into_iter()
+        .map(|entry| entry.commit_id)
+        .collect()
+}
+
+pub fn commit_ids_match_order_independent(expected: &[String], actual: &[String]) -> bool {
+    use std::collections::BTreeSet;
+
+    let expected = expected.iter().cloned().collect::<BTreeSet<_>>();
+    let actual = actual.iter().cloned().collect::<BTreeSet<_>>();
+    expected == actual
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,5 +319,23 @@ mod tests {
             ]
         );
         assert_eq!(command.cwd, PathBuf::from("C:/repo"));
+    }
+
+    #[test]
+    fn parses_commit_ids_from_revset_log_output() {
+        let output = "abc123|def456|bookmark-a|Fix the parser\nxyz789|uvw000||Second line";
+
+        assert_eq!(
+            parse_revset_log_commit_ids(output),
+            vec!["abc123".to_string(), "xyz789".to_string()]
+        );
+    }
+
+    #[test]
+    fn compares_commit_ids_without_relying_on_order() {
+        let expected = vec!["abc123".into(), "xyz789".into()];
+        let actual = vec!["xyz789".into(), "abc123".into()];
+
+        assert!(commit_ids_match_order_independent(&expected, &actual));
     }
 }

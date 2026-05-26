@@ -13,6 +13,8 @@ pub enum Action {
     CommitEdit,
     CancelEdit,
     Generate,
+    ConfirmExecution,
+    ExecuteConfirmed,
     TogglePromptView,
     Refresh,
 }

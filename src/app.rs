@@ -8,11 +8,15 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::action::{Action, Direction};
 use crate::context::{self, ContextResult};
 use crate::event::{AppEvent, BackgroundEvent, EventHandler, GenerationResult};
-use crate::generate::{Focus, GeneratePhase, GenerateState, InputMode, RevsetSummary};
+use crate::generate::{
+    ExecutionPlan, Focus, GeneratePhase, GenerateState, InputMode, RevsetSummary, StaleCheckResult,
+    validate_for_execution,
+};
+use crate::jj;
 use crate::ollama::OllamaClient;
 use crate::repo::{self, RepoState};
 use crate::tui::Tui;
-use crate::{jj, ui};
+use crate::ui;
 
 const LOG_CAP: usize = 500;
 
@@ -110,6 +114,30 @@ impl App {
             return self.handle_edit_key(key);
         }
 
+        if self.screen == Screen::Generate {
+            match self.generate.phase {
+                GeneratePhase::CheckingFreshness => {
+                    return match key.code {
+                        KeyCode::Esc => Action::Back,
+                        _ => Action::Tick,
+                    };
+                }
+                GeneratePhase::Confirming => {
+                    return match key.code {
+                        KeyCode::Esc => Action::Back,
+                        KeyCode::Enter => Action::ExecuteConfirmed,
+                        _ => Action::Tick,
+                    };
+                }
+                GeneratePhase::DraftReady => {
+                    if matches!(key.code, KeyCode::Char('c')) {
+                        return Action::ConfirmExecution;
+                    }
+                }
+                _ => {}
+            }
+        }
+
         match key.code {
             KeyCode::Char('q') => Action::Quit,
             KeyCode::Esc => Action::Back,
@@ -119,6 +147,7 @@ impl App {
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => Action::FocusNext,
             KeyCode::Char('i') => Action::Edit,
             KeyCode::Char('g') => Action::Generate,
+            KeyCode::Char('c') => Action::Tick,
             KeyCode::Char('p') => Action::TogglePromptView,
             KeyCode::Char('r') => Action::Refresh,
             KeyCode::Enter => Action::Select,
@@ -155,6 +184,8 @@ impl App {
             Action::CommitEdit => self.finish_editing(true),
             Action::CancelEdit => self.finish_editing(false),
             Action::Generate => self.generate_pr(),
+            Action::ConfirmExecution => self.confirm_execution(),
+            Action::ExecuteConfirmed => self.execute_confirmed(),
             Action::TogglePromptView => self.toggle_prompt_view(),
             Action::Refresh => self.refresh(),
         }
@@ -166,10 +197,24 @@ impl App {
             BackgroundEvent::Context(result) => self.apply_context(result),
             BackgroundEvent::Repo(repo) => self.apply_repo(*repo),
             BackgroundEvent::Revsets(revsets) => self.apply_revsets(revsets),
+            BackgroundEvent::StaleCheck(result) => self.apply_stale_check(result),
         }
     }
 
     fn back(&mut self) {
+        if self.screen == Screen::Generate
+            && matches!(
+                self.generate.phase,
+                GeneratePhase::CheckingFreshness | GeneratePhase::Confirming
+            )
+        {
+            self.generate.cancel_confirmation();
+            self.focus = Focus::Form;
+            self.input_mode = InputMode::Normal;
+            self.log("execution preview cancelled");
+            return;
+        }
+
         if self.screen != Screen::Landing {
             self.screen = Screen::Landing;
             self.focus = Focus::Menu;
@@ -292,6 +337,65 @@ impl App {
                 self.log("generation already in progress");
             }
             _ => self.start_context_collection(),
+        }
+    }
+
+    fn confirm_execution(&mut self) {
+        if self.screen != Screen::Generate || self.generate.phase != GeneratePhase::DraftReady {
+            return;
+        }
+
+        self.generate.validate_form();
+        match validate_for_execution(&self.generate.form, &self.repo) {
+            Ok(()) => {}
+            Err(errors) => {
+                for error in errors {
+                    self.log(format!("execution validation failed: {error}"));
+                }
+                self.focus = Focus::Form;
+                self.input_mode = InputMode::Normal;
+                return;
+            }
+        }
+
+        let Some(expected_commit_ids) = self
+            .generate
+            .context
+            .as_ref()
+            .map(|context| context.selected_revset.commit_ids().to_vec())
+        else {
+            self.log("execution confirmation blocked: prompt context is unavailable");
+            self.generate
+                .fail_confirmation("prompt context is unavailable");
+            self.focus = Focus::Form;
+            self.input_mode = InputMode::Normal;
+            return;
+        };
+
+        self.generate.begin_confirmation_check();
+        self.focus = Focus::Preview;
+        self.input_mode = InputMode::Normal;
+        self.log("execution validation passed");
+        self.log("verifying repo context before showing execution preview");
+
+        let cwd = self
+            .repo
+            .workspace_root
+            .clone()
+            .unwrap_or_else(|| self.cwd.clone());
+        let selected_revset = self.generate.selected_revset().label().to_string();
+        jj::spawn_stale_context_check(
+            &self.config,
+            cwd,
+            selected_revset,
+            expected_commit_ids,
+            self.bg_tx.clone(),
+        );
+    }
+
+    fn execute_confirmed(&mut self) {
+        if self.screen == Screen::Generate && self.generate.phase == GeneratePhase::Confirming {
+            self.log("execution not yet wired (see ticket 0000d-2026-05-26-pr-exec-job-runner-and-execute)");
         }
     }
 
@@ -434,6 +538,35 @@ impl App {
                     &error.stdout,
                     &error.stderr,
                 );
+            }
+        }
+    }
+
+    fn apply_stale_check(&mut self, result: StaleCheckResult) {
+        if self.screen != Screen::Generate
+            || self.generate.phase != GeneratePhase::CheckingFreshness
+        {
+            return;
+        }
+
+        match result {
+            StaleCheckResult::Fresh => {
+                let plan = ExecutionPlan::from_draft(
+                    &self.generate.form,
+                    &self.repo,
+                    self.generate.selected_revset(),
+                );
+                self.generate.complete_confirmation(plan);
+                self.focus = Focus::Preview;
+                self.input_mode = InputMode::Confirm;
+                self.log("repo context verified for execution preview");
+            }
+            StaleCheckResult::Stale { reason } => {
+                self.generate.fail_confirmation(reason.clone());
+                self.focus = Focus::Form;
+                self.input_mode = InputMode::Normal;
+                self.log(format!("execution confirmation failed: {reason}"));
+                self.log("press r to refresh revsets/context");
             }
         }
     }
@@ -598,6 +731,55 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
             Action::CommitEdit
         );
+    }
+
+    #[test]
+    fn draft_ready_maps_c_to_confirm_execution() {
+        let mut app = test_app();
+        app.screen = Screen::Generate;
+        app.generate.phase = GeneratePhase::DraftReady;
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty())),
+            Action::ConfirmExecution
+        );
+    }
+
+    #[test]
+    fn confirm_mode_routes_enter_and_escape() {
+        let mut app = test_app();
+        app.screen = Screen::Generate;
+        app.generate.phase = GeneratePhase::Confirming;
+        app.input_mode = InputMode::Confirm;
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
+            Action::ExecuteConfirmed
+        );
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())),
+            Action::Back
+        );
+    }
+
+    #[test]
+    fn back_from_confirming_returns_to_draft_ready_and_clears_preview() {
+        let mut app = test_app();
+        app.screen = Screen::Generate;
+        app.generate.phase = GeneratePhase::Confirming;
+        app.generate.execution_plan = Some(ExecutionPlan::default());
+        app.generate.confirmation_summary = Some("validation passed".into());
+        app.generate.freshness_result = Some(crate::generate::StaleCheckResult::Fresh);
+        app.input_mode = InputMode::Confirm;
+
+        app.back();
+
+        assert_eq!(app.generate.phase, GeneratePhase::DraftReady);
+        assert!(app.generate.execution_plan.is_none());
+        assert!(app.generate.confirmation_summary.is_none());
+        assert!(app.generate.freshness_result.is_none());
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.focus, Focus::Form);
     }
 
     #[test]
