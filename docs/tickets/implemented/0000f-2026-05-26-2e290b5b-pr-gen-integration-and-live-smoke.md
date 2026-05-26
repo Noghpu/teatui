@@ -2,7 +2,8 @@
 id: 0000f-2026-05-26-2e290b5b-pr-gen-integration-and-live-smoke
 created_at: 2026-05-26T12:09:01+02:00
 created_by_model: gpt-5
-state: open
+state: implemented
+state_updated_at: 2026-05-26T12:32:33+02:00
 ---
 # Fake and Live PR Generation Integration Tests
 
@@ -151,3 +152,22 @@ llama-server \
 - WSL networking and port forwarding can differ by Windows/WSL version; error messages need to identify whether the failure is WSL launch, Gitea readiness, `tea` auth, or repo setup.
 - Fake tests can overfit implementation details; assert behavior, argv, state transitions, and request contracts rather than private internal structure where possible.
 - Process cleanup is easy to get wrong. Track only processes started by the helper and never kill user-owned already-running services.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: gpt-5.4-mini
+- completed_at: 2026-05-26T12:32:33+02:00
+- state: implemented
+
+# Implementation notes
+
+- Added a library crate entrypoint so the app, tests, and smoke helper share the same modules.
+- Added deterministic fake-service integration tests covering the Generate PR happy path, malformed LLM JSON, stale context blocking confirmation, and `tea pr create` failure with retryable state retained.
+- Added a new opt-in `smoke-live` binary plus `just smoke-live` recipe. It gates on `TEATUI_SMOKE_LIVE`, probes or starts llama.cpp, enforces a 15 second generation timeout, and performs Gitea/WSL preflight checks.
+- Deviation: the live helper currently stops at Gitea/WSL preflight rather than automating a full disposable PR creation flow.
+- Verification: `just verify` passed.
+- Files changed: `src/lib.rs`, `src/main.rs`, `src/bin/smoke-live.rs`, `tests/pr_generation_integration.rs`, `Cargo.toml`, `justfile`.
+- Residual risk: the live helper is intentionally light on orchestration and still depends on a prepared Gitea target or WSL prerequisites for meaningful smoke coverage.

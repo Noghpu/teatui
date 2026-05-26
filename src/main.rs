@@ -1,28 +1,12 @@
-mod action;
-mod app;
-mod command;
-mod config;
-mod context;
-mod event;
-mod generate;
-mod jj;
-mod logging;
-mod ollama;
-mod prompt;
-mod repo;
-mod tea;
-mod tui;
-mod ui;
-
 use clap::Parser;
 use color_eyre::eyre::Result;
 use tokio::sync::mpsc;
 
-use crate::app::App;
-use crate::config::Config;
-use crate::event::EventHandler;
-use crate::logging::init_logging;
-use crate::tui::Tui;
+use teatui::app::App;
+use teatui::config::Config;
+use teatui::event::EventHandler;
+use teatui::logging::init_logging;
+use teatui::tui::Tui;
 
 #[derive(Parser)]
 #[command(name = "teatui")]
