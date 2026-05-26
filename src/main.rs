@@ -10,7 +10,7 @@ use teatui::tui::Tui;
 
 #[derive(Parser)]
 #[command(name = "teatui")]
-#[command(about = "Generate Gitea PRs from jj repos with tea and Ollama")]
+#[command(about = "Generate Gitea PRs from jj repos with tea and an LLM")]
 struct Cli {
     /// Config file path
     #[arg(short, long)]

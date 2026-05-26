@@ -16,7 +16,7 @@ use teatui::generate::{
     ExecutionPlan, FieldState, GeneratePhase, PrForm, RevsetSummary, StaleCheckResult,
 };
 use teatui::jj;
-use teatui::ollama::OllamaClient;
+use teatui::llm::LlmClient;
 use teatui::repo::{
     BaseBranchInfo, BaseBranchSource, LlmBackendStatus, LlmStatus, RemoteInfo, RepoState, TeaAuth,
     ToolStatus,
@@ -402,7 +402,7 @@ async fn build_prompt_and_draft(
         user_instructions,
         prompt::DEFAULT_PROMPT_BYTE_BUDGET,
     );
-    let client = OllamaClient::new(&config.llm.backends[0]).expect("ollama client");
+    let client = LlmClient::from_config(&config.llm.backends[0]).expect("llm client");
     let draft = client.generate_draft(&prompt).await.expect("draft");
     (bundle, draft)
 }
@@ -538,7 +538,7 @@ async fn malformed_llm_json_is_reported_with_raw_response() {
     let bundle = context::collect(&config, repo, form.clone(), selected_revset)
         .await
         .expect("context");
-    let client = OllamaClient::new(&config.llm.backends[0]).expect("ollama client");
+    let client = LlmClient::from_config(&config.llm.backends[0]).expect("llm client");
     let prompt = prompt::PromptBuild::new(&bundle, &form, None, prompt::DEFAULT_PROMPT_BYTE_BUDGET);
     let err = client
         .generate_draft(&prompt)

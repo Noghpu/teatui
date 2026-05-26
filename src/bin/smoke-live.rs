@@ -8,7 +8,7 @@ use teatui::command::run_plan_sequentially;
 use teatui::config::Config;
 use teatui::context::{ContextBundle, RepoIdentity};
 use teatui::generate::{ExecutionPlan, FieldState, PrForm, RevsetSummary, validate_for_execution};
-use teatui::ollama::OllamaClient;
+use teatui::llm::LlmClient;
 use teatui::prompt;
 use teatui::repo::{
     BaseBranchInfo, BaseBranchSource, LlmBackendStatus, LlmStatus, RemoteInfo, RepoState, TeaAuth,
@@ -28,6 +28,7 @@ async fn main() -> Result<()> {
 
     let mut config = Config::load(None)?;
     let smoke = SmokeSettings::from_env()?;
+    config.llm.backends[0].backend_type = "llama-cpp".into();
     config.llm.backends[0].base_url = smoke.llama_url.clone();
     if let Some(model) = smoke.model.as_ref() {
         config.llm.backends[0].model = model.clone();
@@ -43,8 +44,8 @@ async fn main() -> Result<()> {
     wait_for_endpoint(&client, &smoke.llama_url, Duration::from_secs(600)).await?;
 
     let prompt = build_prompt(smoke.workspace.as_ref());
-    let ollama = OllamaClient::new(&config.llm.backends[0])?;
-    let draft = match timeout(Duration::from_secs(15), ollama.generate_draft(&prompt)).await {
+    let llm = LlmClient::from_config(&config.llm.backends[0])?;
+    let draft = match timeout(Duration::from_secs(15), llm.generate_draft(&prompt)).await {
         Ok(Ok(draft)) => draft,
         Ok(Err(err)) => bail!(err.message),
         Err(_) => bail!("smoke LLM request timed out after 15 seconds"),

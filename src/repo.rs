@@ -10,6 +10,7 @@ use tokio::time::timeout;
 
 use crate::config::Config;
 use crate::event::BackgroundEvent;
+use crate::llm::LlmClient;
 use crate::tea::TeaClient;
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -215,10 +216,11 @@ pub async fn discover(config: Config, cwd: &Path) -> RepoState {
     let commands = config.commands.clone();
     let tea_client = TeaClient::new(&config);
     let backends = config.llm.backends.clone();
-    let llm_checks = join_all(backends.iter().map(|backend| {
-        let base_url = backend.base_url.clone();
-        async move { crate::ollama::health_check(&base_url).await }
-    }));
+    let llm_checks = join_all(
+        backends
+            .iter()
+            .map(|backend| async move { LlmClient::health_check_for(backend).await }),
+    );
 
     let (jj, git, tea, workspace_root, remote_url, tea_login_list, llm_statuses) = tokio::join!(
         tool_status(&commands.jj),

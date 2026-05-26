@@ -2,7 +2,8 @@
 id: 0000h-2026-05-26-5ddf00cc-llm-client-abstraction
 created_at: 2026-05-26T18:02:10+02:00
 created_by_model: claude-sonnet-4-6/high
-state: open
+state: implemented
+state_updated_at: 2026-05-26T21:04:39+02:00
 ---
 # LLM Client Abstraction: Enum Dispatch for Ollama Native and OpenAI-Compat
 
@@ -101,3 +102,47 @@ This ticket adds:
 - The OpenAI-compat response has multiple nesting levels (`choices[0].message.content`) -- serde struct must handle missing or empty `choices` without panicking.
 - `context_size` mapped to `num_ctx` is Ollama-specific; if accidentally sent to a compat backend it is a no-op (JSON field ignored), which is acceptable.
 - This ticket depends on 0000g being implemented first: `LlmBackendConfig` must exist before `LlmClient::from_config` can compile.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: unknown
+- completed_at: 2026-05-26T21:04:39+02:00
+- state: implemented
+
+## Implementation Note
+
+Metadata:
+- model: gpt-5.4-mini
+- completed_at: 2026-05-26
+- state: implemented
+
+Completed:
+- Replaced the single `OllamaClient` path with `LlmClient`, dispatching to native Ollama or OpenAI-compatible clients by backend type.
+- Renamed `OllamaError` to `LlmError` and added OpenAI-compatible response parsing for `choices[0].message.content`.
+- Wired `app.rs`, repo health checks, the live smoke helper, and the Windows integration test to the new abstraction.
+- Kept Ollama generation behavior intact while adding Ollama-specific `num_ctx` and `num_predict` request options.
+- Added focused tests for OpenAI-compatible parsing edge cases and kept the existing Ollama draft parsing coverage.
+
+Deviations:
+- I left the native struct name `OllamaClient` in place, matching the ticket plan's enum-variant approach while moving the module to `llm.rs`.
+- I kept a thin `health_check(base_url)` helper in `llm.rs` even though the repo now calls `LlmClient::health_check_for`.
+
+Verification:
+- `just verify`
+
+Important files changed:
+- `src/llm.rs`
+- `src/app.rs`
+- `src/repo.rs`
+- `src/event.rs`
+- `src/lib.rs`
+- `src/main.rs`
+- `src/bin/smoke-live.rs`
+- `tests/windows_pr_generation_integration.rs`
+
+Residual risks:
+- OpenAI-compatible backends are assumed to expose `/v1/chat/completions` and `/v1/models`; unusual local server variants may need small adapter tweaks later.
+- The live smoke helper now explicitly opts into `llama-cpp`; a different OpenAI-compatible server may need its backend type adjusted in config.

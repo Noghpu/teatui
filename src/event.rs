@@ -8,7 +8,7 @@ use tokio::{select, time::interval_at};
 
 use crate::context::ContextResult;
 use crate::generate::{GeneratedDraft, RevsetSummary, StaleCheckResult};
-use crate::ollama::OllamaError;
+use crate::llm::LlmError;
 use crate::repo::RepoState;
 
 pub enum AppEvent {
@@ -32,7 +32,7 @@ pub enum BackgroundEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GenerationResult {
     Ready(GeneratedDraft),
-    Failed(OllamaError),
+    Failed(LlmError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -17,7 +17,7 @@ use crate::generate::{
     validate_for_execution,
 };
 use crate::jj;
-use crate::ollama::OllamaClient;
+use crate::llm::LlmClient;
 use crate::repo::{self, RepoState};
 use crate::tui::Tui;
 use crate::ui;
@@ -583,7 +583,7 @@ impl App {
             return;
         };
 
-        let client = match OllamaClient::new(&backend) {
+        let client = match LlmClient::from_config(&backend) {
             Ok(client) => client,
             Err(err) => {
                 let message = err.to_string();
