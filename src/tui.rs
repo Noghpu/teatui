@@ -2,6 +2,7 @@ use std::io::{self, Stdout};
 
 use color_eyre::eyre::Result;
 use crossterm::{
+    cursor::Show,
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -26,7 +27,10 @@ impl Tui {
 
     pub fn enter(&mut self) -> Result<()> {
         enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen)?;
+        if let Err(err) = execute!(io::stdout(), EnterAlternateScreen) {
+            let _ = disable_raw_mode();
+            return Err(err.into());
+        }
         self.entered = true;
 
         let original_hook = std::panic::take_hook();
@@ -35,8 +39,14 @@ impl Tui {
             original_hook(panic_info);
         }));
 
-        self.terminal.hide_cursor()?;
-        self.terminal.clear()?;
+        if let Err(err) = self.terminal.hide_cursor() {
+            let _ = self.cleanup();
+            return Err(err.into());
+        }
+        if let Err(err) = self.terminal.clear() {
+            let _ = self.cleanup();
+            return Err(err.into());
+        }
 
         Ok(())
     }
@@ -46,8 +56,11 @@ impl Tui {
     }
 
     fn reset_terminal() -> Result<()> {
-        disable_raw_mode()?;
-        execute!(io::stdout(), LeaveAlternateScreen)?;
+        let raw_result = disable_raw_mode();
+        let screen_result = execute!(io::stdout(), Show, LeaveAlternateScreen);
+
+        raw_result?;
+        screen_result?;
         Ok(())
     }
 

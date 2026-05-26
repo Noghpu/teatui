@@ -2,8 +2,8 @@
 id: 0000a-2026-05-25-polished-pr-gen-handoff-polish
 created_at: 2026-05-25T21:55:35+02:00
 created_by_model: migration-placeholder
-state: implemented
-state_updated_at: 2026-05-26T06:49:58+02:00
+state: reviewed
+state_updated_at: 2026-05-26T06:52:12+02:00
 ---
 # Handoff Polish
 
@@ -96,3 +96,25 @@ Files changed:
 
 Residual risk:
 - Manual terminal resize/navigation coverage was not exercised here.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: gpt-5.5 medium
+- reviewed_at: 2026-05-26T06:52:12+02:00
+- state: reviewed
+
+Review postmortem for 0000a-2026-05-25-polished-pr-gen-handoff-polish
+
+Facts:
+- Reviewed the implemented ticket, design source of truth, and implementation diff for `src/generate.rs`, `src/tui.rs`, and `src/ui.rs`.
+- Confirmed the draft retry behavior keeps the previous generated draft visible during context refresh and generation retry paths, with focused unit coverage in `src/generate.rs`.
+- Confirmed the status/help bar copy now reflects screen, focus, prompt view, and edit mode, and removes stale wording that implied execution preview work was unavailable.
+- Found and fixed a terminal lifecycle gap in `src/tui.rs`: if alternate-screen entry failed after raw mode was enabled, raw mode could remain active. The review change now disables raw mode on that partial startup failure.
+- Also made reset cleanup explicitly issue `Show` before leaving the alternate screen so panic cleanup restores cursor visibility without relying only on the normal `Tui::cleanup` path.
+- Ran `just verify`; it passed.
+
+Inference:
+- Manual terminal resize/navigation coverage remains a residual risk, but the code-level lifecycle and Generate PR retry paths match the ticket's handoff-polish scope closely enough for reviewed state.
