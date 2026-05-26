@@ -11,23 +11,27 @@ pub type CrosstermTerminal = Terminal<CrosstermBackend<Stdout>>;
 
 pub struct Tui {
     terminal: CrosstermTerminal,
+    entered: bool,
 }
 
 impl Tui {
     pub fn new() -> Result<Self> {
         let backend = CrosstermBackend::new(io::stdout());
         let terminal = Terminal::new(backend)?;
-        Ok(Self { terminal })
+        Ok(Self {
+            terminal,
+            entered: false,
+        })
     }
 
     pub fn enter(&mut self) -> Result<()> {
         enable_raw_mode()?;
         execute!(io::stdout(), EnterAlternateScreen)?;
+        self.entered = true;
 
-        // Set panic hook to restore terminal
         let original_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |panic_info| {
-            let _ = Self::reset();
+            let _ = Self::reset_terminal();
             original_hook(panic_info);
         }));
 
@@ -38,15 +42,24 @@ impl Tui {
     }
 
     pub fn exit(&mut self) -> Result<()> {
-        Self::reset()?;
-        self.terminal.show_cursor()?;
-        Ok(())
+        self.cleanup()
     }
 
-    fn reset() -> Result<()> {
+    fn reset_terminal() -> Result<()> {
         disable_raw_mode()?;
         execute!(io::stdout(), LeaveAlternateScreen)?;
         Ok(())
+    }
+
+    fn cleanup(&mut self) -> Result<()> {
+        if !self.entered {
+            return Ok(());
+        }
+
+        let reset_result = Self::reset_terminal();
+        let _ = self.terminal.show_cursor();
+        self.entered = false;
+        reset_result
     }
 
     pub fn draw<F>(&mut self, f: F) -> Result<()>
@@ -55,5 +68,11 @@ impl Tui {
     {
         self.terminal.draw(f)?;
         Ok(())
+    }
+}
+
+impl Drop for Tui {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
     }
 }

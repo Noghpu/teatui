@@ -483,8 +483,6 @@ impl GenerateState {
         self.context_error = None;
         self.generation_error = None;
         self.context = None;
-        self.draft = None;
-        self.review = DraftReview::default();
     }
 
     pub fn complete_context_collection(&mut self, context: ContextBundle) {
@@ -754,5 +752,25 @@ mod tests {
         assert_eq!(state.form.branch_name.value, "feature/example");
         assert_eq!(state.form.title.value, "Polished draft");
         assert_eq!(state.form.description.value, "Summary");
+    }
+
+    #[test]
+    fn begin_context_collection_keeps_the_last_draft_visible() {
+        let mut state = GenerateState::new(vec![revset("@")]);
+        let draft = GeneratedDraft {
+            branch_name: "feature/example".into(),
+            title: "Polished draft".into(),
+            body: "Summary\n\nTesting".into(),
+            review_notes: vec!["keep an eye on truncation".into()],
+            raw_model_response: "{\"branch_name\":\"feature/example\"}".into(),
+        };
+        state.complete_generation(draft.clone());
+
+        state.begin_context_collection();
+
+        assert_eq!(state.phase, GeneratePhase::CollectingContext);
+        assert_eq!(state.context, None);
+        assert_eq!(state.draft, Some(draft));
+        assert_eq!(state.review.summary, "Generated draft for feature/example");
     }
 }

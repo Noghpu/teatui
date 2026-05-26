@@ -29,7 +29,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_work(frame, app, form_area);
     render_preview(frame, app, preview_area);
     render_status(frame, app, status_area);
-    render_help(frame, help_area);
+    render_help(frame, app, help_area);
 }
 
 fn render_menu(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
@@ -275,39 +275,98 @@ fn render_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 }
 
 fn render_status(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let prompt_mode = match app.screen() {
+        Screen::Generate => match app.generate().prompt_view {
+            PromptView::Manifest => "prompt:manifest",
+            PromptView::Prompt => "prompt:text",
+        },
+        _ => "prompt:-",
+    };
+
+    let focus = match app.focus() {
+        Focus::Menu => "focus:menu",
+        Focus::Form => "focus:form",
+        Focus::Preview => "focus:preview",
+    };
+
     let status = Line::from(vec![
         format!(" {} ", format!("{:?}", app.input_mode()).to_uppercase())
             .bold()
             .on_cyan(),
         format!(" {} ", app.screen().title()).dim(),
+        format!(" {focus} ").dim(),
         format!(" phase:{:?} ", app.generate().phase).dim(),
         format!(" job:{:?} ", app.jobs().status()).dim(),
-        " jj + tea + ollama ".dim(),
+        format!(" {prompt_mode} ").dim(),
     ]);
     frame.render_widget(Paragraph::new(status), area);
 }
 
-fn render_help(frame: &mut Frame, area: ratatui::layout::Rect) {
-    let help = Line::from(vec![
-        " ↑/k ".bold().cyan(),
-        "up ".dim(),
-        " ↓/j ".bold().cyan(),
-        "down ".dim(),
-        " Enter ".bold().cyan(),
-        "select/edit ".dim(),
-        " i ".bold().cyan(),
-        "edit ".dim(),
-        " g ".bold().cyan(),
-        "generate ".dim(),
-        " p ".bold().cyan(),
-        "prompt ".dim(),
-        " r ".bold().cyan(),
-        "refresh ".dim(),
-        " Esc ".bold().cyan(),
-        "back ".dim(),
-        " q ".bold().cyan(),
-        "quit ".dim(),
-    ]);
+fn render_help(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let help = match app.screen() {
+        Screen::Landing => Line::from(vec![
+            " ↑/k ".bold().cyan(),
+            "up ".dim(),
+            " ↓/j ".bold().cyan(),
+            "down ".dim(),
+            " Enter ".bold().cyan(),
+            "open ".dim(),
+            " Esc ".bold().cyan(),
+            "back ".dim(),
+            " q ".bold().cyan(),
+            "quit ".dim(),
+        ]),
+        Screen::Generate if app.input_mode() == crate::generate::InputMode::Editing => {
+            Line::from(vec![
+                " typing ".bold().cyan(),
+                "edit field ".dim(),
+                " Enter ".bold().cyan(),
+                "save ".dim(),
+                " Esc ".bold().cyan(),
+                "cancel ".dim(),
+            ])
+        }
+        Screen::Generate if app.focus() == Focus::Preview => Line::from(vec![
+            " p ".bold().cyan(),
+            "toggle prompt ".dim(),
+            " g ".bold().cyan(),
+            "regenerate ".dim(),
+            " Esc ".bold().cyan(),
+            "back ".dim(),
+        ]),
+        Screen::Generate => Line::from(vec![
+            " ↑/k ".bold().cyan(),
+            "up ".dim(),
+            " ↓/j ".bold().cyan(),
+            "down ".dim(),
+            " h/l ".bold().cyan(),
+            "move focus ".dim(),
+            " Enter ".bold().cyan(),
+            "select/edit ".dim(),
+            " i ".bold().cyan(),
+            "edit ".dim(),
+            " g ".bold().cyan(),
+            "generate ".dim(),
+            " p ".bold().cyan(),
+            "prompt ".dim(),
+            " r ".bold().cyan(),
+            "refresh ".dim(),
+            " Esc ".bold().cyan(),
+            "back ".dim(),
+        ]),
+        Screen::PullRequests | Screen::Issues => Line::from(vec![
+            " ↑/k ".bold().cyan(),
+            "up ".dim(),
+            " ↓/j ".bold().cyan(),
+            "down ".dim(),
+            " Enter ".bold().cyan(),
+            "select ".dim(),
+            " c ".bold().cyan(),
+            "comment ".dim(),
+            " Esc ".bold().cyan(),
+            "back ".dim(),
+        ]),
+    };
     frame.render_widget(Paragraph::new(help), area);
 }
 
@@ -560,7 +619,7 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             lines.extend(render_recent_logs(app.logs().entries.as_slice(), 6));
             lines.push(Line::from(""));
             lines.push(Line::from(
-                "Execution preview only; branch, push, and tea mutation are not implemented yet."
+                "The execution preview will show branch, push, and tea commands before mutation."
                     .yellow(),
             ));
         }

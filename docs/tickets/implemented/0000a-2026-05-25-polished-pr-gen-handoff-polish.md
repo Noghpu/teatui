@@ -2,7 +2,8 @@
 id: 0000a-2026-05-25-polished-pr-gen-handoff-polish
 created_at: 2026-05-25T21:55:35+02:00
 created_by_model: migration-placeholder
-state: open
+state: implemented
+state_updated_at: 2026-05-26T06:49:58+02:00
 ---
 # Handoff Polish
 
@@ -66,3 +67,32 @@ Run `just verify`. Perform a manual terminal check of the Generate PR draft work
 ## Risks
 - Polish can sprawl into unrelated features.
 - Tests can become too broad for the repo's stated testing strategy.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: unknown
+- completed_at: 2026-05-26T06:49:58+02:00
+- state: implemented
+
+Completed:
+- Tightened Generate PR draft polish by keeping the last generated draft visible across context refresh retries, instead of clearing it up front.
+- Reworked terminal cleanup in `src/tui.rs` to be best-effort on normal exit, panic, and partial startup failure.
+- Made the status/help bars in `src/ui.rs` reflect the active screen, focus, prompt view, and editing state, and removed stale "not implemented yet" wording.
+
+Deviations:
+- No design-doc update was needed; the implementation stayed within the existing Generate PR draft workflow.
+
+Verification:
+- `just test`
+- `just verify`
+
+Files changed:
+- `src/generate.rs`
+- `src/tui.rs`
+- `src/ui.rs`
+
+Residual risk:
+- Manual terminal resize/navigation coverage was not exercised here.
