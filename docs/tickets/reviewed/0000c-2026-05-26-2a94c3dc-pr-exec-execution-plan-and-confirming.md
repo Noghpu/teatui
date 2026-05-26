@@ -2,8 +2,8 @@
 id: 0000c-2026-05-26-2a94c3dc-pr-exec-execution-plan-and-confirming
 created_at: 2026-05-26T08:01:29+02:00
 created_by_model: claude-opus-4-7/high
-state: implemented
-state_updated_at: 2026-05-26T08:38:53+02:00
+state: reviewed
+state_updated_at: 2026-05-26T08:42:29+02:00
 ---
 # ExecutionPlan and Confirming Phase
 
@@ -211,3 +211,22 @@ Files:
 
 Residual risks:
 - The later execution ticket must keep the preview argv aligned with the mutating implementation.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: gpt-5.5 medium
+- reviewed_at: 2026-05-26T08:42:29+02:00
+- state: reviewed
+
+Facts:
+- Reviewed ticket 0000c-2026-05-26-2a94c3dc-pr-exec-execution-plan-and-confirming against docs/design.md and the persisted acceptance criteria.
+- The implementation adds DraftReady -> CheckingFreshness -> Confirming, validation, stale-context checking, execution-plan rendering, and the non-mutating Enter placeholder.
+- Found and fixed one argv mismatch: `jj bookmark move` does not accept `-r` in the installed jj version; the preview now uses `--to`, while `bookmark create` still uses `-r`.
+- Ran `just verify` successfully after the fix.
+
+Inferences:
+- The remaining flow is acceptable for this slice because no mutating command is spawned, and actual execution remains deferred to ticket 0000d.
+- The later execution ticket should reuse the corrected `bookmark move <name> --to <head>` argv when adding typed builders.

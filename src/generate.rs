@@ -766,7 +766,7 @@ impl ExecutionPlan {
                     "bookmark",
                     "move",
                     branch_name.as_str(),
-                    "-r",
+                    "--to",
                     head.as_str(),
                 ],
                 &cwd,
@@ -1141,7 +1141,7 @@ mod tests {
 
         assert_eq!(
             plan.steps[0].command.args,
-            vec!["bookmark", "move", "feature/example", "-r", "@"]
+            vec!["bookmark", "move", "feature/example", "--to", "@"]
         );
     }
 }
