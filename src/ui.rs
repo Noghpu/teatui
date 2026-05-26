@@ -11,7 +11,7 @@ use crate::generate::{
     ExecutionPlan, FieldId, Focus, GeneratePhase, GenerateState, PromptView, StaleCheckResult,
 };
 use crate::prompt::PromptBuild;
-use crate::repo::{OllamaStatus, TeaAuth, ToolStatus};
+use crate::repo::{LlmStatus, TeaAuth, ToolStatus};
 
 pub fn render(frame: &mut Frame, app: &App) {
     let [main_area, status_area, help_area] = Layout::vertical([
@@ -192,23 +192,7 @@ fn render_work(frame: &mut Frame, app: &App, area: Rect) {
                 }
             }
 
-            lines.push(status_line(
-                "Ollama",
-                repo.ollama.label(),
-                match &repo.ollama {
-                    OllamaStatus::Reachable => StatusTone::Good,
-                    OllamaStatus::Unreachable(_) => StatusTone::Bad,
-                    OllamaStatus::Unknown(_) => StatusTone::Muted,
-                },
-            ));
-            lines.push(Line::from(format!("Ollama endpoint: {}", repo.ollama_base_url)).dim());
-            lines.push(Line::from(format!("Ollama model: {}", repo.ollama_model)).dim());
-            if let Some(detail) = repo.ollama.detail() {
-                lines.push(match &repo.ollama {
-                    OllamaStatus::Unreachable(_) => Line::from(detail.to_string()).red(),
-                    _ => Line::from(detail.to_string()).dim(),
-                });
-            }
+            lines.extend(render_llm_lines(repo));
 
             lines.push(Line::from(format!(
                 "Base branch: {}",
@@ -574,6 +558,60 @@ fn status_line(label: &str, value: impl Into<String>, tone: StatusTone) -> Line<
         StatusTone::Muted => line.dim(),
         StatusTone::Bad => line.red(),
     }
+}
+
+fn render_llm_lines(repo: &crate::repo::RepoState) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let active_backend = repo
+        .llm_backends
+        .iter()
+        .find(|backend| backend.name == repo.llm_active);
+
+    if let Some(backend) = active_backend {
+        lines.push(status_line(
+            "LLM",
+            format!("{} ({})", backend.name, backend.backend_type),
+            match &backend.status {
+                LlmStatus::Reachable => StatusTone::Good,
+                LlmStatus::Unreachable(_) => StatusTone::Bad,
+                LlmStatus::Unknown(_) => StatusTone::Muted,
+            },
+        ));
+        lines.push(Line::from(format!("LLM endpoint: {}", backend.base_url)).dim());
+        lines.push(Line::from(format!("LLM model: {}", backend.model)).dim());
+        if let Some(detail) = backend.status.detail() {
+            lines.push(match &backend.status {
+                LlmStatus::Unreachable(_) => Line::from(detail.to_string()).red(),
+                _ => Line::from(detail.to_string()).dim(),
+            });
+        }
+    } else {
+        lines.push(status_line("LLM", "(no active backend)", StatusTone::Muted));
+    }
+
+    if repo.llm_backends.len() > 1 {
+        lines.push(Line::from("LLM backends".bold()));
+        for backend in &repo.llm_backends {
+            let marker = if backend.name == repo.llm_active {
+                "*"
+            } else {
+                " "
+            };
+            let tone = match &backend.status {
+                LlmStatus::Reachable => StatusTone::Good,
+                LlmStatus::Unreachable(_) => StatusTone::Bad,
+                LlmStatus::Unknown(_) => StatusTone::Muted,
+            };
+            let label = format!("{marker} {}", backend.name);
+            lines.push(status_line(
+                &label,
+                format!("{} {}", backend.backend_type, backend.status.label()),
+                tone,
+            ));
+        }
+    }
+
+    lines
 }
 
 fn render_prompt_manifest(prompt: &PromptBuild) -> Vec<Line<'static>> {

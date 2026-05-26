@@ -11,7 +11,8 @@ use teatui::generate::{ExecutionPlan, FieldState, PrForm, RevsetSummary, validat
 use teatui::ollama::OllamaClient;
 use teatui::prompt;
 use teatui::repo::{
-    BaseBranchInfo, BaseBranchSource, OllamaStatus, RemoteInfo, RepoState, TeaAuth, ToolStatus,
+    BaseBranchInfo, BaseBranchSource, LlmBackendStatus, LlmStatus, RemoteInfo, RepoState, TeaAuth,
+    ToolStatus,
 };
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
@@ -27,9 +28,9 @@ async fn main() -> Result<()> {
 
     let mut config = Config::load(None)?;
     let smoke = SmokeSettings::from_env()?;
-    config.ollama.base_url = smoke.llama_url.clone();
+    config.llm.backends[0].base_url = smoke.llama_url.clone();
     if let Some(model) = smoke.model.as_ref() {
-        config.ollama.model = model.clone();
+        config.llm.backends[0].model = model.clone();
     }
 
     // _llama_guard owns the child process so kill_on_drop fires on any exit
@@ -42,7 +43,7 @@ async fn main() -> Result<()> {
     wait_for_endpoint(&client, &smoke.llama_url, Duration::from_secs(600)).await?;
 
     let prompt = build_prompt(smoke.workspace.as_ref());
-    let ollama = OllamaClient::new(&config)?;
+    let ollama = OllamaClient::new(&config.llm.backends[0])?;
     let draft = match timeout(Duration::from_secs(15), ollama.generate_draft(&prompt)).await {
         Ok(Ok(draft)) => draft,
         Ok(Err(err)) => bail!(err.message),
@@ -211,7 +212,7 @@ async fn execute_disposable_pr(
     form.title = FieldState::new(draft.title.clone());
     form.description = FieldState::new(draft.body.clone());
 
-    let repo = smoke_repo_state(smoke, workspace.clone(), &config.ollama);
+    let repo = smoke_repo_state(smoke, workspace.clone(), &config.llm.backends[0]);
     validate_for_execution(&form, &repo).map_err(|errors| {
         color_eyre::eyre::eyre!(
             "generated live smoke PR fields are invalid: {}",
@@ -262,7 +263,7 @@ fn disposable_branch_name() -> String {
 fn smoke_repo_state(
     smoke: &SmokeSettings,
     workspace: PathBuf,
-    ollama: &teatui::config::OllamaConfig,
+    backend: &teatui::config::LlmBackendConfig,
 ) -> RepoState {
     RepoState {
         workspace_root: Some(workspace),
@@ -282,9 +283,14 @@ fn smoke_repo_state(
             name: "main".into(),
             source: BaseBranchSource::Config,
         },
-        ollama_base_url: ollama.base_url.clone(),
-        ollama_model: ollama.model.clone(),
-        ollama: OllamaStatus::Reachable,
+        llm_active: backend.name.clone(),
+        llm_backends: vec![LlmBackendStatus {
+            name: backend.name.clone(),
+            backend_type: backend.backend_type.clone(),
+            base_url: backend.base_url.clone(),
+            model: backend.model.clone(),
+            status: LlmStatus::Reachable,
+        }],
         blockers: Vec::new(),
     }
 }
@@ -309,9 +315,14 @@ fn build_prompt(workspace: Option<&PathBuf>) -> prompt::PromptBuild {
             name: "main".into(),
             source: BaseBranchSource::Config,
         },
-        ollama_base_url: "http://127.0.0.1:8081".into(),
-        ollama_model: "smoke".into(),
-        ollama: OllamaStatus::Reachable,
+        llm_active: "default".into(),
+        llm_backends: vec![LlmBackendStatus {
+            name: "default".into(),
+            backend_type: "ollama".into(),
+            base_url: "http://127.0.0.1:8081".into(),
+            model: "smoke".into(),
+            status: LlmStatus::Reachable,
+        }],
         blockers: Vec::new(),
     };
 

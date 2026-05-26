@@ -594,9 +594,17 @@ Initial config file location:
 Initial fields:
 
 ```toml
-[ollama]
+[llm]
+active = "default"
+
+[[llm.backends]]
+name = "default"
+type = "ollama"
 base_url = "http://localhost:11434"
 model = "qwen2.5-coder:latest"
+temperature = 0.1
+context_size = 4096
+max_tokens = 2048
 
 [commands]
 jj = "jj"
@@ -609,8 +617,8 @@ default_base = "main"
 
 Environment overrides:
 
-- `TEATUI_OLLAMA_BASE_URL`
-- `TEATUI_OLLAMA_MODEL`
+- `TEATUI_OLLAMA_BASE_URL` (legacy alias for `[[llm.backends]]`)
+- `TEATUI_OLLAMA_MODEL` (legacy alias for `[[llm.backends]]`)
 - `TEATUI_JJ`
 - `TEATUI_GIT`
 - `TEATUI_TEA`

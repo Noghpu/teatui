@@ -2,7 +2,8 @@
 id: 0000g-2026-05-26-d7cc7ec7-llm-config-schema
 created_at: 2026-05-26T18:00:35+02:00
 created_by_model: claude-sonnet-4-6/high
-state: open
+state: implemented
+state_updated_at: 2026-05-26T20:56:25+02:00
 ---
 # LLM Config Schema: Multi-Backend `[[llm.backends]]`
 
@@ -88,3 +89,43 @@ The `OllamaStatus` enum in `src/repo.rs` must be renamed to `LlmStatus` and gene
 - Backward-compat deserialization: the `config` crate merges sources â€” `[ollama]` and `[llm]` keys could conflict. Test explicitly that only one path wins.
 - `tokio::join!` for N backends requires `futures::future::join_all` or manual tuple expansion; the current code uses a fixed-arity `tokio::join!`. Switch to `join_all` for the backend health checks.
 - Test fixtures in `src/generate.rs` and `src/prompt.rs` construct `RepoState` directly â€” all must be updated or the build will fail.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: gpt-5.4-mini
+- completed_at: 2026-05-26T20:56:25+02:00
+- state: implemented
+
+Completed:
+- Replaced the single `[ollama]` config with `[llm]` plus `[[llm.backends]]`, including default values and legacy `[ollama]` fallback with a warning.
+- Added `LlmBackendConfig`, `LlmConfig`, `LlmStatus`, and `LlmBackendStatus`, and updated repo discovery to track all backends concurrently.
+- Switched the Ollama client and discovery paths to consume the active backend config.
+- Updated landing UI status rendering to show the active backend and additional backends when present.
+- Updated test fixtures and the live smoke binary to the new repo/config shape.
+- Updated `docs/design.md` to match the new config schema.
+
+Deviations:
+- I kept the existing `OllamaClient` type name for this ticket, since the next ticket is the client implementation rewrite.
+- Legacy env/table compatibility is handled during config load rather than by adding a separate deserialization layer.
+
+Verification:
+- `just verify`
+
+Important files changed:
+- `src/config.rs`
+- `src/repo.rs`
+- `src/ollama.rs`
+- `src/app.rs`
+- `src/ui.rs`
+- `src/generate.rs`
+- `src/prompt.rs`
+- `src/bin/smoke-live.rs`
+- `tests/windows_pr_generation_integration.rs`
+- `docs/design.md`
+
+Residual risks:
+- The active backend must still be an Ollama-compatible endpoint for the current client implementation.
+- Legacy `[ollama]` compatibility is intentionally transitional and may be removed in a later ticket.

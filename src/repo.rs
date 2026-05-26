@@ -3,6 +3,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use crate::command::{CommandError, ExternalCommand, capture};
+use futures::future::join_all;
 use tokio::process::Command;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::timeout;
@@ -65,13 +66,13 @@ impl TeaAuth {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OllamaStatus {
+pub enum LlmStatus {
     Unknown(String),
     Reachable,
     Unreachable(String),
 }
 
-impl OllamaStatus {
+impl LlmStatus {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Unknown(_) => "(unknown)",
@@ -88,6 +89,15 @@ impl OllamaStatus {
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmBackendStatus {
+    pub name: String,
+    pub backend_type: String,
+    pub base_url: String,
+    pub model: String,
+    pub status: LlmStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,14 +159,13 @@ pub struct RepoState {
     pub tea_auth: TeaAuth,
     pub remote: Option<RemoteInfo>,
     pub base_branch: BaseBranchInfo,
-    pub ollama_base_url: String,
-    pub ollama_model: String,
-    pub ollama: OllamaStatus,
+    pub llm_active: String,
+    pub llm_backends: Vec<LlmBackendStatus>,
     pub blockers: Vec<String>,
 }
 
 impl RepoState {
-    pub fn bootstrap(config: &Config) -> Self {
+    pub fn new(config: &Config) -> Self {
         Self {
             workspace_root: None,
             inside_workspace: false,
@@ -169,11 +178,25 @@ impl RepoState {
                 name: config.pr.default_base.clone(),
                 source: BaseBranchSource::Config,
             },
-            ollama_base_url: config.ollama.base_url.clone(),
-            ollama_model: config.ollama.model.clone(),
-            ollama: OllamaStatus::Unknown("pending discovery".into()),
+            llm_active: config.llm.active.clone(),
+            llm_backends: config
+                .llm
+                .backends
+                .iter()
+                .map(|backend| LlmBackendStatus {
+                    name: backend.name.clone(),
+                    backend_type: backend.backend_type.clone(),
+                    base_url: backend.base_url.clone(),
+                    model: backend.model.clone(),
+                    status: LlmStatus::Unknown("pending discovery".into()),
+                })
+                .collect(),
             blockers: Vec::new(),
         }
+    }
+
+    pub fn bootstrap(config: &Config) -> Self {
+        Self::new(config)
     }
 
     pub fn blocker_lines(&self) -> Vec<String> {
@@ -191,15 +214,20 @@ pub fn spawn_discovery(config: Config, cwd: PathBuf, tx: UnboundedSender<Backgro
 pub async fn discover(config: Config, cwd: &Path) -> RepoState {
     let commands = config.commands.clone();
     let tea_client = TeaClient::new(&config);
+    let backends = config.llm.backends.clone();
+    let llm_checks = join_all(backends.iter().map(|backend| {
+        let base_url = backend.base_url.clone();
+        async move { crate::ollama::health_check(&base_url).await }
+    }));
 
-    let (jj, git, tea, workspace_root, remote_url, tea_login_list, ollama) = tokio::join!(
+    let (jj, git, tea, workspace_root, remote_url, tea_login_list, llm_statuses) = tokio::join!(
         tool_status(&commands.jj),
         tool_status(&commands.git),
         tea_status(&tea_client, cwd),
         run_output(&commands.jj, ["--no-pager", "root"], cwd),
         run_output(&commands.git, ["remote", "get-url", "origin"], cwd),
         tea_login_list_output(&tea_client, cwd),
-        crate::ollama::health_check(&config),
+        llm_checks,
     );
 
     let workspace_root = workspace_root.ok().map(PathBuf::from);
@@ -236,9 +264,18 @@ pub async fn discover(config: Config, cwd: &Path) -> RepoState {
             name: config.pr.default_base,
             source: BaseBranchSource::Config,
         },
-        ollama_base_url: config.ollama.base_url,
-        ollama_model: config.ollama.model,
-        ollama,
+        llm_active: config.llm.active,
+        llm_backends: backends
+            .into_iter()
+            .zip(llm_statuses)
+            .map(|(backend, status)| LlmBackendStatus {
+                name: backend.name,
+                backend_type: backend.backend_type,
+                base_url: backend.base_url,
+                model: backend.model,
+                status,
+            })
+            .collect(),
         blockers,
     }
 }

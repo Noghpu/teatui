@@ -431,7 +431,8 @@ mod tests {
     use crate::config::Config;
     use crate::generate::PrForm;
     use crate::repo::{
-        BaseBranchInfo, BaseBranchSource, OllamaStatus, RemoteInfo, RepoState, TeaAuth, ToolStatus,
+        BaseBranchInfo, BaseBranchSource, LlmBackendStatus, LlmStatus, RemoteInfo, RepoState,
+        TeaAuth, ToolStatus,
     };
     use std::path::PathBuf;
     use std::time::SystemTime;
@@ -453,9 +454,14 @@ mod tests {
                 name: config.pr.default_base.clone(),
                 source: BaseBranchSource::Config,
             },
-            ollama_base_url: config.ollama.base_url.clone(),
-            ollama_model: config.ollama.model.clone(),
-            ollama: OllamaStatus::Reachable,
+            llm_active: config.llm.active.clone(),
+            llm_backends: vec![LlmBackendStatus {
+                name: config.llm.backends[0].name.clone(),
+                backend_type: config.llm.backends[0].backend_type.clone(),
+                base_url: config.llm.backends[0].base_url.clone(),
+                model: config.llm.backends[0].model.clone(),
+                status: LlmStatus::Reachable,
+            }],
             blockers: Vec::new(),
         };
 

@@ -133,7 +133,7 @@ pub struct App {
 impl App {
     pub fn new(config: crate::config::Config, bg_tx: UnboundedSender<BackgroundEvent>) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let repo = RepoState::bootstrap(&config);
+        let repo = RepoState::new(&config);
         Self {
             config,
             bg_tx,
@@ -576,7 +576,14 @@ impl App {
 
         let prompt_bytes = prompt.manifest.byte_count;
         let selected_revset = self.generate.selected_revset().label().to_string();
-        let client = match OllamaClient::new(&self.config) {
+        let Some(backend) = self.config.llm.active_backend().cloned() else {
+            self.generate
+                .fail_generation("active LLM backend is unavailable");
+            self.log("generation failed: active LLM backend is unavailable");
+            return;
+        };
+
+        let client = match OllamaClient::new(&backend) {
             Ok(client) => client,
             Err(err) => {
                 let message = err.to_string();
@@ -588,9 +595,10 @@ impl App {
 
         self.generate.begin_generation();
         self.log(format!(
-            "sending prompt to ollama for {selected_revset} ({prompt_bytes} bytes)"
+            "sending prompt to llm backend {} for {selected_revset} ({prompt_bytes} bytes)",
+            backend.name
         ));
-        self.log("ollama request in progress");
+        self.log("llm request in progress");
 
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
@@ -640,7 +648,7 @@ impl App {
                 self.log_raw_model_response(&draft.raw_model_response);
                 let branch = draft.branch_name.clone();
                 self.generate.complete_generation(draft);
-                self.log(format!("ollama generation finished for {branch}"));
+                self.log(format!("llm generation finished for {branch}"));
             }
             GenerationResult::Failed(error) => {
                 if let Some(raw_response) = error.raw_response.as_ref() {
@@ -648,7 +656,7 @@ impl App {
                 }
                 let message = error.message.clone();
                 self.generate.fail_generation(&message);
-                self.log(format!("ollama generation failed: {message}"));
+                self.log(format!("llm generation failed: {message}"));
             }
         }
     }
@@ -765,7 +773,7 @@ impl App {
     }
 
     fn log_raw_model_response(&mut self, raw_response: &str) {
-        self.log("ollama raw response:");
+        self.log("llm raw response:");
         if raw_response.trim().is_empty() {
             self.log("(empty)");
             return;

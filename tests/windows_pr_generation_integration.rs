@@ -17,8 +17,11 @@ use teatui::generate::{
 };
 use teatui::jj;
 use teatui::ollama::OllamaClient;
-use teatui::repo::{BaseBranchInfo, BaseBranchSource, RemoteInfo, RepoState, TeaAuth, ToolStatus};
-use teatui::{config::Config, prompt, repo};
+use teatui::repo::{
+    BaseBranchInfo, BaseBranchSource, LlmBackendStatus, LlmStatus, RemoteInfo, RepoState, TeaAuth,
+    ToolStatus,
+};
+use teatui::{config::Config, prompt};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -216,7 +219,7 @@ impl FakeCommandTree {
         config.commands.jj = self.jj.display().to_string();
         config.commands.tea = self.tea.display().to_string();
         config.commands.git = "git".into();
-        config.ollama.base_url = base_url.into();
+        config.llm.backends[0].base_url = base_url.into();
         config
     }
 
@@ -236,9 +239,14 @@ impl FakeCommandTree {
                 name: "main".into(),
                 source: BaseBranchSource::Config,
             },
-            ollama_base_url: base_url.into(),
-            ollama_model: "qwen3".into(),
-            ollama: repo::OllamaStatus::Reachable,
+            llm_active: "default".into(),
+            llm_backends: vec![LlmBackendStatus {
+                name: "default".into(),
+                backend_type: "ollama".into(),
+                base_url: base_url.into(),
+                model: "qwen3".into(),
+                status: LlmStatus::Reachable,
+            }],
             blockers: Vec::new(),
         }
     }
@@ -394,7 +402,7 @@ async fn build_prompt_and_draft(
         user_instructions,
         prompt::DEFAULT_PROMPT_BYTE_BUDGET,
     );
-    let client = OllamaClient::new(config).expect("ollama client");
+    let client = OllamaClient::new(&config.llm.backends[0]).expect("ollama client");
     let draft = client.generate_draft(&prompt).await.expect("draft");
     (bundle, draft)
 }
@@ -530,7 +538,7 @@ async fn malformed_llm_json_is_reported_with_raw_response() {
     let bundle = context::collect(&config, repo, form.clone(), selected_revset)
         .await
         .expect("context");
-    let client = OllamaClient::new(&config).expect("ollama client");
+    let client = OllamaClient::new(&config.llm.backends[0]).expect("ollama client");
     let prompt = prompt::PromptBuild::new(&bundle, &form, None, prompt::DEFAULT_PROMPT_BYTE_BUDGET);
     let err = client
         .generate_draft(&prompt)

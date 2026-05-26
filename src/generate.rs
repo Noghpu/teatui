@@ -974,7 +974,8 @@ fn is_shell_metacharacter(ch: char) -> bool {
 mod tests {
     use super::*;
     use crate::repo::{
-        BaseBranchInfo, BaseBranchSource, OllamaStatus, RemoteInfo, RepoState, TeaAuth,
+        BaseBranchInfo, BaseBranchSource, LlmBackendStatus, LlmStatus, RemoteInfo, RepoState,
+        TeaAuth,
     };
     use std::path::PathBuf;
 
@@ -1008,9 +1009,14 @@ mod tests {
                 name: "main".into(),
                 source: BaseBranchSource::Config,
             },
-            ollama_base_url: "http://localhost:11434".into(),
-            ollama_model: "qwen2.5-coder:latest".into(),
-            ollama: OllamaStatus::Reachable,
+            llm_active: "default".into(),
+            llm_backends: vec![LlmBackendStatus {
+                name: "default".into(),
+                backend_type: "ollama".into(),
+                base_url: "http://localhost:11434".into(),
+                model: "qwen2.5-coder:latest".into(),
+                status: LlmStatus::Reachable,
+            }],
             blockers: Vec::new(),
         }
     }

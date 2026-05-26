@@ -3,10 +3,10 @@ use std::time::Duration;
 use color_eyre::eyre::{Result, WrapErr};
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
+use crate::config::LlmBackendConfig;
 use crate::generate::{GeneratedDraft, validate_branch_name};
 use crate::prompt::PromptBuild;
-use crate::repo::OllamaStatus;
+use crate::repo::LlmStatus;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
@@ -16,19 +16,21 @@ const DEFAULT_TEMPERATURE: f32 = 0.1;
 pub struct OllamaClient {
     base_url: String,
     model: String,
+    temperature: f32,
     client: reqwest::Client,
 }
 
 impl OllamaClient {
-    pub fn new(config: &Config) -> Result<Self> {
+    pub fn new(backend: &LlmBackendConfig) -> Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
             .wrap_err("failed to build Ollama HTTP client")?;
 
         Ok(Self {
-            base_url: config.ollama.base_url.clone(),
-            model: config.ollama.model.clone(),
+            base_url: backend.base_url.clone(),
+            model: backend.model.clone(),
+            temperature: backend.temperature.unwrap_or(DEFAULT_TEMPERATURE),
             client,
         })
     }
@@ -42,7 +44,7 @@ impl OllamaClient {
             prompt: &prompt.prompt,
             stream: false,
             options: OllamaOptions {
-                temperature: DEFAULT_TEMPERATURE,
+                temperature: self.temperature,
             },
         };
 
@@ -88,7 +90,7 @@ impl OllamaClient {
     }
 }
 
-pub async fn health_check(config: &Config) -> OllamaStatus {
+pub async fn health_check(base_url: &str) -> LlmStatus {
     let client = match reqwest::Client::builder()
         .timeout(HEALTH_CHECK_TIMEOUT)
         .build()
@@ -96,14 +98,14 @@ pub async fn health_check(config: &Config) -> OllamaStatus {
     {
         Ok(client) => client,
         Err(err) => {
-            return OllamaStatus::Unreachable(err.to_string());
+            return LlmStatus::Unreachable(err.to_string());
         }
     };
 
-    let url = config.ollama.base_url.trim_end_matches('/').to_string();
+    let url = base_url.trim_end_matches('/').to_string();
     match client.get(url).send().await {
-        Ok(_) => OllamaStatus::Reachable,
-        Err(err) => OllamaStatus::Unreachable(err.to_string()),
+        Ok(_) => LlmStatus::Reachable,
+        Err(err) => LlmStatus::Unreachable(err.to_string()),
     }
 }
 
