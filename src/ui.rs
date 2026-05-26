@@ -9,6 +9,7 @@ use ratatui::{
 use crate::app::{App, Screen};
 use crate::generate::{FieldId, Focus, GeneratePhase, GenerateState, PromptView};
 use crate::prompt::PromptBuild;
+use crate::repo::{OllamaStatus, TeaAuth, ToolStatus};
 
 pub fn render(frame: &mut Frame, app: &App) {
     let [main_area, status_area, help_area] = Layout::vertical([
@@ -114,54 +115,108 @@ fn list_item(text: &str, selected: bool) -> ListItem<'static> {
 
 fn render_work(frame: &mut Frame, app: &App, area: Rect) {
     let lines = match app.screen() {
-        Screen::Landing => vec![
-            Line::from("teatui".bold()),
-            Line::from(""),
-            Line::from(match &app.repo().workspace_root {
-                Some(path) => format!("Workspace: {}", path.display()),
-                None => "Workspace: pending".to_string(),
-            }),
-            status_line("jj", app.repo().jj.label()),
-            status_line("git", app.repo().git.label()),
-            status_line("tea", app.repo().tea.label()),
-            status_line(
-                "Workspace",
-                if app.repo().inside_workspace {
-                    "detected"
+        Screen::Landing => {
+            let repo = app.repo();
+            let mut lines = vec![
+                Line::from("teatui".bold()),
+                Line::from(""),
+                Line::from(match &repo.workspace_root {
+                    Some(path) => format!("Workspace: {}", path.display()),
+                    None => "Workspace: pending".to_string(),
+                }),
+                status_line("jj", repo.jj.label(), tool_tone(&repo.jj)),
+                status_line("git", repo.git.label(), tool_tone(&repo.git)),
+                status_line("tea", repo.tea.label(), tool_tone(&repo.tea)),
+                status_line(
+                    "Workspace",
+                    if repo.inside_workspace {
+                        "detected"
+                    } else {
+                        "missing"
+                    },
+                    if repo.inside_workspace {
+                        StatusTone::Good
+                    } else {
+                        StatusTone::Muted
+                    },
+                ),
+            ];
+
+            lines.push(status_line(
+                "Gitea host",
+                repo.remote
+                    .as_ref()
+                    .map(|remote| remote.host.as_str())
+                    .filter(|host| !host.is_empty())
+                    .unwrap_or("(not configured)"),
+                if repo
+                    .remote
+                    .as_ref()
+                    .map(|remote| !remote.host.is_empty())
+                    .unwrap_or(false)
+                {
+                    StatusTone::Good
                 } else {
-                    "missing"
+                    StatusTone::Muted
                 },
-            ),
-            Line::from(match &app.repo().remote {
-                Some(remote) => {
-                    let warning = remote
-                        .warning
-                        .as_ref()
-                        .map(|warning| format!(" ({warning})"))
-                        .unwrap_or_default();
-                    format!(
-                        "Remote: {}@{}{}",
-                        remote.display_name(),
-                        remote.host,
-                        warning
-                    )
+            ));
+
+            if let Some(remote) = &repo.remote {
+                lines.push(Line::from(format!("Remote URL: {}", remote.raw_url)).dim());
+                if let Some(warning) = &remote.warning {
+                    lines.push(Line::from(format!("Remote warning: {warning}")).yellow());
                 }
-                None => "Remote: pending".to_string(),
-            }),
-            Line::from(match &app.repo().remote {
-                Some(remote) => format!("Remote URL: {}", remote.raw_url),
-                None => "Remote URL: pending".to_string(),
-            }),
-            Line::from(format!("Base branch: {}", app.repo().base_branch.name)),
-            Line::from(format!(
-                "Ollama: {} {}",
-                app.repo().ollama_base_url,
-                app.repo().ollama_model
-            )),
-            Line::from(format!("Logs: {}", app.logs().entries.len())),
-            Line::from(""),
-            Line::from("Select a mode on the left.".dim()),
-        ],
+            }
+
+            lines.push(status_line(
+                "Tea auth",
+                repo.tea_auth.label(),
+                match &repo.tea_auth {
+                    TeaAuth::Configured { .. } => StatusTone::Good,
+                    TeaAuth::Error(_) => StatusTone::Bad,
+                    TeaAuth::NotConfigured | TeaAuth::Unknown(_) => StatusTone::Muted,
+                },
+            ));
+            if let Some(detail) = repo.tea_auth.detail() {
+                lines.push(match &repo.tea_auth {
+                    TeaAuth::Error(_) => Line::from(detail.to_string()).red(),
+                    _ => Line::from(detail.to_string()).dim(),
+                });
+            }
+            if let TeaAuth::Configured { host, user } = &repo.tea_auth {
+                lines.push(Line::from(format!("Tea host: {host}")).green());
+                if let Some(user) = user {
+                    lines.push(Line::from(format!("Tea user: {user}")).green());
+                }
+            }
+
+            lines.push(status_line(
+                "Ollama",
+                repo.ollama.label(),
+                match &repo.ollama {
+                    OllamaStatus::Reachable => StatusTone::Good,
+                    OllamaStatus::Unreachable(_) => StatusTone::Bad,
+                    OllamaStatus::Unknown(_) => StatusTone::Muted,
+                },
+            ));
+            lines.push(Line::from(format!("Ollama endpoint: {}", repo.ollama_base_url)).dim());
+            lines.push(Line::from(format!("Ollama model: {}", repo.ollama_model)).dim());
+            if let Some(detail) = repo.ollama.detail() {
+                lines.push(match &repo.ollama {
+                    OllamaStatus::Unreachable(_) => Line::from(detail.to_string()).red(),
+                    _ => Line::from(detail.to_string()).dim(),
+                });
+            }
+
+            lines.push(Line::from(format!(
+                "Base branch: {}",
+                repo.base_branch.name
+            )));
+            lines.push(Line::from(format!("Logs: {}", app.logs().entries.len())).dim());
+            lines.push(Line::from(""));
+            lines.push(Line::from("Select a mode on the left.".dim()));
+            lines
+        }
         Screen::Generate => FieldId::ALL
             .iter()
             .enumerate()
@@ -357,10 +412,27 @@ fn focused_title(title: &'static str, focused: bool) -> Line<'static> {
     }
 }
 
-fn status_line(label: &'static str, value: &'static str) -> Line<'static> {
-    match value {
-        "available" | "detected" => Line::from(format!("{label}: {value}")),
-        _ => Line::from(format!("{label}: {value}")).dim(),
+#[derive(Clone, Copy)]
+enum StatusTone {
+    Good,
+    Muted,
+    Bad,
+}
+
+fn tool_tone(status: &ToolStatus) -> StatusTone {
+    match status {
+        ToolStatus::Available => StatusTone::Good,
+        ToolStatus::Missing | ToolStatus::Unknown => StatusTone::Muted,
+        ToolStatus::Error(_) => StatusTone::Bad,
+    }
+}
+
+fn status_line(label: &str, value: impl Into<String>, tone: StatusTone) -> Line<'static> {
+    let line = Line::from(format!("{label}: {}", value.into()));
+    match tone {
+        StatusTone::Good => line.green(),
+        StatusTone::Muted => line.dim(),
+        StatusTone::Bad => line.red(),
     }
 }
 

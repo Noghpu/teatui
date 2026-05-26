@@ -6,8 +6,10 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::generate::{GeneratedDraft, validate_branch_name};
 use crate::prompt::PromptBuild;
+use crate::repo::OllamaStatus;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_TEMPERATURE: f32 = 0.1;
 
 #[derive(Debug, Clone)]
@@ -83,6 +85,25 @@ impl OllamaClient {
         }
 
         parse_generated_draft(api_response.response)
+    }
+}
+
+pub async fn health_check(config: &Config) -> OllamaStatus {
+    let client = match reqwest::Client::builder()
+        .timeout(HEALTH_CHECK_TIMEOUT)
+        .build()
+        .wrap_err("failed to build Ollama health check client")
+    {
+        Ok(client) => client,
+        Err(err) => {
+            return OllamaStatus::Unreachable(err.to_string());
+        }
+    };
+
+    let url = config.ollama.base_url.trim_end_matches('/').to_string();
+    match client.get(url).send().await {
+        Ok(_) => OllamaStatus::Reachable,
+        Err(err) => OllamaStatus::Unreachable(err.to_string()),
     }
 }
 

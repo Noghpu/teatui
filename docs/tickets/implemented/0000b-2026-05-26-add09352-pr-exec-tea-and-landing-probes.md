@@ -2,7 +2,8 @@
 id: 0000b-2026-05-26-add09352-pr-exec-tea-and-landing-probes
 created_at: 2026-05-26T08:01:24+02:00
 created_by_model: claude-opus-4-7/high
-state: open
+state: implemented
+state_updated_at: 2026-05-26T08:23:25+02:00
 ---
 # tea Wrapper and Async Landing Probes
 
@@ -142,3 +143,36 @@ new lines without a noticeable startup hitch.
 - Adding probes to discovery can extend Landing time-to-first-paint if any
   probe accidentally serializes; the concurrent-join requirement protects
   this but must be exercised by review.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: unknown
+- completed_at: 2026-05-26T08:23:25+02:00
+- state: implemented
+
+Completed:
+- Added `src/tea.rs` with a typed `TeaClient` wrapper and argv tests for `tea --version` and `tea login list`.
+- Extended repo discovery with concurrent probes for jj, git, tea auth, Ollama reachability, workspace root, and Gitea remote data.
+- Added `TeaAuth` and `OllamaStatus` to `RepoState`, plus lenient `parse_tea_login_list` tests.
+- Updated Landing rendering to show the new status lines and surface unknown/not configured/error states.
+
+Deviations:
+- Kept `TeaAuth`/`OllamaStatus` in `repo.rs` and returned the repo-owned Ollama status from `ollama::health_check`.
+- Used concise landing details rather than adding extra UI screens or job tracking.
+
+Verification:
+- `just verify`
+
+Files changed:
+- `src/tea.rs`
+- `src/main.rs`
+- `src/repo.rs`
+- `src/ollama.rs`
+- `src/ui.rs`
+- `src/prompt.rs`
+
+Residual risk:
+- `tea login list` output remains best-effort parsed and may need adjustment if tea changes its table layout.

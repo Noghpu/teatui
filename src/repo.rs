@@ -2,12 +2,14 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use crate::command::{CommandError, ExternalCommand, capture};
 use tokio::process::Command;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::timeout;
 
 use crate::config::Config;
 use crate::event::BackgroundEvent;
+use crate::tea::TeaClient;
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -30,6 +32,60 @@ impl ToolStatus {
             Self::Available => "available",
             Self::Missing => "missing",
             Self::Error(_) => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeaAuth {
+    Unknown(String),
+    NotConfigured,
+    Configured { host: String, user: Option<String> },
+    Error(String),
+}
+
+impl TeaAuth {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Unknown(_) => "(unknown)",
+            Self::NotConfigured => "(not configured)",
+            Self::Configured { .. } => "configured",
+            Self::Error(_) => "error",
+        }
+    }
+
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Self::Unknown(reason) | Self::Error(reason) if !reason.is_empty() => {
+                Some(reason.as_str())
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OllamaStatus {
+    Unknown(String),
+    Reachable,
+    Unreachable(String),
+}
+
+impl OllamaStatus {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Unknown(_) => "(unknown)",
+            Self::Reachable => "reachable",
+            Self::Unreachable(_) => "unreachable",
+        }
+    }
+
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Self::Unknown(reason) | Self::Unreachable(reason) if !reason.is_empty() => {
+                Some(reason.as_str())
+            }
+            _ => None,
         }
     }
 }
@@ -90,10 +146,12 @@ pub struct RepoState {
     pub jj: ToolStatus,
     pub git: ToolStatus,
     pub tea: ToolStatus,
+    pub tea_auth: TeaAuth,
     pub remote: Option<RemoteInfo>,
     pub base_branch: BaseBranchInfo,
     pub ollama_base_url: String,
     pub ollama_model: String,
+    pub ollama: OllamaStatus,
     pub blockers: Vec<String>,
 }
 
@@ -105,6 +163,7 @@ impl RepoState {
             jj: ToolStatus::Unknown,
             git: ToolStatus::Unknown,
             tea: ToolStatus::Unknown,
+            tea_auth: TeaAuth::Unknown("pending discovery".into()),
             remote: None,
             base_branch: BaseBranchInfo {
                 name: config.pr.default_base.clone(),
@@ -112,6 +171,7 @@ impl RepoState {
             },
             ollama_base_url: config.ollama.base_url.clone(),
             ollama_model: config.ollama.model.clone(),
+            ollama: OllamaStatus::Unknown("pending discovery".into()),
             blockers: Vec::new(),
         }
     }
@@ -130,29 +190,22 @@ pub fn spawn_discovery(config: Config, cwd: PathBuf, tx: UnboundedSender<Backgro
 
 pub async fn discover(config: Config, cwd: &Path) -> RepoState {
     let commands = config.commands.clone();
-    let jj = tool_status(&commands.jj).await;
-    let git = tool_status(&commands.git).await;
-    let tea = tool_status(&commands.tea).await;
+    let tea_client = TeaClient::new(&config);
 
-    let workspace_root = if jj.is_available() {
-        run_output(&commands.jj, ["--no-pager", "root"], cwd)
-            .await
-            .ok()
-            .map(PathBuf::from)
-    } else {
-        None
-    };
+    let (jj, git, tea, workspace_root, remote_url, tea_login_list, ollama) = tokio::join!(
+        tool_status(&commands.jj),
+        tool_status(&commands.git),
+        tea_status(&tea_client, cwd),
+        run_output(&commands.jj, ["--no-pager", "root"], cwd),
+        run_output(&commands.git, ["remote", "get-url", "origin"], cwd),
+        tea_login_list_output(&tea_client, cwd),
+        crate::ollama::health_check(&config),
+    );
 
+    let workspace_root = workspace_root.ok().map(PathBuf::from);
     let inside_workspace = workspace_root.is_some();
-
-    let remote = if git.is_available() {
-        match run_output(&commands.git, ["remote", "get-url", "origin"], cwd).await {
-            Ok(url) => Some(RemoteInfo::parse(url)),
-            Err(_) => None,
-        }
-    } else {
-        None
-    };
+    let remote = remote_url.ok().map(RemoteInfo::parse);
+    let tea_auth = tea_auth_status(&tea, remote.as_ref(), tea_login_list);
 
     let mut blockers = Vec::new();
     if !jj.is_available() {
@@ -177,6 +230,7 @@ pub async fn discover(config: Config, cwd: &Path) -> RepoState {
         jj,
         git,
         tea,
+        tea_auth,
         remote,
         base_branch: BaseBranchInfo {
             name: config.pr.default_base,
@@ -184,8 +238,179 @@ pub async fn discover(config: Config, cwd: &Path) -> RepoState {
         },
         ollama_base_url: config.ollama.base_url,
         ollama_model: config.ollama.model,
+        ollama,
         blockers,
     }
+}
+
+async fn tea_status(client: &TeaClient, cwd: &Path) -> ToolStatus {
+    capture_tool_status(client.version_command(cwd)).await
+}
+
+async fn tea_login_list_output(
+    client: &TeaClient,
+    cwd: &Path,
+) -> Result<crate::command::CommandCapture, CommandError> {
+    let mut command = client.login_list_command(cwd);
+    command.timeout = DISCOVERY_TIMEOUT;
+    capture(command).await
+}
+
+async fn capture_tool_status(command: ExternalCommand) -> ToolStatus {
+    let mut command = command;
+    command.timeout = DISCOVERY_TIMEOUT;
+    match capture(command).await {
+        Ok(_) => ToolStatus::Available,
+        Err(err) if looks_missing(&err.message) => ToolStatus::Missing,
+        Err(err) => ToolStatus::Error(err.message),
+    }
+}
+
+fn tea_auth_status(
+    tea: &ToolStatus,
+    remote: Option<&RemoteInfo>,
+    tea_login_list: Result<crate::command::CommandCapture, CommandError>,
+) -> TeaAuth {
+    let Some(remote) = remote.filter(|remote| !remote.host.is_empty()) else {
+        return TeaAuth::Unknown("remote host unavailable".into());
+    };
+
+    match (tea, tea_login_list) {
+        (ToolStatus::Available, Ok(output)) => parse_tea_login_list(&output.stdout, &remote.host),
+        (ToolStatus::Available, Err(err)) => TeaAuth::Error(err.message),
+        (ToolStatus::Missing, _) => TeaAuth::Unknown("tea binary is missing".into()),
+        (ToolStatus::Error(message), _) => TeaAuth::Error(message.clone()),
+        (ToolStatus::Unknown, _) => TeaAuth::Unknown("tea status unavailable".into()),
+    }
+}
+
+fn looks_missing(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("not found")
+        || message.contains("cannot find the file")
+        || message.contains("file not found")
+}
+
+pub fn parse_tea_login_list(stdout: &str, host: &str) -> TeaAuth {
+    let host = host.trim();
+    if host.is_empty() {
+        return TeaAuth::Unknown("remote host unavailable".into());
+    }
+
+    let mut saw_data = false;
+    let mut saw_parseable_line = false;
+
+    for line in stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        saw_data = true;
+        let tokens = line
+            .split_whitespace()
+            .map(normalize_token)
+            .filter(|token| !token.is_empty())
+            .collect::<Vec<_>>();
+
+        if tokens.is_empty() {
+            continue;
+        }
+        if tokens.len() >= 2
+            || tokens.iter().any(|token| {
+                token.contains('.')
+                    || token.contains('/')
+                    || token.contains('@')
+                    || token.contains(':')
+            })
+        {
+            saw_parseable_line = true;
+        }
+
+        if let Some((index, matched_host)) = tokens
+            .iter()
+            .enumerate()
+            .find(|(_, token)| token_matches_host(token, host))
+        {
+            let user = adjacent_user_token(&tokens, index, matched_host);
+            return TeaAuth::Configured {
+                host: host.to_string(),
+                user,
+            };
+        }
+    }
+
+    if saw_data && saw_parseable_line {
+        TeaAuth::NotConfigured
+    } else {
+        TeaAuth::Unknown("unable to parse tea login list output".into())
+    }
+}
+
+fn normalize_token(token: &str) -> String {
+    token
+        .trim_matches(|ch: char| {
+            matches!(
+                ch,
+                ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | '"' | '\''
+            )
+        })
+        .trim_end_matches(".git")
+        .to_string()
+}
+
+fn token_matches_host(token: &str, host: &str) -> bool {
+    let token = normalize_host_candidate(token);
+    let host = host.trim();
+    if token.is_empty() || host.is_empty() {
+        return false;
+    }
+
+    let token = token.to_ascii_lowercase();
+    let host = host.to_ascii_lowercase();
+    let token_base = token
+        .split_once(':')
+        .map(|(value, _)| value)
+        .unwrap_or(&token);
+    token_base == host || token.ends_with(&host) || host.ends_with(token_base)
+}
+
+fn normalize_host_candidate(candidate: &str) -> String {
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return String::new();
+    }
+
+    let candidate = candidate
+        .rsplit_once('@')
+        .map(|(_, value)| value)
+        .unwrap_or(candidate);
+    let candidate = candidate
+        .split_once("://")
+        .map(|(_, value)| value)
+        .unwrap_or(candidate);
+    let candidate = candidate
+        .split_once('/')
+        .map(|(value, _)| value)
+        .unwrap_or(candidate);
+
+    candidate
+        .trim_matches(|ch: char| matches!(ch, ',' | ';' | ')' | '('))
+        .to_string()
+}
+
+fn adjacent_user_token(tokens: &[String], index: usize, matched_host: &str) -> Option<String> {
+    let candidate_after = tokens
+        .get(index + 1)
+        .filter(|token| !token_matches_host(token, matched_host))
+        .cloned();
+    if candidate_after.is_some() {
+        return candidate_after;
+    }
+
+    tokens
+        .get(index.wrapping_sub(1))
+        .filter(|token| !token_matches_host(token, matched_host))
+        .cloned()
 }
 
 async fn tool_status(program: &str) -> ToolStatus {
@@ -306,5 +531,44 @@ mod tests {
             remote.raw_url,
             "https://code.example.com/scm/team/project.git"
         );
+    }
+
+    #[test]
+    fn parses_tea_login_list_match_with_user() {
+        let auth = parse_tea_login_list(
+            r#"
+host user
+code.example.com alice
+"#,
+            "code.example.com",
+        );
+
+        assert_eq!(
+            auth,
+            TeaAuth::Configured {
+                host: "code.example.com".into(),
+                user: Some("alice".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn reports_not_configured_when_host_is_missing() {
+        let auth = parse_tea_login_list(
+            r#"
+host user
+other.example.com bob
+"#,
+            "code.example.com",
+        );
+
+        assert_eq!(auth, TeaAuth::NotConfigured);
+    }
+
+    #[test]
+    fn reports_unknown_for_unparseable_output() {
+        let auth = parse_tea_login_list("!!!", "code.example.com");
+
+        assert!(matches!(auth, TeaAuth::Unknown(reason) if reason.contains("unable to parse")));
     }
 }

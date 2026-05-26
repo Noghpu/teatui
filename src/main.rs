@@ -10,6 +10,7 @@ mod logging;
 mod ollama;
 mod prompt;
 mod repo;
+mod tea;
 mod tui;
 mod ui;
 

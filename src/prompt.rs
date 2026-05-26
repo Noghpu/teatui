@@ -430,7 +430,9 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::generate::PrForm;
-    use crate::repo::{BaseBranchInfo, BaseBranchSource, RemoteInfo, RepoState, ToolStatus};
+    use crate::repo::{
+        BaseBranchInfo, BaseBranchSource, OllamaStatus, RemoteInfo, RepoState, TeaAuth, ToolStatus,
+    };
     use std::path::PathBuf;
     use std::time::SystemTime;
 
@@ -442,6 +444,10 @@ mod tests {
             jj: ToolStatus::Available,
             git: ToolStatus::Available,
             tea: ToolStatus::Available,
+            tea_auth: TeaAuth::Configured {
+                host: "code.example.com".into(),
+                user: Some("alice".into()),
+            },
             remote: Some(RemoteInfo::parse("git@code.example.com:team/project.git")),
             base_branch: BaseBranchInfo {
                 name: config.pr.default_base.clone(),
@@ -449,6 +455,7 @@ mod tests {
             },
             ollama_base_url: config.ollama.base_url.clone(),
             ollama_model: config.ollama.model.clone(),
+            ollama: OllamaStatus::Reachable,
             blockers: Vec::new(),
         };
 
