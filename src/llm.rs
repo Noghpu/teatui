@@ -13,7 +13,7 @@ const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_TEMPERATURE: f32 = 0.1;
 
 #[derive(Debug, Clone)]
-pub struct OllamaClient {
+pub struct OllamaNativeBackend {
     base_url: String,
     model: String,
     temperature: f32,
@@ -22,7 +22,7 @@ pub struct OllamaClient {
     client: reqwest::Client,
 }
 
-impl OllamaClient {
+impl OllamaNativeBackend {
     pub fn new(backend: &LlmBackendConfig) -> Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
@@ -196,14 +196,14 @@ impl OpenAiCompatClient {
 
 #[derive(Debug, Clone)]
 pub enum LlmClient {
-    Ollama(OllamaClient),
+    Ollama(OllamaNativeBackend),
     OpenAiCompat(OpenAiCompatClient),
 }
 
 impl LlmClient {
     pub fn from_config(backend: &LlmBackendConfig) -> Result<Self> {
         match backend.backend_type.as_str() {
-            "ollama" => Ok(Self::Ollama(OllamaClient::new(backend)?)),
+            "ollama" => Ok(Self::Ollama(OllamaNativeBackend::new(backend)?)),
             "llama-cpp" | "vllm" => Ok(Self::OpenAiCompat(OpenAiCompatClient::new(backend)?)),
             other => bail!("unknown LLM backend type `{other}`"),
         }
@@ -518,5 +518,43 @@ mod tests {
     fn rejects_openai_compat_non_json_content() {
         let err = parse_generated_draft("not json".into()).expect_err("error");
         assert!(err.message.contains("parse generated draft JSON"));
+    }
+
+    #[test]
+    fn constructs_native_ollama_client_for_ollama_backend() {
+        let backend = LlmBackendConfig {
+            backend_type: "ollama".into(),
+            ..LlmBackendConfig::default()
+        };
+
+        let client = LlmClient::from_config(&backend).expect("client");
+
+        assert!(matches!(client, LlmClient::Ollama(_)));
+    }
+
+    #[test]
+    fn constructs_openai_compat_client_for_compat_backends() {
+        for backend_type in ["llama-cpp", "vllm"] {
+            let backend = LlmBackendConfig {
+                backend_type: backend_type.into(),
+                ..LlmBackendConfig::default()
+            };
+
+            let client = LlmClient::from_config(&backend).expect("client");
+
+            assert!(matches!(client, LlmClient::OpenAiCompat(_)));
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_backend_type() {
+        let backend = LlmBackendConfig {
+            backend_type: "other".into(),
+            ..LlmBackendConfig::default()
+        };
+
+        let err = LlmClient::from_config(&backend).expect_err("error");
+
+        assert!(err.to_string().contains("unknown LLM backend type"));
     }
 }

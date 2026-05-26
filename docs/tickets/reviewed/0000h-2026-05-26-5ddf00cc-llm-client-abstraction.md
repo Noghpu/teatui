@@ -2,8 +2,8 @@
 id: 0000h-2026-05-26-5ddf00cc-llm-client-abstraction
 created_at: 2026-05-26T18:02:10+02:00
 created_by_model: claude-sonnet-4-6/high
-state: implemented
-state_updated_at: 2026-05-26T21:04:39+02:00
+state: reviewed
+state_updated_at: 2026-05-26T21:09:01+02:00
 ---
 # LLM Client Abstraction: Enum Dispatch for Ollama Native and OpenAI-Compat
 
@@ -146,3 +146,28 @@ Important files changed:
 Residual risks:
 - OpenAI-compatible backends are assumed to expose `/v1/chat/completions` and `/v1/models`; unusual local server variants may need small adapter tweaks later.
 - The live smoke helper now explicitly opts into `llama-cpp`; a different OpenAI-compatible server may need its backend type adjusted in config.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: gpt-5.5-medium
+- reviewed_at: 2026-05-26T21:09:01+02:00
+- state: reviewed
+
+# Review Postmortem
+
+Facts:
+- Reviewed ticket 0000h-2026-05-26-5ddf00cc-llm-client-abstraction against docs/design.md, the persisted ticket, and the implementation diff.
+- Found that the native Ollama implementation type was still exposed as `OllamaClient`, which violated the ticket acceptance criterion that no public symbol named `OllamaClient` remain.
+- Renamed the native implementation type to `OllamaNativeBackend` while preserving `LlmClient::Ollama` enum dispatch behavior.
+- Added focused unit tests for `LlmClient::from_config` dispatch for `ollama`, `llama-cpp`, and `vllm`, plus the unknown-backend error path.
+- Confirmed `rg -n "OllamaClient|OllamaError|OllamaStatus|crate::ollama|mod ollama" src tests` returns no matches.
+- Ran `just verify` successfully after the review changes.
+
+Inference:
+- The remaining implementation shape is consistent with the ticket's enum-dispatch design and the repository's current minimal testing strategy.
+
+Residual risks:
+- OpenAI-compatible live behavior still depends on local server compatibility with `/v1/chat/completions` and `/v1/models`; this was not live-tested in this review.
