@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Layout},
     style::Stylize,
     text::Line,
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 
 use crate::app::{App, Screen};
@@ -184,31 +184,12 @@ fn render_work(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             .iter()
             .enumerate()
             .flat_map(|(index, field_id)| {
-                let generate = app.generate();
-                let field = generate.form.field(*field_id);
-                let label = field_id.label();
-                let value = field.display_value();
-                let error_count = field.errors.len();
-                let marker = if index == generate.selected_field {
-                    ">"
-                } else {
-                    " "
-                };
-                let line = if error_count > 0 {
-                    format!("{marker} {label}: {value} ({error_count} errors)")
-                } else {
-                    format!("{marker} {label}: {value}")
-                };
-                let mut lines = Vec::with_capacity(1 + error_count);
-                if index == generate.selected_field && app.focus() == Focus::Form {
-                    lines.push(Line::from(line.bold().cyan()));
-                } else {
-                    lines.push(Line::from(line.dim()));
-                }
-                for error in &field.errors {
-                    lines.push(Line::from(format!("    - {error}")).red());
-                }
-                lines
+                render_generate_field(
+                    app.generate(),
+                    *field_id,
+                    index == app.generate().selected_field,
+                    index == app.generate().selected_field && app.focus() == Focus::Form,
+                )
             })
             .collect(),
         Screen::PullRequests => vec![
@@ -227,15 +208,23 @@ fn render_work(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
     let title = match app.screen() {
         Screen::Landing => "Status",
-        Screen::Generate => "PR Form",
+        Screen::Generate => {
+            if app.generate().phase == GeneratePhase::DraftReady {
+                "Draft Review"
+            } else {
+                "PR Form"
+            }
+        }
         Screen::PullRequests | Screen::Issues => "Work",
     };
 
-    let form = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(focused_title(title, app.focus() == Focus::Form)),
-    );
+    let form = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(focused_title(title, app.focus() == Focus::Form)),
+        )
+        .wrap(Wrap { trim: false });
     frame.render_widget(form, area);
 }
 
@@ -260,126 +249,7 @@ fn render_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
             lines
         }
-        Screen::Generate => {
-            let revset = app.generate().selected_revset();
-            let mut lines = vec![
-                Line::from("Selected Revset".bold()),
-                Line::from(""),
-                Line::from(format!("revset: {}", revset.label()).cyan()),
-                Line::from(format!("description: {}", revset.description())),
-                Line::from(format!("bookmarks: {}", revset.bookmarks().join(", ")).dim()),
-                Line::from(format!("stats: {}", revset.stats()).dim()),
-                Line::from(format!("commits: {}", revset.commit_count())),
-                Line::from(format!("commit ids: {}", revset.commit_ids().join(", "))),
-                Line::from(format!("change ids: {}", revset.change_ids().join(", "))),
-                Line::from(""),
-                Line::from(format!("phase: {:?}", app.generate().phase).dim()),
-                Line::from(format!("input mode: {:?}", app.input_mode()).dim()),
-                Line::from(format!(
-                    "focused field: {}",
-                    app.generate().selected_field_name()
-                )),
-                Line::from(format!(
-                    "base branch: {} ({:?})",
-                    app.repo().base_branch.name,
-                    app.repo().base_branch.source
-                )),
-            ];
-
-            match app.generate().phase {
-                GeneratePhase::CollectingContext => {
-                    lines.push(Line::from(""));
-                    lines.push(Line::from("Collecting context".bold()));
-                    lines.push(Line::from(format!(
-                        "selected revset: {}",
-                        app.generate().selected_revset().label()
-                    )));
-                    lines.push(Line::from(format!(
-                        "base branch: {}",
-                        app.generate().form.base.display_value()
-                    )));
-                    lines.push(Line::from("jj status".dim()));
-                    lines.push(Line::from("jj log".dim()));
-                    lines.push(Line::from("jj diff --stat".dim()));
-                    lines.push(Line::from("jj diff".dim()));
-                }
-                GeneratePhase::Generating => {
-                    lines.push(Line::from(""));
-                    lines.push(Line::from("Generating draft".bold()));
-                    lines.push(Line::from("Sending the assembled prompt to Ollama.".dim()));
-                    lines.push(Line::from("Waiting for a validated JSON draft.".dim()));
-                    if let Some(prompt) = app.generate().prompt_build() {
-                        lines.push(Line::from(format!(
-                            "prompt bytes: {}",
-                            prompt.manifest.byte_count
-                        )));
-                    }
-                }
-                GeneratePhase::ContextReady => {
-                    if let Some(prompt) = app.generate().prompt_build() {
-                        lines.push(Line::from(""));
-                        match app.generate().prompt_view {
-                            PromptView::Manifest => lines.extend(render_prompt_manifest(&prompt)),
-                            PromptView::Prompt => lines.extend(render_prompt_text(&prompt)),
-                        }
-                    }
-                }
-                GeneratePhase::Failed => {
-                    if let Some(error) = &app.generate().context_error {
-                        lines.push(Line::from(""));
-                        lines.push(Line::from("Context failed".bold()));
-                        lines.push(Line::from(error.clone()).red());
-                    }
-                    if let Some(error) = &app.generate().generation_error {
-                        lines.push(Line::from(""));
-                        lines.push(Line::from("Generation failed".bold()));
-                        lines.push(Line::from(error.clone()).red());
-                    }
-                }
-                _ => {}
-            }
-
-            if let Some(draft) = &app.generate().draft {
-                lines.push(Line::from(""));
-                lines.push(Line::from("Draft".bold()));
-                lines.push(Line::from(format!("branch: {}", draft.branch_name)));
-                lines.push(Line::from(format!("title: {}", draft.title)));
-                lines.push(Line::from(format!("body chars: {}", draft.body.len())).dim());
-                lines.push(Line::from(format!(
-                    "review notes: {}",
-                    draft.review_notes.len()
-                )));
-                lines.push(Line::from(format!(
-                    "raw response chars: {}",
-                    draft.raw_model_response.len()
-                )));
-            }
-
-            lines.push(Line::from(format!(
-                "review summary: {}",
-                app.generate().review.summary
-            )));
-            lines.push(Line::from(format!(
-                "review notes: {}",
-                app.generate().review.notes.len()
-            )));
-            lines.push(Line::from(format!(
-                "review warnings: {}",
-                app.generate().review.warnings.len()
-            )));
-
-            lines.push(Line::from(""));
-            lines.push(Line::from(
-                "Press Enter on the revset list to move to the PR form.".dim(),
-            ));
-            lines.push(Line::from(
-                "Press g from navigation mode to generate using all form values.".dim(),
-            ));
-            lines.push(Line::from(
-                "Press p to toggle prompt manifest and prompt text.".dim(),
-            ));
-            lines
-        }
+        Screen::Generate => render_generate_preview(app),
         Screen::PullRequests => vec![
             Line::from("PR Preview".bold()),
             Line::from(""),
@@ -394,11 +264,13 @@ fn render_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         ],
     };
 
-    let preview = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(focused_title("Preview", app.focus() == Focus::Preview)),
-    );
+    let preview = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(focused_title("Preview", app.focus() == Focus::Preview)),
+        )
+        .wrap(Wrap { trim: false });
     frame.render_widget(preview, area);
 }
 
@@ -550,5 +422,260 @@ fn render_prompt_text(prompt: &PromptBuild) -> Vec<Line<'static>> {
 
     lines.push(Line::from(""));
     lines.push(Line::from("Press p to return to the manifest.".dim()));
+    lines
+}
+
+fn render_generate_field(
+    generate: &crate::generate::GenerateState,
+    field_id: FieldId,
+    selected: bool,
+    focused: bool,
+) -> Vec<Line<'static>> {
+    let field = generate.form.field(field_id);
+    let label = field_id.label();
+    let value = field.display_value().to_string();
+    let error_count = field.errors.len();
+    let marker = if selected { ">" } else { " " };
+    let header = if matches!(field_id, FieldId::Description) {
+        if error_count > 0 {
+            format!("{marker} {label} ({error_count} errors)")
+        } else {
+            format!("{marker} {label}")
+        }
+    } else if error_count > 0 {
+        format!("{marker} {label}: {value} ({error_count} errors)")
+    } else {
+        format!("{marker} {label}: {value}")
+    };
+
+    let mut lines =
+        Vec::with_capacity(1 + error_count + usize::from(matches!(field_id, FieldId::Description)));
+    if focused {
+        lines.push(Line::from(header.bold().cyan()));
+    } else {
+        lines.push(Line::from(header.dim()));
+    }
+
+    if matches!(field_id, FieldId::Description) {
+        if value.trim().is_empty() {
+            lines.push(Line::from("    (empty)").dim());
+        } else {
+            for line in value.lines() {
+                lines.push(Line::from(format!("    {line}")));
+            }
+        }
+    }
+
+    for error in &field.errors {
+        lines.push(Line::from(format!("    - {error}")).red());
+    }
+
+    lines
+}
+
+fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
+    let generate = app.generate();
+    let revset = generate.selected_revset();
+    let mut lines = vec![
+        Line::from("Selected Revset".bold()),
+        Line::from(""),
+        Line::from(format!("revset: {}", revset.label()).cyan()),
+        Line::from(format!("description: {}", revset.description())),
+        Line::from(format!("bookmarks: {}", revset.bookmarks().join(", ")).dim()),
+        Line::from(format!("stats: {}", revset.stats()).dim()),
+        Line::from(format!("commits: {}", revset.commit_count())),
+        Line::from(format!("commit ids: {}", revset.commit_ids().join(", "))),
+        Line::from(format!("change ids: {}", revset.change_ids().join(", "))),
+        Line::from(""),
+        Line::from(format!("phase: {:?}", generate.phase).dim()),
+        Line::from(format!("input mode: {:?}", app.input_mode()).dim()),
+        Line::from(format!("focused field: {}", generate.selected_field_name())),
+        Line::from(format!(
+            "base branch: {} ({:?})",
+            app.repo().base_branch.name,
+            app.repo().base_branch.source
+        )),
+    ];
+
+    match generate.phase {
+        GeneratePhase::CollectingContext => {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Collecting context".bold()));
+            lines.push(Line::from(format!(
+                "selected revset: {}",
+                generate.selected_revset().label()
+            )));
+            lines.push(Line::from(format!(
+                "base branch: {}",
+                generate.form.base.display_value()
+            )));
+            lines.push(Line::from("jj status".dim()));
+            lines.push(Line::from("jj log".dim()));
+            lines.push(Line::from("jj diff --stat".dim()));
+            lines.push(Line::from("jj diff".dim()));
+        }
+        GeneratePhase::Generating => {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Generating draft".bold()));
+            lines.push(Line::from(
+                "The retained draft stays visible while a fresh response is requested.".dim(),
+            ));
+            lines.push(Line::from("Waiting for a validated JSON draft.".dim()));
+            if let Some(draft) = generate.draft.as_ref() {
+                lines.push(Line::from(""));
+                lines.extend(render_draft_section(draft));
+            }
+            if let Some(prompt) = generate.prompt_build() {
+                lines.push(Line::from(format!(
+                    "prompt bytes: {}",
+                    prompt.manifest.byte_count
+                )));
+            }
+        }
+        GeneratePhase::ContextReady => {
+            if let Some(prompt) = generate.prompt_build() {
+                lines.push(Line::from(""));
+                match generate.prompt_view {
+                    PromptView::Manifest => lines.extend(render_prompt_manifest(&prompt)),
+                    PromptView::Prompt => lines.extend(render_prompt_text(&prompt)),
+                }
+            }
+        }
+        GeneratePhase::DraftReady => {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Draft review".bold()));
+            lines.push(Line::from(format!("status: {}", generate.review.summary)).cyan());
+            lines.push(Line::from(
+                "The generated draft is editable in the center pane.".dim(),
+            ));
+            if let Some(draft) = generate.draft.as_ref() {
+                lines.push(Line::from(""));
+                lines.extend(render_draft_section(draft));
+            }
+            if let Some(prompt) = generate.prompt_build() {
+                lines.push(Line::from(""));
+                lines.extend(render_manifest_warnings(&prompt));
+            }
+            lines.push(Line::from(""));
+            lines.extend(render_recent_logs(app.logs().entries.as_slice(), 6));
+            lines.push(Line::from(""));
+            lines.push(Line::from(
+                "Execution preview only; branch, push, and tea mutation are not implemented yet."
+                    .yellow(),
+            ));
+        }
+        GeneratePhase::Failed => {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Draft workflow failed".bold()));
+            lines.push(Line::from(format!("status: {}", generate.review.summary)).cyan());
+            if let Some(error) = &generate.context_error {
+                lines.push(Line::from("Context failed".bold()));
+                lines.push(Line::from(error.clone()).red());
+            }
+            if let Some(error) = &generate.generation_error {
+                lines.push(Line::from("Generation failed".bold()));
+                lines.push(Line::from(error.clone()).red());
+            }
+            if let Some(draft) = generate.draft.as_ref() {
+                lines.push(Line::from(""));
+                lines.extend(render_draft_section(draft));
+            }
+            if let Some(prompt) = generate.prompt_build() {
+                lines.push(Line::from(""));
+                lines.extend(render_manifest_warnings(&prompt));
+            }
+            lines.push(Line::from(""));
+            lines.extend(render_recent_logs(app.logs().entries.as_slice(), 6));
+            lines.push(Line::from(""));
+            lines.push(Line::from(
+                "Press g to retry with the retained context.".dim(),
+            ));
+        }
+        _ => {
+            if let Some(draft) = generate.draft.as_ref() {
+                lines.push(Line::from(""));
+                lines.extend(render_draft_section(draft));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(
+                "Press Enter on the revset list to move to the PR form.".dim(),
+            ));
+            lines.push(Line::from(
+                "Press g from navigation mode to generate using all form values.".dim(),
+            ));
+            lines.push(Line::from(
+                "Press p to toggle prompt manifest and prompt text.".dim(),
+            ));
+        }
+    }
+
+    lines
+}
+
+fn render_draft_section(draft: &crate::generate::GeneratedDraft) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from("Generated draft".bold()),
+        Line::from(format!("branch: {}", draft.branch_name).cyan()),
+        Line::from(format!("title: {}", draft.title)),
+        Line::from(format!("body chars: {}", draft.body.len())).dim(),
+        Line::from(format!(
+            "raw response chars: {}",
+            draft.raw_model_response.len()
+        ))
+        .dim(),
+        Line::from(""),
+        Line::from("body".bold()),
+    ];
+
+    if draft.body.trim().is_empty() {
+        lines.push(Line::from("  (empty)").dim());
+    } else {
+        for line in draft.body.lines() {
+            lines.push(Line::from(format!("  {line}")));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(format!(
+        "review notes: {}",
+        draft.review_notes.len()
+    )));
+    if draft.review_notes.is_empty() {
+        lines.push(Line::from("  (no review notes)").dim());
+    } else {
+        for note in &draft.review_notes {
+            lines.push(Line::from(format!("  - {note}")));
+        }
+    }
+
+    lines
+}
+
+fn render_manifest_warnings(prompt: &PromptBuild) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from("Prompt manifest warnings".bold())];
+
+    if prompt.manifest.truncation_warnings.is_empty() {
+        lines.push(Line::from("  (none)").dim());
+    } else {
+        for warning in &prompt.manifest.truncation_warnings {
+            lines.push(Line::from(format!("  - {warning}")).yellow());
+        }
+    }
+
+    lines
+}
+
+fn render_recent_logs(entries: &[String], limit: usize) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from("Recent logs".bold())];
+    let recent: Vec<_> = entries.iter().rev().take(limit).cloned().collect();
+
+    if recent.is_empty() {
+        lines.push(Line::from("  (no logs yet)").dim());
+    } else {
+        for entry in recent.into_iter().rev() {
+            lines.push(Line::from(format!("  {entry}")));
+        }
+    }
+
     lines
 }

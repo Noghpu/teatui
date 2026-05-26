@@ -2,7 +2,8 @@
 id: 00009-2026-05-25-polished-pr-gen-draft-review
 created_at: 2026-05-25T21:55:35+02:00
 created_by_model: migration-placeholder
-state: open
+state: implemented
+state_updated_at: 2026-05-26T06:44:11+02:00
 ---
 # Draft Review
 
@@ -63,3 +64,39 @@ Run `just verify`; add focused unit tests for draft field editing if it diverges
 ## Risks
 - Draft review can accidentally imply that execution is implemented.
 - Narrow terminal rendering can become unreadable if wrapping and scrolling are not explicit.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: gpt-5.4-mini
+- completed_at: 2026-05-26T06:44:11+02:00
+- state: implemented
+
+Metadata:
+- model: gpt-5.4-mini
+- completed_at: 2026-05-26T00:00:00+02:00
+- state: implemented
+
+Completed:
+- Added draft-ready review rendering in the Generate PR center and preview panes.
+- Surfaced generated branch name, PR title, PR body, review notes, manifest warnings, and recent logs in the draft review view.
+- Synced successful generated drafts back into the editable form fields so the generated draft is the review surface.
+- Preserved the last draft across retry attempts so generation can be retried without losing context.
+- Added readable multiline rendering for the PR body and wrapped the work/preview panes for narrow terminals.
+
+Deviations:
+- Kept the existing prompt-manifest toggle for context-ready review, but the draft-ready pane now defaults to the generated draft instead of the prompt view.
+- Preserved the previous draft during generation retries instead of blanking the screen, which better matches the retry-with-context requirement.
+
+Verification:
+- `just verify` passed.
+
+Files changed:
+- `src/generate.rs`
+- `src/ui.rs`
+
+Residual risks:
+- The preview still depends on line wrapping and clipped terminal height for very large drafts.
+- A retry can still overwrite any in-progress edits if generation finishes while the user is editing the same fields.

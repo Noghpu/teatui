@@ -505,13 +505,13 @@ impl GenerateState {
         self.phase = GeneratePhase::Generating;
         self.context_error = None;
         self.generation_error = None;
-        self.draft = None;
-        self.review = DraftReview::default();
     }
 
     pub fn complete_generation(&mut self, draft: GeneratedDraft) {
         self.phase = GeneratePhase::DraftReady;
+        self.context_error = None;
         self.generation_error = None;
+        self.sync_form_from_draft(&draft);
         self.review = DraftReview {
             summary: format!("Generated draft for {}", draft.branch_name),
             notes: draft.review_notes.clone(),
@@ -525,11 +525,13 @@ impl GenerateState {
         self.phase = GeneratePhase::Failed;
         self.context_error = None;
         self.generation_error = Some(error.clone());
-        self.review = DraftReview {
-            summary: "Generation failed".into(),
-            notes: Vec::new(),
-            warnings: vec![error],
-        };
+        if self.draft.is_none() {
+            self.review = DraftReview {
+                summary: "Generation failed".into(),
+                notes: Vec::new(),
+                warnings: vec![error],
+            };
+        }
     }
 
     pub fn toggle_prompt_view(&mut self) {
@@ -543,6 +545,12 @@ impl GenerateState {
         self.context
             .as_ref()
             .map(|context| PromptBuild::new(context, &self.form, None, DEFAULT_PROMPT_BYTE_BUDGET))
+    }
+
+    fn sync_form_from_draft(&mut self, draft: &GeneratedDraft) {
+        self.form.branch_name = FieldState::new(draft.branch_name.clone());
+        self.form.title = FieldState::new(draft.title.clone());
+        self.form.description = FieldState::new(draft.body.clone());
     }
 }
 
@@ -663,5 +671,50 @@ mod tests {
         assert!(state.form.branch_name.errors.is_empty());
         assert!(state.form.title.errors.is_empty());
         assert!(state.blocking_errors().is_empty());
+    }
+
+    #[test]
+    fn complete_generation_syncs_form_with_draft_fields() {
+        let mut state = GenerateState::new(vec![revset("@")]);
+        let draft = GeneratedDraft {
+            branch_name: "feature/example".into(),
+            title: "Polished draft".into(),
+            body: "Summary\n\nTesting".into(),
+            review_notes: vec!["keep an eye on truncation".into()],
+            raw_model_response: "{\"branch_name\":\"feature/example\"}".into(),
+        };
+
+        state.complete_generation(draft.clone());
+
+        assert_eq!(state.phase, GeneratePhase::DraftReady);
+        assert_eq!(state.form.branch_name.value, draft.branch_name);
+        assert_eq!(state.form.title.value, draft.title);
+        assert_eq!(state.form.description.value, draft.body);
+        assert_eq!(state.review.summary, "Generated draft for feature/example");
+        assert_eq!(state.review.notes, draft.review_notes);
+        assert_eq!(state.draft, Some(draft));
+    }
+
+    #[test]
+    fn begin_generation_keeps_the_last_draft_available_for_retry() {
+        let mut state = GenerateState::new(vec![revset("@")]);
+        state.complete_generation(GeneratedDraft {
+            branch_name: "feature/example".into(),
+            title: "Polished draft".into(),
+            body: "Summary".into(),
+            review_notes: vec!["keep an eye on truncation".into()],
+            raw_model_response: "{\"branch_name\":\"feature/example\"}".into(),
+        });
+
+        state.begin_generation();
+
+        assert_eq!(state.phase, GeneratePhase::Generating);
+        assert_eq!(
+            state.draft.as_ref().map(|draft| draft.branch_name.as_str()),
+            Some("feature/example")
+        );
+        assert_eq!(state.form.branch_name.value, "feature/example");
+        assert_eq!(state.form.title.value, "Polished draft");
+        assert_eq!(state.form.description.value, "Summary");
     }
 }
