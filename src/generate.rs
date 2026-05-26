@@ -8,7 +8,15 @@ pub enum InputMode {
     #[default]
     Normal,
     Editing,
-    Review,
+}
+
+impl InputMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "NORMAL",
+            Self::Editing => "EDITING",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -33,6 +41,23 @@ pub enum GeneratePhase {
     Executing,
     Complete,
     Failed,
+}
+
+impl GeneratePhase {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SelectingRevset => "selecting",
+            Self::EditingForm => "editing",
+            Self::CollectingContext => "collecting",
+            Self::ContextReady => "context-ready",
+            Self::Generating => "generating",
+            Self::DraftReady => "draft-ready",
+            Self::Confirming => "confirming",
+            Self::Executing => "executing",
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -226,11 +251,6 @@ pub struct RevsetSummary {
     warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RevsetUpdate {
-    pub revsets: Vec<RevsetSummary>,
-}
-
 impl RevsetSummary {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -294,12 +314,6 @@ impl RevsetSummary {
     }
 }
 
-impl RevsetUpdate {
-    pub fn new(revsets: Vec<RevsetSummary>) -> Self {
-        Self { revsets }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct GenerateState {
     pub phase: GeneratePhase,
@@ -314,6 +328,7 @@ pub struct GenerateState {
     pub draft: Option<GeneratedDraft>,
     pub review: DraftReview,
     pub prompt_view: PromptView,
+    prompt_cache: Option<PromptBuild>,
 }
 
 impl GenerateState {
@@ -340,6 +355,7 @@ impl GenerateState {
             draft: None,
             review: DraftReview::default(),
             prompt_view: PromptView::default(),
+            prompt_cache: None,
         };
         state.validate_form();
         state
@@ -468,6 +484,14 @@ impl GenerateState {
         self.form.labels.errors.clear();
         self.form.assignees.errors.clear();
         self.form.milestone.errors.clear();
+        self.refresh_prompt_cache();
+    }
+
+    fn refresh_prompt_cache(&mut self) {
+        self.prompt_cache = self
+            .context
+            .as_ref()
+            .map(|context| PromptBuild::new(context, &self.form, None, DEFAULT_PROMPT_BYTE_BUDGET));
     }
 
     pub fn blocking_errors(&self) -> Vec<String> {
@@ -483,6 +507,7 @@ impl GenerateState {
         self.context_error = None;
         self.generation_error = None;
         self.context = None;
+        self.prompt_cache = None;
     }
 
     pub fn complete_context_collection(&mut self, context: ContextBundle) {
@@ -491,6 +516,7 @@ impl GenerateState {
         self.context_error = None;
         self.generation_error = None;
         self.context = Some(context);
+        self.refresh_prompt_cache();
     }
 
     pub fn fail_context_collection(&mut self, error: impl Into<String>) {
@@ -539,10 +565,8 @@ impl GenerateState {
         };
     }
 
-    pub fn prompt_build(&self) -> Option<PromptBuild> {
-        self.context
-            .as_ref()
-            .map(|context| PromptBuild::new(context, &self.form, None, DEFAULT_PROMPT_BYTE_BUDGET))
+    pub fn prompt(&self) -> Option<&PromptBuild> {
+        self.prompt_cache.as_ref()
     }
 
     fn sync_form_from_draft(&mut self, draft: &GeneratedDraft) {

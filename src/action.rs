@@ -1,11 +1,11 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum Action {
     Tick,
-    Render,
     Quit,
+    Back,
     Navigate(Direction),
-    Focus(Direction),
+    FocusNext,
+    FocusPrev,
     Select,
     Edit,
     InsertChar(char),
@@ -15,13 +15,6 @@ pub enum Action {
     Generate,
     TogglePromptView,
     Refresh,
-    Back,
-    GenerationResult(Box<crate::event::GenerationResult>),
-    Context(Box<crate::context::ContextResult>),
-    RepoUpdated(Box<crate::repo::RepoState>),
-    RevsetsUpdated(Box<crate::generate::RevsetUpdate>),
-    JobResult(crate::event::JobResult),
-    Error(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

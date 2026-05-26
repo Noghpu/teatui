@@ -666,6 +666,44 @@ The next slices should keep the app usable at each step:
 10. Minimal Manage PRs list/detail/comment mode.
 11. Minimal Manage Issues list/detail/comment mode.
 
+## Deferred Implementation Notes
+
+The first feature (Generate PR) intentionally omits scaffolding from earlier
+drafts so the codebase only carries code that is actually wired up. The
+following items were removed and will need to be added back with the feature
+that requires them.
+
+### Job tracking and `Logs` screen
+
+The Generate PR slice does not surface running commands as first-class jobs,
+so the previous `JobRegistry`, `JobResult`, `JobStatus`, and command-runner
+spawning path were removed. When the PR execution sequence (branch create,
+push, `tea`) lands, it will need:
+
+- A re-introduced async job runner that emits structured queued/running/done
+  events on the existing background channel.
+- A registry on `App` that the status bar and a future `Logs` screen can read.
+- Job records that preserve stdout/stderr plus the redacted command display.
+
+### Typed `git` and `tea` wrappers
+
+Only the `jj` wrapper exists. When `git branch`/`git push` and `tea pr create`
+are implemented, add `git` and `tea` command builders that return
+`ExternalCommand` values and reuse the same `command::capture` async helper.
+
+### Confirmation/Review input mode
+
+The `InputMode` enum currently has `Normal` and `Editing` only. The draft
+review/confirmation flow described in the UI Model section will need a
+dedicated mode (e.g. `Review` or `Confirm`) so the help bar and keybindings
+can gate appropriately, instead of relying on `(screen, focus)` tuples alone.
+
+### Redacted command display
+
+`ExternalCommand::redacted_display` is retained for the confirmation screen
+that previews mutating commands. Until the execution preview ships it is
+unused; do not delete it.
+
 ## Open Questions
 
 - Which jj revset should be default for PR generation: `@`, `@-`, or

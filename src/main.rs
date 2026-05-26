@@ -18,12 +18,9 @@ use color_eyre::eyre::Result;
 use tokio::sync::mpsc;
 
 use crate::app::App;
-use crate::command::CommandRunner;
 use crate::config::Config;
 use crate::event::EventHandler;
-use crate::jj::RevsetDiscovery;
 use crate::logging::init_logging;
-use crate::repo::RepoDiscovery;
 use crate::tui::Tui;
 
 #[derive(Parser)]
@@ -50,33 +47,12 @@ async fn main() -> Result<()> {
 
     tracing::info!("Starting application");
 
-    let mut tui = Tui::new()?;
-    let (job_tx, job_rx) = mpsc::unbounded_channel();
-    let (generation_tx, generation_rx) = mpsc::unbounded_channel();
-    let (context_tx, context_rx) = mpsc::unbounded_channel();
-    let (repo_tx, repo_rx) = mpsc::unbounded_channel();
-    let (revset_tx, revset_rx) = mpsc::unbounded_channel();
-    let runner = CommandRunner::new(&config, job_tx);
-    let discovery = RepoDiscovery::new(config.clone(), repo_tx);
-    let revset_discovery = RevsetDiscovery::new(&config, std::env::current_dir()?, revset_tx);
-    let events = EventHandler::new(
-        config.tick_rate,
-        job_rx,
-        generation_rx,
-        context_rx,
-        repo_rx,
-        revset_rx,
-    );
-    let mut app = App::new(
-        config,
-        runner,
-        generation_tx,
-        context_tx,
-        discovery,
-        revset_discovery,
-    );
+    let (bg_tx, bg_rx) = mpsc::unbounded_channel();
+    let events = EventHandler::new(config.tick_rate, bg_rx);
+    let mut app = App::new(config, bg_tx);
     app.refresh();
 
+    let mut tui = Tui::new()?;
     tui.enter()?;
     let result = app.run(&mut tui, events).await;
     tui.exit()?;

@@ -7,44 +7,22 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::{select, time::interval_at};
 
 use crate::context::ContextResult;
-use crate::generate::{GeneratedDraft, RevsetUpdate};
+use crate::generate::{GeneratedDraft, RevsetSummary};
 use crate::ollama::OllamaError;
 use crate::repo::RepoState;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JobResult {
-    pub id: u64,
-    pub name: String,
-    pub command: String,
-    pub status: JobStatus,
-    pub duration: Option<Duration>,
-    pub stdout: String,
-    pub stderr: String,
-    pub timed_out: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
-pub enum JobStatus {
-    #[default]
-    Idle,
-    Queued,
-    Running,
-    Succeeded,
-    Failed,
-    Cancelled,
-}
-
-#[allow(dead_code)]
 pub enum AppEvent {
     Tick,
     Key(KeyEvent),
-    Resize(u16, u16),
-    Job(JobResult),
-    Generation(Box<GenerationResult>),
-    Context(Box<ContextResult>),
+    Resize,
+    Background(BackgroundEvent),
+}
+
+pub enum BackgroundEvent {
+    Generation(GenerationResult),
+    Context(ContextResult),
     Repo(Box<RepoState>),
-    Revsets(Box<RevsetUpdate>),
+    Revsets(Vec<RevsetSummary>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,31 +34,16 @@ pub enum GenerationResult {
 pub struct EventHandler {
     events: EventStream,
     tick: tokio::time::Interval,
-    jobs: UnboundedReceiver<JobResult>,
-    generation: UnboundedReceiver<Box<GenerationResult>>,
-    context: UnboundedReceiver<Box<ContextResult>>,
-    repo: UnboundedReceiver<Box<RepoState>>,
-    revsets: UnboundedReceiver<Box<RevsetUpdate>>,
+    background: UnboundedReceiver<BackgroundEvent>,
 }
 
 impl EventHandler {
-    pub fn new(
-        tick_rate: Duration,
-        jobs: UnboundedReceiver<JobResult>,
-        generation: UnboundedReceiver<Box<GenerationResult>>,
-        context: UnboundedReceiver<Box<ContextResult>>,
-        repo: UnboundedReceiver<Box<RepoState>>,
-        revsets: UnboundedReceiver<Box<RevsetUpdate>>,
-    ) -> Self {
+    pub fn new(tick_rate: Duration, background: UnboundedReceiver<BackgroundEvent>) -> Self {
         let start = Instant::now() + tick_rate;
         Self {
             events: EventStream::new(),
             tick: interval_at(start.into(), tick_rate),
-            jobs,
-            generation,
-            context,
-            repo,
-            revsets,
+            background,
         }
     }
 
@@ -91,28 +54,12 @@ impl EventHandler {
             Some(Ok(event)) = events.next() => {
                 match event {
                     Event::Key(key) => Ok(AppEvent::Key(key)),
-                    Event::Resize(w, h) => Ok(AppEvent::Resize(w, h)),
+                    Event::Resize(_, _) => Ok(AppEvent::Resize),
                     _ => Ok(AppEvent::Tick),
                 }
             }
-            _ = self.tick.tick() => {
-                Ok(AppEvent::Tick)
-            }
-            Some(job) = self.jobs.recv() => {
-                Ok(AppEvent::Job(job))
-            }
-            Some(generation) = self.generation.recv() => {
-                Ok(AppEvent::Generation(generation))
-            }
-            Some(context) = self.context.recv() => {
-                Ok(AppEvent::Context(context))
-            }
-            Some(repo) = self.repo.recv() => {
-                Ok(AppEvent::Repo(repo))
-            }
-            Some(revsets) = self.revsets.recv() => {
-                Ok(AppEvent::Revsets(revsets))
-            }
+            _ = self.tick.tick() => Ok(AppEvent::Tick),
+            Some(bg) = self.background.recv() => Ok(AppEvent::Background(bg)),
         }
     }
 }

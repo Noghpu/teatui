@@ -1,42 +1,15 @@
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
-use color_eyre::eyre::{Result, WrapErr};
-use std::process::Command;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::command::{ExternalCommand, capture};
 use crate::config::Config;
-use crate::generate::{RevsetSummary, RevsetUpdate};
+use crate::event::BackgroundEvent;
+use crate::generate::RevsetSummary;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JjCommand {
-    pub program: String,
-    pub args: Vec<String>,
-    pub cwd: PathBuf,
-}
+const CANDIDATE_REVSETS: &[&str] = &["@", "@-", "heads(trunk()..)"];
 
-impl JjCommand {
-    pub fn new<I, S>(program: impl Into<String>, args: I, cwd: impl Into<PathBuf>) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        Self {
-            program: program.into(),
-            args: args.into_iter().map(Into::into).collect(),
-            cwd: cwd.into(),
-        }
-    }
-
-    pub fn display(&self) -> String {
-        format!(
-            "{} {} (cwd: {})",
-            self.program,
-            self.args.join(" "),
-            self.cwd.display()
-        )
-    }
-}
+const LOG_TEMPLATE: &str = "commit_id.short() ++ \"|\" ++ change_id.short() ++ \"|\" ++ bookmarks.map(|b| b.name()).join(\",\") ++ \"|\" ++ description.first_line() ++ \"\\n\"";
 
 #[derive(Debug, Clone)]
 pub struct JjClient {
@@ -50,8 +23,12 @@ impl JjClient {
         }
     }
 
-    pub fn candidate_revsets_command(&self, cwd: impl Into<PathBuf>, revset: &str) -> JjCommand {
-        JjCommand::new(
+    pub fn status_command(&self, cwd: impl Into<PathBuf>) -> ExternalCommand {
+        ExternalCommand::new(self.program.clone(), ["--no-pager", "status"], cwd)
+    }
+
+    pub fn revset_log_command(&self, cwd: impl Into<PathBuf>, revset: &str) -> ExternalCommand {
+        ExternalCommand::new(
             self.program.clone(),
             [
                 "--no-pager",
@@ -60,82 +37,59 @@ impl JjClient {
                 "-r",
                 revset,
                 "-T",
-                "commit_id.short() ++ \"|\" ++ change_id.short() ++ \"|\" ++ bookmarks.map(|b| b.name()).join(\",\") ++ \"|\" ++ description.first_line() ++ \"\\n\"",
+                LOG_TEMPLATE,
             ],
             cwd,
         )
     }
 
-    pub fn candidate_revsets_diff_command(
+    pub fn revset_diff_stats_command(
         &self,
         cwd: impl Into<PathBuf>,
         revset: &str,
-    ) -> JjCommand {
-        JjCommand::new(
+    ) -> ExternalCommand {
+        ExternalCommand::new(
             self.program.clone(),
             ["--no-pager", "diff", "-r", revset, "--stat"],
             cwd,
         )
     }
 
-    pub fn status_command(&self, cwd: impl Into<PathBuf>) -> JjCommand {
-        JjCommand::new(self.program.clone(), ["--no-pager", "status"], cwd)
-    }
-
-    pub fn selected_revset_log_command(&self, cwd: impl Into<PathBuf>, revset: &str) -> JjCommand {
-        self.candidate_revsets_command(cwd, revset)
-    }
-
-    pub fn selected_revset_diff_stats_command(
-        &self,
-        cwd: impl Into<PathBuf>,
-        revset: &str,
-    ) -> JjCommand {
-        self.candidate_revsets_diff_command(cwd, revset)
-    }
-
-    pub fn selected_revset_diff_command(&self, cwd: impl Into<PathBuf>, revset: &str) -> JjCommand {
-        JjCommand::new(
+    pub fn revset_diff_command(&self, cwd: impl Into<PathBuf>, revset: &str) -> ExternalCommand {
+        ExternalCommand::new(
             self.program.clone(),
             ["--no-pager", "diff", "-r", revset],
             cwd,
         )
     }
 
-    pub fn candidate_revsets(&self, cwd: impl AsRef<Path>) -> Vec<RevsetSummary> {
-        let cwd = cwd.as_ref().to_path_buf();
-        let revsets = ["@", "@-", "heads(trunk()..)"];
-        let mut summaries = Vec::with_capacity(revsets.len());
-
-        for revset in revsets {
-            summaries.push(
-                self.candidate_revset_summary(&cwd, revset)
-                    .unwrap_or_else(|err| failed_revset_summary(revset, err.to_string())),
-            );
+    pub async fn candidate_revsets(&self, cwd: &Path) -> Vec<RevsetSummary> {
+        let mut summaries = Vec::with_capacity(CANDIDATE_REVSETS.len());
+        for revset in CANDIDATE_REVSETS {
+            summaries.push(self.candidate_revset_summary(cwd, revset).await);
         }
-
         summaries
     }
 
-    pub fn candidate_revset_summary(
-        &self,
-        cwd: impl AsRef<Path>,
-        revset: &str,
-    ) -> Result<RevsetSummary> {
-        let cwd = cwd.as_ref().to_path_buf();
-        let log_command = self.candidate_revsets_command(&cwd, revset);
-        let diff_command = self.candidate_revsets_diff_command(&cwd, revset);
+    async fn candidate_revset_summary(&self, cwd: &Path, revset: &str) -> RevsetSummary {
+        let log_result = capture(self.revset_log_command(cwd, revset)).await;
+        let diff_result = capture(self.revset_diff_stats_command(cwd, revset)).await;
 
-        let log_output = run_command(&log_command)?;
-        let diff_output = run_command(&diff_command)?;
-
-        Ok(parse_revset_summary(
-            revset,
-            &log_output,
-            &diff_output,
-            &cwd,
-        ))
+        match (log_result, diff_result) {
+            (Ok(log), Ok(diff)) => {
+                parse_revset_summary(revset, log.stdout.trim(), diff.stdout.trim(), cwd)
+            }
+            (Err(err), _) | (_, Err(err)) => failed_revset_summary(revset, err.message),
+        }
     }
+}
+
+pub fn spawn_revset_discovery(config: &Config, cwd: PathBuf, tx: UnboundedSender<BackgroundEvent>) {
+    let client = JjClient::new(config);
+    tokio::spawn(async move {
+        let summaries = client.candidate_revsets(&cwd).await;
+        let _ = tx.send(BackgroundEvent::Revsets(summaries));
+    });
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,14 +136,12 @@ fn parse_revset_summary(
         .first()
         .map(|entry| entry.description.clone())
         .unwrap_or_else(|| "No commits matched".into());
-    let stats = diff_output.trim().to_string();
-    let bookmark_refs = bookmarks.clone();
 
     RevsetSummary::new(
         label,
         &description,
-        bookmark_refs,
-        &stats,
+        bookmarks,
+        diff_output,
         commit_count,
         commit_ids,
         change_ids,
@@ -251,10 +203,7 @@ fn collect_bookmarks(entries: &[ParsedLogEntry]) -> Vec<String> {
 }
 
 fn parse_log_entries(output: &str) -> Vec<ParsedLogEntry> {
-    output
-        .lines()
-        .filter_map(parse_log_entry)
-        .collect::<Vec<_>>()
+    output.lines().filter_map(parse_log_entry).collect()
 }
 
 fn parse_log_entry(line: &str) -> Option<ParsedLogEntry> {
@@ -275,60 +224,6 @@ fn parse_log_entry(line: &str) -> Option<ParsedLogEntry> {
         bookmarks,
         description: description.to_string(),
     })
-}
-
-fn run_command(command: &JjCommand) -> Result<String> {
-    let output = Command::new(&command.program)
-        .args(&command.args)
-        .current_dir(&command.cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .wrap_err("failed to run jj command")?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        Err(color_eyre::eyre::eyre!(
-            String::from_utf8_lossy(&output.stderr).trim().to_string()
-        ))
-    }
-}
-
-#[derive(Clone)]
-pub struct RevsetDiscovery {
-    client: JjClient,
-    cwd: PathBuf,
-    tx: UnboundedSender<Box<RevsetUpdate>>,
-}
-
-impl RevsetDiscovery {
-    pub fn new(
-        config: &Config,
-        cwd: impl Into<PathBuf>,
-        tx: UnboundedSender<Box<RevsetUpdate>>,
-    ) -> Self {
-        Self {
-            client: JjClient::new(config),
-            cwd: cwd.into(),
-            tx,
-        }
-    }
-
-    pub fn refresh(&self) {
-        let client = self.client.clone();
-        let cwd = self.cwd.clone();
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            let summaries = tokio::task::spawn_blocking(move || client.candidate_revsets(&cwd))
-                .await
-                .unwrap_or_else(|err| {
-                    let message = err.to_string();
-                    vec![failed_revset_summary("(revset discovery failed)", message)]
-                });
-            let _ = tx.send(Box::new(RevsetUpdate::new(summaries)));
-        });
-    }
 }
 
 #[cfg(test)]
@@ -355,10 +250,10 @@ mod tests {
     }
 
     #[test]
-    fn builds_candidate_revset_command_argv() {
+    fn builds_revset_log_command_argv() {
         let config = Config::default();
         let client = JjClient::new(&config);
-        let command = client.candidate_revsets_command("C:/repo", "@");
+        let command = client.revset_log_command("C:/repo", "@");
 
         assert_eq!(command.program, "jj");
         assert_eq!(
@@ -370,7 +265,7 @@ mod tests {
                 "-r",
                 "@",
                 "-T",
-                "commit_id.short() ++ \"|\" ++ change_id.short() ++ \"|\" ++ bookmarks.map(|b| b.name()).join(\",\") ++ \"|\" ++ description.first_line() ++ \"\\n\"",
+                LOG_TEMPLATE,
             ]
         );
         assert_eq!(command.cwd, PathBuf::from("C:/repo"));

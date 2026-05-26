@@ -7,6 +7,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::timeout;
 
 use crate::config::Config;
+use crate::event::BackgroundEvent;
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -120,29 +121,11 @@ impl RepoState {
     }
 }
 
-#[derive(Clone)]
-pub struct RepoDiscovery {
-    config: Config,
-    cwd: PathBuf,
-    tx: UnboundedSender<Box<RepoState>>,
-}
-
-impl RepoDiscovery {
-    pub fn new(config: Config, tx: UnboundedSender<Box<RepoState>>) -> Self {
-        Self {
-            config,
-            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            tx,
-        }
-    }
-
-    pub fn refresh(&self) {
-        let this = self.clone();
-        tokio::spawn(async move {
-            let state = discover(this.config, &this.cwd).await;
-            let _ = this.tx.send(Box::new(state));
-        });
-    }
+pub fn spawn_discovery(config: Config, cwd: PathBuf, tx: UnboundedSender<BackgroundEvent>) {
+    tokio::spawn(async move {
+        let state = discover(config, &cwd).await;
+        let _ = tx.send(BackgroundEvent::Repo(Box::new(state)));
+    });
 }
 
 pub async fn discover(config: Config, cwd: &Path) -> RepoState {

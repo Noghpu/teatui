@@ -1,13 +1,13 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     style::Stylize,
     text::Line,
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 
 use crate::app::{App, Screen};
-use crate::generate::{FieldId, Focus, GeneratePhase, PromptView};
+use crate::generate::{FieldId, Focus, GeneratePhase, GenerateState, PromptView};
 use crate::prompt::PromptBuild;
 
 pub fn render(frame: &mut Frame, app: &App) {
@@ -32,95 +32,57 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_help(frame, app, help_area);
 }
 
-fn render_menu(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let items: Vec<ListItem> = match app.screen() {
-        Screen::Landing => ["Generate PR", "Manage PRs", "Manage Issues"]
-            .iter()
-            .enumerate()
-            .map(|(index, label)| {
-                let marker = if index == app.landing().selected_entry {
-                    ">"
-                } else {
-                    " "
-                };
-                let line = format!("{marker} {label}");
-                if index == app.landing().selected_entry {
-                    ListItem::new(line.bold().cyan())
-                } else {
-                    ListItem::new(line.dim())
-                }
-            })
-            .collect(),
-        Screen::Generate => app
-            .generate()
-            .revsets
-            .iter()
-            .enumerate()
-            .map(|(index, revset)| {
-                let bookmarks = if revset.bookmarks().is_empty() {
-                    String::new()
-                } else {
-                    revset.bookmarks().join(", ")
-                };
-                let label = if bookmarks.is_empty() {
-                    format!("{}  {} commits", revset.label(), revset.commit_count())
-                } else {
-                    format!(
-                        "{}  {} commits  {}",
-                        revset.label(),
-                        revset.commit_count(),
-                        bookmarks
-                    )
-                };
-                if index == app.generate().selected_revset {
-                    ListItem::new(label.bold().cyan())
-                } else {
-                    ListItem::new(label.dim())
-                }
-            })
-            .collect(),
-        Screen::PullRequests => ["Open items", "Filter", "Comment"]
-            .iter()
-            .enumerate()
-            .map(|(index, item)| {
-                let marker = if index == app.pull_requests().selected_item {
-                    ">"
-                } else {
-                    " "
-                };
-                let line = format!("{marker} {item}");
-                if index == app.pull_requests().selected_item {
-                    ListItem::new(line.bold().cyan())
-                } else {
-                    ListItem::new(line.dim())
-                }
-            })
-            .collect(),
-        Screen::Issues => ["Open items", "Filter", "Comment"]
-            .iter()
-            .enumerate()
-            .map(|(index, item)| {
-                let marker = if index == app.issues().selected_item {
-                    ">"
-                } else {
-                    " "
-                };
-                let line = format!("{marker} {item}");
-                if index == app.issues().selected_item {
-                    ListItem::new(line.bold().cyan())
-                } else {
-                    ListItem::new(line.dim())
-                }
-            })
-            .collect(),
+fn render_menu(frame: &mut Frame, app: &App, area: Rect) {
+    let (items, title): (Vec<ListItem>, &'static str) = match app.screen() {
+        Screen::Landing => (
+            selectable_list(
+                &["Generate PR", "Manage PRs", "Manage Issues"],
+                app.landing().selected_entry,
+            ),
+            "Modes",
+        ),
+        Screen::Generate => (
+            app.generate()
+                .revsets
+                .iter()
+                .enumerate()
+                .map(|(index, revset)| {
+                    let bookmarks = if revset.bookmarks().is_empty() {
+                        String::new()
+                    } else {
+                        revset.bookmarks().join(", ")
+                    };
+                    let label = if bookmarks.is_empty() {
+                        format!("{}  {} commits", revset.label(), revset.commit_count())
+                    } else {
+                        format!(
+                            "{}  {} commits  {}",
+                            revset.label(),
+                            revset.commit_count(),
+                            bookmarks
+                        )
+                    };
+                    list_item(&label, index == app.generate().selected_revset)
+                })
+                .collect(),
+            "Revsets",
+        ),
+        Screen::PullRequests => (
+            selectable_list(
+                &["Open items", "Filter", "Comment"],
+                app.pull_requests().selected_item,
+            ),
+            "PRs",
+        ),
+        Screen::Issues => (
+            selectable_list(
+                &["Open items", "Filter", "Comment"],
+                app.issues().selected_item,
+            ),
+            "Issues",
+        ),
     };
 
-    let title = match app.screen() {
-        Screen::Landing => "Modes",
-        Screen::Generate => "Revsets",
-        Screen::PullRequests => "PRs",
-        Screen::Issues => "Issues",
-    };
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
@@ -130,7 +92,27 @@ fn render_menu(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     frame.render_widget(list, area);
 }
 
-fn render_work(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+fn selectable_list(labels: &[&str], selected: usize) -> Vec<ListItem<'static>> {
+    labels
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            let marker = if index == selected { ">" } else { " " };
+            let line = format!("{marker} {label}");
+            list_item(&line, index == selected)
+        })
+        .collect()
+}
+
+fn list_item(text: &str, selected: bool) -> ListItem<'static> {
+    if selected {
+        ListItem::new(text.to_string().bold().cyan())
+    } else {
+        ListItem::new(text.to_string().dim())
+    }
+}
+
+fn render_work(frame: &mut Frame, app: &App, area: Rect) {
     let lines = match app.screen() {
         Screen::Landing => vec![
             Line::from("teatui".bold()),
@@ -228,7 +210,7 @@ fn render_work(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     frame.render_widget(form, area);
 }
 
-fn render_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+fn render_preview(frame: &mut Frame, app: &App, area: Rect) {
     let lines = match app.screen() {
         Screen::Landing => {
             let mut lines = vec![
@@ -274,35 +256,32 @@ fn render_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     frame.render_widget(preview, area);
 }
 
-fn render_status(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let prompt_mode = match app.screen() {
-        Screen::Generate => match app.generate().prompt_view {
-            PromptView::Manifest => "prompt:manifest",
-            PromptView::Prompt => "prompt:text",
-        },
-        _ => "prompt:-",
-    };
-
+fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     let focus = match app.focus() {
         Focus::Menu => "focus:menu",
         Focus::Form => "focus:form",
         Focus::Preview => "focus:preview",
     };
 
-    let status = Line::from(vec![
-        format!(" {} ", format!("{:?}", app.input_mode()).to_uppercase())
-            .bold()
-            .on_cyan(),
+    let mut segments = vec![
+        format!(" {} ", app.input_mode().label()).bold().on_cyan(),
         format!(" {} ", app.screen().title()).dim(),
         format!(" {focus} ").dim(),
-        format!(" phase:{:?} ", app.generate().phase).dim(),
-        format!(" job:{:?} ", app.jobs().status()).dim(),
-        format!(" {prompt_mode} ").dim(),
-    ]);
-    frame.render_widget(Paragraph::new(status), area);
+    ];
+
+    if app.screen() == Screen::Generate {
+        segments.push(format!(" phase:{} ", app.generate().phase.label()).dim());
+        let prompt_mode = match app.generate().prompt_view {
+            PromptView::Manifest => "prompt:manifest",
+            PromptView::Prompt => "prompt:text",
+        };
+        segments.push(format!(" {prompt_mode} ").dim());
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(segments)), area);
 }
 
-fn render_help(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+fn render_help(frame: &mut Frame, app: &App, area: Rect) {
     let help = match app.screen() {
         Screen::Landing => Line::from(vec![
             " ↑/k ".bold().cyan(),
@@ -485,7 +464,7 @@ fn render_prompt_text(prompt: &PromptBuild) -> Vec<Line<'static>> {
 }
 
 fn render_generate_field(
-    generate: &crate::generate::GenerateState,
+    generate: &GenerateState,
     field_id: FieldId,
     selected: bool,
     focused: bool,
@@ -546,8 +525,8 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
         Line::from(format!("commit ids: {}", revset.commit_ids().join(", "))),
         Line::from(format!("change ids: {}", revset.change_ids().join(", "))),
         Line::from(""),
-        Line::from(format!("phase: {:?}", generate.phase).dim()),
-        Line::from(format!("input mode: {:?}", app.input_mode()).dim()),
+        Line::from(format!("phase: {}", generate.phase.label()).dim()),
+        Line::from(format!("input mode: {}", app.input_mode().label()).dim()),
         Line::from(format!("focused field: {}", generate.selected_field_name())),
         Line::from(format!(
             "base branch: {} ({:?})",
@@ -584,7 +563,7 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
                 lines.push(Line::from(""));
                 lines.extend(render_draft_section(draft));
             }
-            if let Some(prompt) = generate.prompt_build() {
+            if let Some(prompt) = generate.prompt() {
                 lines.push(Line::from(format!(
                     "prompt bytes: {}",
                     prompt.manifest.byte_count
@@ -592,11 +571,11 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             }
         }
         GeneratePhase::ContextReady => {
-            if let Some(prompt) = generate.prompt_build() {
+            if let Some(prompt) = generate.prompt() {
                 lines.push(Line::from(""));
                 match generate.prompt_view {
-                    PromptView::Manifest => lines.extend(render_prompt_manifest(&prompt)),
-                    PromptView::Prompt => lines.extend(render_prompt_text(&prompt)),
+                    PromptView::Manifest => lines.extend(render_prompt_manifest(prompt)),
+                    PromptView::Prompt => lines.extend(render_prompt_text(prompt)),
                 }
             }
         }
@@ -611,12 +590,12 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
                 lines.push(Line::from(""));
                 lines.extend(render_draft_section(draft));
             }
-            if let Some(prompt) = generate.prompt_build() {
+            if let Some(prompt) = generate.prompt() {
                 lines.push(Line::from(""));
-                lines.extend(render_manifest_warnings(&prompt));
+                lines.extend(render_manifest_warnings(prompt));
             }
             lines.push(Line::from(""));
-            lines.extend(render_recent_logs(app.logs().entries.as_slice(), 6));
+            lines.extend(render_recent_logs(&app.logs().entries, 6));
             lines.push(Line::from(""));
             lines.push(Line::from(
                 "The execution preview will show branch, push, and tea commands before mutation."
@@ -639,12 +618,12 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
                 lines.push(Line::from(""));
                 lines.extend(render_draft_section(draft));
             }
-            if let Some(prompt) = generate.prompt_build() {
+            if let Some(prompt) = generate.prompt() {
                 lines.push(Line::from(""));
-                lines.extend(render_manifest_warnings(&prompt));
+                lines.extend(render_manifest_warnings(prompt));
             }
             lines.push(Line::from(""));
-            lines.extend(render_recent_logs(app.logs().entries.as_slice(), 6));
+            lines.extend(render_recent_logs(&app.logs().entries, 6));
             lines.push(Line::from(""));
             lines.push(Line::from(
                 "Press g to retry with the retained context.".dim(),
@@ -724,7 +703,10 @@ fn render_manifest_warnings(prompt: &PromptBuild) -> Vec<Line<'static>> {
     lines
 }
 
-fn render_recent_logs(entries: &[String], limit: usize) -> Vec<Line<'static>> {
+fn render_recent_logs(
+    entries: &std::collections::VecDeque<String>,
+    limit: usize,
+) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from("Recent logs".bold())];
     let recent: Vec<_> = entries.iter().rev().take(limit).cloned().collect();
 
