@@ -1,17 +1,20 @@
 use std::env;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
 use color_eyre::eyre::{Result, WrapErr, bail};
+use teatui::command::run_plan_sequentially;
 use teatui::config::Config;
 use teatui::context::{ContextBundle, RepoIdentity};
-use teatui::generate::{FieldState, PrForm, RevsetSummary};
+use teatui::generate::{ExecutionPlan, FieldState, PrForm, RevsetSummary, validate_for_execution};
 use teatui::ollama::OllamaClient;
 use teatui::prompt;
 use teatui::repo::{
     BaseBranchInfo, BaseBranchSource, OllamaStatus, RemoteInfo, RepoState, TeaAuth, ToolStatus,
 };
 use tokio::process::{Child, Command};
+use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 #[tokio::main]
@@ -36,7 +39,7 @@ async fn main() -> Result<()> {
         .wrap_err("failed to build smoke HTTP client")?;
     wait_for_endpoint(&client, &smoke.llama_url, Duration::from_secs(600)).await?;
 
-    let prompt = build_prompt();
+    let prompt = build_prompt(smoke.workspace.as_ref());
     let ollama = OllamaClient::new(&config)?;
     let draft = match timeout(Duration::from_secs(15), ollama.generate_draft(&prompt)).await {
         Ok(Ok(draft)) => draft,
@@ -48,6 +51,8 @@ async fn main() -> Result<()> {
     println!("LLM title: {}", draft.title);
 
     report_gitea_preflight(&smoke).await?;
+    let pr_url = execute_disposable_pr(&config, &smoke, &draft).await?;
+    println!("Created PR URL: {pr_url}");
 
     drop(llama_guard.take());
     Ok(())
@@ -62,6 +67,7 @@ struct SmokeSettings {
     gitea_user: Option<String>,
     gitea_repo: Option<String>,
     wsl_distro: Option<String>,
+    workspace: Option<PathBuf>,
     model: Option<String>,
 }
 
@@ -77,6 +83,7 @@ impl SmokeSettings {
             gitea_user: env::var("TEATUI_SMOKE_GITEA_USER").ok(),
             gitea_repo: env::var("TEATUI_SMOKE_GITEA_REPO").ok(),
             wsl_distro: env::var("TEATUI_SMOKE_WSL_DISTRO").ok(),
+            workspace: env::var_os("TEATUI_SMOKE_WORKSPACE").map(PathBuf::from),
             model: env::var("TEATUI_SMOKE_MODEL").ok(),
         })
     }
@@ -171,15 +178,120 @@ async fn report_gitea_preflight(smoke: &SmokeSettings) -> Result<()> {
         }
     }
 
-    println!(
-        "Gitea smoke was skipped. Set TEATUI_SMOKE_GITEA_URL for a reachable disposable target or TEATUI_SMOKE_WSL_DISTRO for WSL preflight."
-    );
-    Ok(())
+    bail!(
+        "set TEATUI_SMOKE_GITEA_URL for a reachable disposable target or TEATUI_SMOKE_WSL_DISTRO for WSL preflight"
+    )
 }
 
-fn build_prompt() -> prompt::PromptBuild {
+async fn execute_disposable_pr(
+    config: &Config,
+    smoke: &SmokeSettings,
+    draft: &teatui::generate::GeneratedDraft,
+) -> Result<String> {
+    let workspace = smoke.workspace.as_ref().ok_or_else(|| {
+        color_eyre::eyre::eyre!(
+            "set TEATUI_SMOKE_WORKSPACE to a disposable jj workspace before live PR creation"
+        )
+    })?;
+
+    if !workspace.exists() {
+        bail!(
+            "TEATUI_SMOKE_WORKSPACE does not exist: {}",
+            workspace.display()
+        );
+    }
+
+    if smoke.gitea_url.is_none() && smoke.wsl_distro.is_none() {
+        bail!("set TEATUI_SMOKE_GITEA_URL or TEATUI_SMOKE_WSL_DISTRO before live PR creation");
+    }
+
+    let branch_name = disposable_branch_name();
+    let mut form = PrForm::new("@", branch_name.clone(), config.pr.default_base.clone());
+    form.title = FieldState::new(draft.title.clone());
+    form.description = FieldState::new(draft.body.clone());
+
+    let repo = smoke_repo_state(smoke, workspace.clone(), &config.ollama);
+    validate_for_execution(&form, &repo).map_err(|errors| {
+        color_eyre::eyre::eyre!(
+            "generated live smoke PR fields are invalid: {}",
+            errors.join("; ")
+        )
+    })?;
+
+    let selected_revset = RevsetSummary::new(
+        "@",
+        "Disposable live smoke revset",
+        Vec::new(),
+        "live smoke",
+        1,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    let plan = ExecutionPlan::from_draft(&form, &repo, &selected_revset, config);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let outcome = run_plan_sequentially(plan, tx).await;
+
+    while let Ok(Some(event)) = timeout(Duration::from_millis(25), rx.recv()).await {
+        if let teatui::event::BackgroundEvent::Job(job) = event {
+            println!("{}: {}", job.name, job.status.label());
+        }
+    }
+
+    if let Some(message) = outcome.message {
+        bail!(message);
+    }
+    outcome
+        .pr_url
+        .ok_or_else(|| color_eyre::eyre::eyre!("tea pr create succeeded but no PR URL was parsed"))
+}
+
+fn disposable_branch_name() -> String {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    format!("teatui-smoke/{timestamp}")
+}
+
+fn smoke_repo_state(
+    smoke: &SmokeSettings,
+    workspace: PathBuf,
+    ollama: &teatui::config::OllamaConfig,
+) -> RepoState {
+    RepoState {
+        workspace_root: Some(workspace),
+        inside_workspace: true,
+        jj: ToolStatus::Available,
+        git: ToolStatus::Available,
+        tea: ToolStatus::Available,
+        tea_auth: TeaAuth::Configured {
+            host: smoke
+                .gitea_url
+                .clone()
+                .unwrap_or_else(|| "wsl-gitea".into()),
+            user: smoke.gitea_user.clone(),
+        },
+        remote: smoke.gitea_url.as_deref().map(RemoteInfo::parse),
+        base_branch: BaseBranchInfo {
+            name: "main".into(),
+            source: BaseBranchSource::Config,
+        },
+        ollama_base_url: ollama.base_url.clone(),
+        ollama_model: ollama.model.clone(),
+        ollama: OllamaStatus::Reachable,
+        blockers: Vec::new(),
+    }
+}
+
+fn build_prompt(workspace: Option<&PathBuf>) -> prompt::PromptBuild {
     let repo = RepoState {
-        workspace_root: Some(std::env::current_dir().unwrap_or_else(|_| ".".into())),
+        workspace_root: Some(
+            workspace
+                .cloned()
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into())),
+        ),
         inside_workspace: true,
         jj: ToolStatus::Available,
         git: ToolStatus::Available,

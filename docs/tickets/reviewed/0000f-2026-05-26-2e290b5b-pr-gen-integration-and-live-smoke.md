@@ -2,8 +2,8 @@
 id: 0000f-2026-05-26-2e290b5b-pr-gen-integration-and-live-smoke
 created_at: 2026-05-26T12:09:01+02:00
 created_by_model: gpt-5
-state: implemented
-state_updated_at: 2026-05-26T12:32:33+02:00
+state: reviewed
+state_updated_at: 2026-05-26T12:37:15+02:00
 ---
 # Fake and Live PR Generation Integration Tests
 
@@ -171,3 +171,28 @@ Metadata:
 - Verification: `just verify` passed.
 - Files changed: `src/lib.rs`, `src/main.rs`, `src/bin/smoke-live.rs`, `tests/pr_generation_integration.rs`, `Cargo.toml`, `justfile`.
 - Residual risk: the live helper is intentionally light on orchestration and still depends on a prepared Gitea target or WSL prerequisites for meaningful smoke coverage.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: gpt-5 Codex
+- reviewed_at: 2026-05-26T12:37:15+02:00
+- state: reviewed
+
+Facts:
+- The implemented fake integration tests cover the Generate PR happy path through fake Ollama, fake jj, fake tea, malformed LLM JSON, stale context, and failed tea pr create retry state.
+- `just verify` passes with the fake integration tests included in the default suite.
+- `just smoke-live` is not part of `just verify` and exits quickly without `TEATUI_SMOKE_LIVE=1`.
+- The original live helper stopped after LLM generation and Gitea/WSL preflight, so it did not satisfy the acceptance criterion requiring a created disposable PR URL.
+- Review changes make the live helper require `TEATUI_SMOKE_WORKSPACE` for a disposable jj workspace, force a `teatui-smoke/<timestamp>` branch, run the existing app execution plan, parse the PR URL from `tea pr create`, and print it.
+- Recipe comments now document the disposable workspace requirement.
+
+Inference:
+- The live path is still intentionally environment-dependent and was not run against local llama.cpp plus Gitea in this review environment.
+- Forcing the branch prefix avoids letting model output choose the mutating live branch name.
+
+Verification:
+- `just verify` passed.
+- `just smoke-live` without opt-in failed fast with the expected `TEATUI_SMOKE_LIVE=1` gate.
