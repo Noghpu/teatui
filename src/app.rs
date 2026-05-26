@@ -229,13 +229,8 @@ impl App {
 
     fn handle_edit_key(&self, key: KeyEvent) -> Action {
         match key.code {
-            KeyCode::Esc => Action::CancelEdit,
-            KeyCode::Enter => Action::CommitEdit,
-            KeyCode::Backspace => Action::Backspace,
-            KeyCode::Char(ch)
-                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-            {
-                Action::InsertChar(ch)
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Backspace | KeyCode::Char(_) => {
+                Action::EditKey(key)
             }
             _ => Action::Tick,
         }
@@ -251,10 +246,7 @@ impl App {
             Action::FocusPrev => self.move_focus(false),
             Action::Select => self.select(),
             Action::Edit => self.begin_editing_form_field(),
-            Action::InsertChar(ch) => self.generate.insert_into_selected_field(ch),
-            Action::Backspace => self.generate.backspace_selected_field(),
-            Action::CommitEdit => self.finish_editing(true),
-            Action::CancelEdit => self.finish_editing(false),
+            Action::EditKey(key) => self.apply_edit_key(key),
             Action::Generate => self.generate_pr(),
             Action::ConfirmExecution => self.confirm_execution(),
             Action::ExecuteConfirmed => self.execute_confirmed(),
@@ -389,6 +381,38 @@ impl App {
         if self.screen == Screen::Generate && self.focus == Focus::Form {
             self.generate.begin_editing_selected_field();
             self.input_mode = InputMode::Editing;
+        }
+    }
+
+    fn apply_edit_key(&mut self, key: KeyEvent) {
+        if self.screen != Screen::Generate || self.focus != Focus::Form {
+            return;
+        }
+
+        match key.code {
+            KeyCode::Esc => self.finish_editing(false),
+            KeyCode::Enter => {
+                if self.generate.selected_field() == crate::generate::FieldId::Description {
+                    self.generate
+                        .form
+                        .field_mut(self.generate.selected_field())
+                        .input(key);
+                } else {
+                    self.finish_editing(true);
+                }
+            }
+            KeyCode::Char('s')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.generate.selected_field() == crate::generate::FieldId::Description =>
+            {
+                self.finish_editing(true);
+            }
+            KeyCode::Backspace | KeyCode::Char(_) => match key.code {
+                KeyCode::Backspace => self.generate.backspace_selected_field(),
+                KeyCode::Char(ch) => self.generate.insert_into_selected_field(ch),
+                _ => {}
+            },
+            _ => {}
         }
     }
 
@@ -883,19 +907,19 @@ mod tests {
 
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty())),
-            Action::InsertChar('g')
+            Action::EditKey(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()))
         );
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty())),
-            Action::InsertChar('q')
+            Action::EditKey(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()))
         );
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())),
-            Action::CancelEdit
+            Action::EditKey(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()))
         );
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
-            Action::CommitEdit
+            Action::EditKey(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
         );
     }
 

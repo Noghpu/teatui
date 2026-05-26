@@ -367,7 +367,9 @@ fn render_help(frame: &mut Frame, app: &App, area: Rect) {
                 " typing ".bold().cyan(),
                 "edit field ".dim(),
                 " Enter ".bold().cyan(),
-                "save ".dim(),
+                "save single-line / newline description ".dim(),
+                " Ctrl+S ".bold().cyan(),
+                "commit description ".dim(),
                 " Esc ".bold().cyan(),
                 "cancel ".dim(),
             ])

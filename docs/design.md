@@ -354,6 +354,9 @@ Important domain types:
   assignees, milestone.
 - `FieldState`: display value, edit buffer, dirty flag, validation errors, and
   picker suggestions when applicable.
+- `rat-dialog` is the deferred candidate for future modal/window stacks, especially
+  for comment inputs, command confirmation, and logs. It should be introduced only
+  when a modal feature actually needs stacked windows.
 - `ContextBundle`: the exact data sent to the model plus size/truncation
   metadata.
 - `GeneratedDraft`: branch name, title, body, review notes, raw model response.

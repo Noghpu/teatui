@@ -6,6 +6,7 @@ use crate::jj::JjClient;
 use crate::prompt::{DEFAULT_PROMPT_BYTE_BUDGET, PromptBuild};
 use crate::repo::RepoState;
 use crate::tea::{PrCreateArgs, TeaClient};
+use ratatui_textarea::{CursorMove, TextArea};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputMode {
@@ -75,11 +76,12 @@ pub enum PromptView {
     Prompt,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default)]
 pub struct FieldState {
     initial: String,
     pub value: String,
     pub buffer: String,
+    pub editor: TextArea<'static>,
     pub dirty: bool,
     pub errors: Vec<String>,
 }
@@ -90,7 +92,8 @@ impl FieldState {
         Self {
             initial: value.clone(),
             buffer: value.clone(),
-            value,
+            value: value.clone(),
+            editor: textarea_from_text(&value),
             dirty: false,
             errors: Vec::new(),
         }
@@ -102,19 +105,27 @@ impl FieldState {
 
     pub fn begin_edit(&mut self) {
         self.buffer.clone_from(&self.value);
+        self.editor = textarea_from_text(&self.value);
     }
 
     pub fn insert(&mut self, ch: char) {
-        self.buffer.push(ch);
+        self.editor.insert_char(ch);
+        self.buffer = textarea_to_text(&self.editor);
         self.dirty = self.buffer != self.initial;
     }
 
     pub fn backspace(&mut self) {
-        self.buffer.pop();
+        self.editor.input(ratatui_textarea::Input {
+            key: ratatui_textarea::Key::Backspace,
+            ctrl: false,
+            alt: false,
+        });
+        self.buffer = textarea_to_text(&self.editor);
         self.dirty = self.buffer != self.initial;
     }
 
     pub fn commit(&mut self) {
+        self.buffer = textarea_to_text(&self.editor);
         if self.value != self.buffer {
             self.value.clone_from(&self.buffer);
         }
@@ -123,9 +134,64 @@ impl FieldState {
 
     pub fn cancel(&mut self) {
         self.buffer.clone_from(&self.value);
+        self.editor = textarea_from_text(&self.value);
         self.dirty = self.value != self.initial;
     }
+
+    pub fn input(&mut self, key: crossterm::event::KeyEvent) {
+        let input = ratatui_textarea::Input {
+            key: match key.code {
+                crossterm::event::KeyCode::Char(ch) => ratatui_textarea::Key::Char(ch),
+                crossterm::event::KeyCode::Backspace => ratatui_textarea::Key::Backspace,
+                crossterm::event::KeyCode::Enter => ratatui_textarea::Key::Enter,
+                crossterm::event::KeyCode::Left => ratatui_textarea::Key::Left,
+                crossterm::event::KeyCode::Right => ratatui_textarea::Key::Right,
+                crossterm::event::KeyCode::Up => ratatui_textarea::Key::Up,
+                crossterm::event::KeyCode::Down => ratatui_textarea::Key::Down,
+                crossterm::event::KeyCode::Tab => ratatui_textarea::Key::Tab,
+                crossterm::event::KeyCode::Delete => ratatui_textarea::Key::Delete,
+                crossterm::event::KeyCode::Home => ratatui_textarea::Key::Home,
+                crossterm::event::KeyCode::End => ratatui_textarea::Key::End,
+                crossterm::event::KeyCode::PageUp => ratatui_textarea::Key::PageUp,
+                crossterm::event::KeyCode::PageDown => ratatui_textarea::Key::PageDown,
+                crossterm::event::KeyCode::Esc => ratatui_textarea::Key::Esc,
+                crossterm::event::KeyCode::F(n) => ratatui_textarea::Key::F(n),
+                _ => ratatui_textarea::Key::Null,
+            },
+            ctrl: key
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL),
+            alt: key.modifiers.contains(crossterm::event::KeyModifiers::ALT),
+        };
+        self.editor.input(input);
+        self.buffer = textarea_to_text(&self.editor);
+        self.dirty = self.buffer != self.initial;
+    }
 }
+
+impl std::fmt::Debug for FieldState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FieldState")
+            .field("initial", &self.initial)
+            .field("value", &self.value)
+            .field("buffer", &self.buffer)
+            .field("dirty", &self.dirty)
+            .field("errors", &self.errors)
+            .finish()
+    }
+}
+
+impl PartialEq for FieldState {
+    fn eq(&self, other: &Self) -> bool {
+        self.initial == other.initial
+            && self.value == other.value
+            && self.buffer == other.buffer
+            && self.dirty == other.dirty
+            && self.errors == other.errors
+    }
+}
+
+impl Eq for FieldState {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrForm {
@@ -156,6 +222,27 @@ impl PrForm {
             milestone: FieldState::default(),
         }
     }
+}
+
+fn textarea_from_text(text: &str) -> TextArea<'static> {
+    let lines = if text.is_empty() {
+        vec![String::new()]
+    } else {
+        text.lines().map(|line| line.to_string()).collect()
+    };
+    let mut textarea = TextArea::new(lines);
+    textarea.move_cursor(CursorMove::Bottom);
+    textarea.move_cursor(CursorMove::End);
+    textarea
+}
+
+fn textarea_to_text(textarea: &TextArea<'static>) -> String {
+    textarea
+        .lines()
+        .iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 impl Default for PrForm {
@@ -971,6 +1058,44 @@ mod tests {
         let mut field = FieldState::new("initial");
         field.begin_edit();
         field.insert('x');
+        field.cancel();
+
+        assert_eq!(field.value, "initial");
+        assert_eq!(field.display_value(), "initial");
+        assert!(!field.dirty);
+    }
+
+    #[test]
+    fn field_editing_supports_multiline_input() {
+        let mut field = FieldState::new("initial");
+        field.begin_edit();
+        field.input(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        field.input(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        field.commit();
+
+        assert_eq!(field.value, "initial\nx");
+        assert_eq!(field.display_value(), "initial\nx");
+        assert!(field.dirty);
+    }
+
+    #[test]
+    fn field_cancel_restores_multiline_editor_state() {
+        let mut field = FieldState::new("initial");
+        field.begin_edit();
+        field.input(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        field.input(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::empty(),
+        ));
         field.cancel();
 
         assert_eq!(field.value, "initial");
