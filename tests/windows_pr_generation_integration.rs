@@ -1,3 +1,9 @@
+#![cfg(windows)]
+// Windows-only fake-service integration tests. The fake `jj`/`tea` shims are
+// `.cmd` batch scripts driven by `powershell`, so the file compiles to an
+// empty crate on other platforms. See AGENTS.md for the `windows_` test
+// convention.
+
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -10,7 +16,7 @@ use teatui::generate::{
     ExecutionPlan, FieldState, GeneratePhase, PrForm, RevsetSummary, StaleCheckResult,
 };
 use teatui::jj;
-use teatui::ollama::{OllamaClient, OllamaError};
+use teatui::ollama::OllamaClient;
 use teatui::repo::{BaseBranchInfo, BaseBranchSource, RemoteInfo, RepoState, TeaAuth, ToolStatus};
 use teatui::{config::Config, prompt, repo};
 use tempfile::TempDir;
@@ -19,6 +25,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use tokio::time::timeout;
 
+// Serializes tests so that the global FAKE_* env vars set by `set_fake_env`
+// don't collide across cargo's parallel test runner.
 static TEST_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
 
 async fn test_lock() -> tokio::sync::MutexGuard<'static, ()> {
@@ -251,7 +259,7 @@ impl FakeCommandTree {
         Ok(())
     }
 
-    fn write_tea_outputs(&self, login_list: &str, pr_url: &str, _exit_code: u8) -> io::Result<()> {
+    fn write_tea_outputs(&self, login_list: &str, pr_url: &str) -> io::Result<()> {
         fs::write(self.workspace.join("tea-login-list.txt"), login_list)?;
         fs::write(self.workspace.join("tea-pr-url.txt"), pr_url)?;
         Ok(())
@@ -363,10 +371,6 @@ fn set_fake_env(tree: &FakeCommandTree) {
             tree.workspace.join("tea-login-list.txt"),
         );
         std::env::set_var(
-            "FAKE_TEA_STDOUT_FILE",
-            tree.workspace.join("tea-pr-url.txt"),
-        );
-        std::env::set_var(
             "FAKE_TEA_PR_URL",
             "https://code.example.com/team/project/pulls/42",
         );
@@ -411,7 +415,6 @@ async fn fake_happy_path_captures_prompt_and_pr_url() {
     tree.write_tea_outputs(
         "Name URL User Default\ngitea https://code.example.com alice true",
         "creating PR\nview it at https://code.example.com/team/project/pulls/42\nthanks",
-        0,
     )
     .expect("tea outputs");
 
@@ -534,7 +537,6 @@ async fn malformed_llm_json_is_reported_with_raw_response() {
         .await
         .expect_err("draft error");
 
-    assert!(matches!(err, OllamaError { .. }));
     assert!(err.message.contains("parse generated draft JSON"));
     assert!(err.raw_response.is_some());
 }
@@ -601,7 +603,6 @@ async fn tea_pr_create_failure_retains_retryable_plan() {
     tree.write_tea_outputs(
         "Name URL User Default\ngitea https://code.example.com alice true",
         "boom",
-        17,
     )
     .expect("tea outputs");
 

@@ -32,7 +32,9 @@ async fn main() -> Result<()> {
         config.ollama.model = model.clone();
     }
 
-    let mut llama_guard = ensure_llama_server(&smoke).await?;
+    // _llama_guard owns the child process so kill_on_drop fires on any exit
+    // path (including the `?` early returns below).
+    let _llama_guard = ensure_llama_server(&smoke).await?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()
@@ -54,7 +56,6 @@ async fn main() -> Result<()> {
     let pr_url = execute_disposable_pr(&config, &smoke, &draft).await?;
     println!("Created PR URL: {pr_url}");
 
-    drop(llama_guard.take());
     Ok(())
 }
 
@@ -218,6 +219,9 @@ async fn execute_disposable_pr(
         )
     })?;
 
+    // The revset is synthesized rather than collected from the disposable
+    // workspace — live smoke validates llama.cpp + `tea pr create` wiring,
+    // not real context collection.
     let selected_revset = RevsetSummary::new(
         "@",
         "Disposable live smoke revset",
@@ -248,11 +252,11 @@ async fn execute_disposable_pr(
 }
 
 fn disposable_branch_name() -> String {
-    let timestamp = std::time::SystemTime::now()
+    let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
+        .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    format!("teatui-smoke/{timestamp}")
+    format!("teatui-smoke/{}-{}", std::process::id(), nanos)
 }
 
 fn smoke_repo_state(
