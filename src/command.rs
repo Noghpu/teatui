@@ -254,7 +254,7 @@ pub async fn run_plan_sequentially(
             };
         }
 
-        if step.command.program == "tea" {
+        if is_pr_create_command(&step.command) {
             pr_url = parse_pr_url(&job.stdout);
         }
     }
@@ -282,6 +282,13 @@ async fn await_job(id: u64) -> Option<JobResult> {
         .expect("job waiters poisoned")
         .remove(&id)?;
     receiver.await.ok()
+}
+
+fn is_pr_create_command(command: &ExternalCommand) -> bool {
+    matches!(
+        command.args.as_slice(),
+        [first, second, ..] if first == "pr" && second == "create"
+    )
 }
 
 fn redact_arg(index: usize, arg: &str, args: &[String]) -> String {
@@ -355,5 +362,18 @@ mod tests {
         assert!(!display.contains("also-secret"));
         assert!(!display.contains("api-secret"));
         assert!(!display.contains("abc123"));
+    }
+
+    #[test]
+    fn recognizes_configured_tea_pr_create_commands_by_argv() {
+        let command = ExternalCommand::new(
+            "C:/tools/tea.exe",
+            ["pr", "create", "--title", "Title"],
+            "C:/repo",
+        );
+        let version = ExternalCommand::new("C:/tools/tea.exe", ["--version"], "C:/repo");
+
+        assert!(is_pr_create_command(&command));
+        assert!(!is_pr_create_command(&version));
     }
 }

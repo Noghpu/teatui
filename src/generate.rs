@@ -1131,7 +1131,14 @@ mod tests {
         assert_eq!(plan.steps[0].label, "create or move bookmark");
         assert_eq!(
             plan.steps[0].command.args,
-            vec!["bookmark", "create", "feature/example", "-r", "@"]
+            vec![
+                "--no-pager",
+                "bookmark",
+                "create",
+                "feature/example",
+                "-r",
+                "@"
+            ]
         );
         assert_eq!(
             plan.steps[2].command.args,
@@ -1172,7 +1179,14 @@ mod tests {
 
         assert_eq!(
             plan.steps[0].command.args,
-            vec!["bookmark", "move", "feature/example", "--to", "@"]
+            vec![
+                "--no-pager",
+                "bookmark",
+                "move",
+                "feature/example",
+                "--to",
+                "@"
+            ]
         );
     }
 }

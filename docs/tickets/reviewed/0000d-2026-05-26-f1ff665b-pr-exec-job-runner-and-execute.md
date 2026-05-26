@@ -2,8 +2,8 @@
 id: 0000d-2026-05-26-f1ff665b-pr-exec-job-runner-and-execute
 created_at: 2026-05-26T08:01:34+02:00
 created_by_model: claude-opus-4-7/high
-state: implemented
-state_updated_at: 2026-05-26T09:49:50+02:00
+state: reviewed
+state_updated_at: 2026-05-26T09:54:25+02:00
 ---
 # Job Runner and PR Execution
 
@@ -213,3 +213,25 @@ Files changed:
 Residual risk:
 - PR URL parsing remains best-effort against `tea` stdout format drift.
 - The job registry keeps history across attempts, which is useful for inspection but not a hard reset between retries.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: gpt-5 medium
+- reviewed_at: 2026-05-26T09:54:25+02:00
+- state: reviewed
+
+Facts:
+- Reviewed ticket 0000d-2026-05-26-f1ff665b-pr-exec-job-runner-and-execute against docs/design.md and the implemented diff.
+- The implementation removed the previous ExecuteConfirmed dead-end, added job records/events, sequential execution, Complete/Failed transitions, jj/tea builders, PR URL parsing, and UI/status rendering for execution.
+- Verification passed with `just verify` after review fixes.
+
+Review fixes applied:
+- Updated mutating jj execution builders to include `--no-pager`, matching the repository jj command policy used elsewhere in the wrapper.
+- Changed PR URL detection in the sequential runner to recognize `tea pr create` by argv shape instead of requiring the configured executable name to be exactly `tea`, preserving URL capture when the tea command path is configured.
+- Updated and added focused unit tests for those behaviors.
+
+Residual risk:
+- Manual end-to-end execution against a real Gitea/tea authenticated environment was not run in this review pass; automated verification covers command construction, parsing, linting, compile checks, and unit tests.

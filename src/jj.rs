@@ -72,7 +72,7 @@ impl JjClient {
     ) -> ExternalCommand {
         ExternalCommand::new(
             self.program.clone(),
-            ["bookmark", "create", bookmark, "-r", head],
+            ["--no-pager", "bookmark", "create", bookmark, "-r", head],
             cwd,
         )
     }
@@ -85,7 +85,7 @@ impl JjClient {
     ) -> ExternalCommand {
         ExternalCommand::new(
             self.program.clone(),
-            ["bookmark", "move", bookmark, "--to", head],
+            ["--no-pager", "bookmark", "move", bookmark, "--to", head],
             cwd,
         )
     }
@@ -97,7 +97,7 @@ impl JjClient {
     ) -> ExternalCommand {
         ExternalCommand::new(
             self.program.clone(),
-            ["git", "push", "--bookmark", bookmark],
+            ["--no-pager", "git", "push", "--bookmark", bookmark],
             cwd,
         )
     }
@@ -377,19 +377,33 @@ mod tests {
         let create = client.bookmark_create_command("C:/repo", "feature/example", "@");
         assert_eq!(
             create.args,
-            vec!["bookmark", "create", "feature/example", "-r", "@"]
+            vec![
+                "--no-pager",
+                "bookmark",
+                "create",
+                "feature/example",
+                "-r",
+                "@"
+            ]
         );
 
         let move_command = client.bookmark_move_command("C:/repo", "feature/example", "@");
         assert_eq!(
             move_command.args,
-            vec!["bookmark", "move", "feature/example", "--to", "@"]
+            vec![
+                "--no-pager",
+                "bookmark",
+                "move",
+                "feature/example",
+                "--to",
+                "@"
+            ]
         );
 
         let push = client.git_push_bookmark_command("C:/repo", "feature/example");
         assert_eq!(
             push.args,
-            vec!["git", "push", "--bookmark", "feature/example"]
+            vec!["--no-pager", "git", "push", "--bookmark", "feature/example"]
         );
     }
 
