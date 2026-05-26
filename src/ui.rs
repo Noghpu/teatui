@@ -219,18 +219,14 @@ fn render_work(frame: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::from("Select a mode on the left.".dim()));
             lines
         }
-        Screen::Generate => FieldId::ALL
-            .iter()
-            .enumerate()
-            .flat_map(|(index, field_id)| {
-                render_generate_field(
-                    app.generate(),
-                    *field_id,
-                    index == app.generate().selected_field,
-                    index == app.generate().selected_field && app.focus() == Focus::Form,
-                )
-            })
-            .collect(),
+        Screen::Generate
+            if app.input_mode() == crate::generate::InputMode::Editing
+                && app.focus() == Focus::Form =>
+        {
+            render_generate_editor(frame, app, area);
+            return;
+        }
+        Screen::Generate => render_generate_fields(app),
         Screen::PullRequests => vec![
             Line::from("Manage PRs".bold()),
             Line::from(""),
@@ -247,17 +243,7 @@ fn render_work(frame: &mut Frame, app: &App, area: Rect) {
 
     let title = match app.screen() {
         Screen::Landing => "Status",
-        Screen::Generate => {
-            if app.generate().phase == GeneratePhase::Confirming {
-                "Execution Preview"
-            } else if app.generate().phase == GeneratePhase::CheckingFreshness {
-                "Verifying Repo Context"
-            } else if app.generate().phase == GeneratePhase::DraftReady {
-                "Draft Review"
-            } else {
-                "PR Form"
-            }
-        }
+        Screen::Generate => generate_work_title(app.generate().phase),
         Screen::PullRequests | Screen::Issues => "Work",
     };
 
@@ -269,6 +255,111 @@ fn render_work(frame: &mut Frame, app: &App, area: Rect) {
         )
         .wrap(Wrap { trim: false });
     frame.render_widget(form, area);
+}
+
+fn render_generate_fields(app: &App) -> Vec<Line<'static>> {
+    FieldId::ALL
+        .iter()
+        .enumerate()
+        .flat_map(|(index, field_id)| {
+            render_generate_field(
+                app.generate(),
+                *field_id,
+                index == app.generate().selected_field,
+                index == app.generate().selected_field && app.focus() == Focus::Form,
+            )
+        })
+        .collect()
+}
+
+fn render_generate_editor(frame: &mut Frame, app: &App, area: Rect) {
+    let title = generate_work_title(app.generate().phase);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(focused_title(title, true));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let selected = app.generate().selected_field();
+    let before = FieldId::ALL
+        .iter()
+        .take_while(|field_id| **field_id != selected)
+        .enumerate()
+        .flat_map(|(index, field_id)| {
+            render_generate_field(
+                app.generate(),
+                *field_id,
+                index == app.generate().selected_field,
+                false,
+            )
+        })
+        .collect::<Vec<_>>();
+    let after = FieldId::ALL
+        .iter()
+        .skip_while(|field_id| **field_id != selected)
+        .skip(1)
+        .enumerate()
+        .flat_map(|(offset, field_id)| {
+            let index = app.generate().selected_field + offset + 1;
+            render_generate_field(
+                app.generate(),
+                *field_id,
+                index == app.generate().selected_field,
+                false,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let field = app.generate().form.field(selected);
+    let editor_height = if matches!(selected, FieldId::Description) {
+        6
+    } else {
+        1
+    };
+    let [
+        before_area,
+        header_area,
+        editor_area,
+        errors_area,
+        after_area,
+    ] = Layout::vertical([
+        Constraint::Length(before.len() as u16),
+        Constraint::Length(1),
+        Constraint::Length(editor_height),
+        Constraint::Length(field.errors.len() as u16),
+        Constraint::Fill(1),
+    ])
+    .areas(inner);
+
+    frame.render_widget(
+        Paragraph::new(before).wrap(Wrap { trim: false }),
+        before_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(format!("> {}", selected.label())).bold().cyan()),
+        header_area,
+    );
+    frame.render_widget(&field.editor, editor_area);
+
+    let errors = field
+        .errors
+        .iter()
+        .map(|error| Line::from(format!("    - {error}")).red())
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(errors), errors_area);
+    frame.render_widget(Paragraph::new(after).wrap(Wrap { trim: false }), after_area);
+}
+
+fn generate_work_title(phase: GeneratePhase) -> &'static str {
+    if phase == GeneratePhase::Confirming {
+        "Execution Preview"
+    } else if phase == GeneratePhase::CheckingFreshness {
+        "Verifying Repo Context"
+    } else if phase == GeneratePhase::DraftReady {
+        "Draft Review"
+    } else {
+        "PR Form"
+    }
 }
 
 fn render_preview(frame: &mut Frame, app: &App, area: Rect) {

@@ -509,14 +509,23 @@ mod tests {
         let mut context = sample_context();
         let mut form = PrForm::new("@", "feature/example", "main@origin");
         form.branch_name.begin_edit();
-        form.branch_name.insert('x');
+        form.branch_name.input(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::empty(),
+        ));
         form.title.begin_edit();
         for ch in "Add prompt manifest".chars() {
-            form.title.insert(ch);
+            form.title.input(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(ch),
+                crossterm::event::KeyModifiers::empty(),
+            ));
         }
         form.description.begin_edit();
         for ch in "Keep the current behavior".chars() {
-            form.description.insert(ch);
+            form.description.input(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(ch),
+                crossterm::event::KeyModifiers::empty(),
+            ));
         }
         context.form = form.clone();
 

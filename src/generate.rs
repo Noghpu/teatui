@@ -108,22 +108,6 @@ impl FieldState {
         self.editor = textarea_from_text(&self.value);
     }
 
-    pub fn insert(&mut self, ch: char) {
-        self.editor.insert_char(ch);
-        self.buffer = textarea_to_text(&self.editor);
-        self.dirty = self.buffer != self.initial;
-    }
-
-    pub fn backspace(&mut self) {
-        self.editor.input(ratatui_textarea::Input {
-            key: ratatui_textarea::Key::Backspace,
-            ctrl: false,
-            alt: false,
-        });
-        self.buffer = textarea_to_text(&self.editor);
-        self.dirty = self.buffer != self.initial;
-    }
-
     pub fn commit(&mut self) {
         self.buffer = textarea_to_text(&self.editor);
         if self.value != self.buffer {
@@ -149,6 +133,7 @@ impl FieldState {
                 crossterm::event::KeyCode::Up => ratatui_textarea::Key::Up,
                 crossterm::event::KeyCode::Down => ratatui_textarea::Key::Down,
                 crossterm::event::KeyCode::Tab => ratatui_textarea::Key::Tab,
+                crossterm::event::KeyCode::BackTab => ratatui_textarea::Key::Tab,
                 crossterm::event::KeyCode::Delete => ratatui_textarea::Key::Delete,
                 crossterm::event::KeyCode::Home => ratatui_textarea::Key::Home,
                 crossterm::event::KeyCode::End => ratatui_textarea::Key::End,
@@ -162,6 +147,10 @@ impl FieldState {
                 .modifiers
                 .contains(crossterm::event::KeyModifiers::CONTROL),
             alt: key.modifiers.contains(crossterm::event::KeyModifiers::ALT),
+            shift: key
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::SHIFT)
+                || key.code == crossterm::event::KeyCode::BackTab,
         };
         self.editor.input(input);
         self.buffer = textarea_to_text(&self.editor);
@@ -545,13 +534,8 @@ impl GenerateState {
         self.form.field_mut(self.selected_field()).begin_edit();
     }
 
-    pub fn insert_into_selected_field(&mut self, ch: char) {
-        self.form.field_mut(self.selected_field()).insert(ch);
-        self.validate_form();
-    }
-
-    pub fn backspace_selected_field(&mut self) {
-        self.form.field_mut(self.selected_field()).backspace();
+    pub fn input_selected_field(&mut self, key: crossterm::event::KeyEvent) {
+        self.form.field_mut(self.selected_field()).input(key);
         self.validate_form();
     }
 
@@ -1045,7 +1029,10 @@ mod tests {
     fn field_commit_updates_value_and_dirty_state() {
         let mut field = FieldState::new("initial");
         field.begin_edit();
-        field.insert('x');
+        field.input(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::empty(),
+        ));
         field.commit();
 
         assert_eq!(field.value, "initialx");
@@ -1057,7 +1044,10 @@ mod tests {
     fn field_cancel_restores_buffer_without_changing_value() {
         let mut field = FieldState::new("initial");
         field.begin_edit();
-        field.insert('x');
+        field.input(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::empty(),
+        ));
         field.cancel();
 
         assert_eq!(field.value, "initial");
@@ -1154,7 +1144,10 @@ mod tests {
         });
         state.form.title.begin_edit();
         for ch in " edited".chars() {
-            state.form.title.insert(ch);
+            state.form.title.input(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(ch),
+                crossterm::event::KeyModifiers::empty(),
+            ));
         }
         state.form.title.commit();
         state.begin_generation();

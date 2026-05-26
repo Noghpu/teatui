@@ -2,7 +2,8 @@
 id: 0000e-2026-05-26-69baa5fc-ratatui-textarea-editing
 created_at: 2026-05-26T08:41:29+02:00
 created_by_model: unknown
-state: open
+state: reviewed
+state_updated_at: 2026-05-26T11:37:00+02:00
 ---
 # Adopt ratatui-textarea for PR Form Editing
 
@@ -106,3 +107,22 @@ The design already requires mode-specific text input handling: printable keys mu
 - Multi-line commit behavior can be confusing if `Enter` both commits and inserts newlines; make this explicit and test it.
 - The existing prompt/draft code expects simple string field values; keep a clear committed-value accessor so prompt assembly does not consume transient edit buffers by accident.
 - Adding a widget dependency may require adapting imports or feature defaults to match the repo's Ratatui version.
+
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: gpt-5
+- reviewed_at: 2026-05-26T11:37:00+02:00
+- state: reviewed
+
+Facts:
+- Fixed the review findings for the textarea implementation.
+- Routed editor navigation keys to the active `ratatui-textarea` field.
+- Rendered the active editor through the textarea widget so cursor state is visible.
+- Updated `ratatui-textarea` to a version compatible with the repository's Ratatui version, removing the duplicate older Ratatui dependency chain.
+
+Verification:
+- `just verify`

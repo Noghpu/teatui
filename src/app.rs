@@ -229,9 +229,21 @@ impl App {
 
     fn handle_edit_key(&self, key: KeyEvent) -> Action {
         match key.code {
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Backspace | KeyCode::Char(_) => {
-                Action::EditKey(key)
-            }
+            KeyCode::Esc
+            | KeyCode::Enter
+            | KeyCode::Backspace
+            | KeyCode::Char(_)
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Tab
+            | KeyCode::BackTab
+            | KeyCode::Delete
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::PageUp
+            | KeyCode::PageDown => Action::EditKey(key),
             _ => Action::Tick,
         }
     }
@@ -407,12 +419,7 @@ impl App {
             {
                 self.finish_editing(true);
             }
-            KeyCode::Backspace | KeyCode::Char(_) => match key.code {
-                KeyCode::Backspace => self.generate.backspace_selected_field(),
-                KeyCode::Char(ch) => self.generate.insert_into_selected_field(ch),
-                _ => {}
-            },
-            _ => {}
+            _ => self.generate.input_selected_field(key),
         }
     }
 
@@ -865,6 +872,7 @@ impl App {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::generate::FieldId;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc::unbounded_channel;
 
@@ -921,6 +929,79 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
             Action::EditKey(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
         );
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::empty())),
+            Action::EditKey(KeyEvent::new(KeyCode::Left, KeyModifiers::empty()))
+        );
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::empty())),
+            Action::EditKey(KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()))
+        );
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::empty())),
+            Action::EditKey(KeyEvent::new(KeyCode::Home, KeyModifiers::empty()))
+        );
+    }
+
+    #[test]
+    fn single_line_enter_commits_without_inserting_newline() {
+        let mut app = test_app();
+        app.screen = Screen::Generate;
+        app.focus = Focus::Form;
+        app.generate.selected_field = FieldId::ALL
+            .iter()
+            .position(|field| *field == FieldId::Title)
+            .expect("title field");
+
+        app.update(Action::Edit);
+        app.update(Action::EditKey(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::empty(),
+        )));
+        app.update(Action::EditKey(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::empty(),
+        )));
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.generate.form.title.value, "x");
+        assert!(!app.generate.form.title.value.contains('\n'));
+    }
+
+    #[test]
+    fn description_enter_inserts_newline_and_ctrl_s_commits() {
+        let mut app = test_app();
+        app.screen = Screen::Generate;
+        app.focus = Focus::Form;
+        app.generate.selected_field = FieldId::ALL
+            .iter()
+            .position(|field| *field == FieldId::Description)
+            .expect("description field");
+
+        app.update(Action::Edit);
+        app.update(Action::EditKey(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::empty(),
+        )));
+        app.update(Action::EditKey(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::empty(),
+        )));
+        app.update(Action::EditKey(KeyEvent::new(
+            KeyCode::Char('y'),
+            KeyModifiers::empty(),
+        )));
+
+        assert_eq!(app.input_mode, InputMode::Editing);
+        assert_eq!(app.generate.form.description.display_value(), "x\ny");
+
+        app.update(Action::EditKey(KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+        )));
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.generate.form.description.value, "x\ny");
     }
 
     #[test]
