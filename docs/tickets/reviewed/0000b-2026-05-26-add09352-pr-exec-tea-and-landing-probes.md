@@ -2,8 +2,8 @@
 id: 0000b-2026-05-26-add09352-pr-exec-tea-and-landing-probes
 created_at: 2026-05-26T08:01:24+02:00
 created_by_model: claude-opus-4-7/high
-state: implemented
-state_updated_at: 2026-05-26T08:23:25+02:00
+state: reviewed
+state_updated_at: 2026-05-26T08:27:17+02:00
 ---
 # tea Wrapper and Async Landing Probes
 
@@ -176,3 +176,25 @@ Files changed:
 
 Residual risk:
 - `tea login list` output remains best-effort parsed and may need adjustment if tea changes its table layout.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: gpt-5 medium
+- reviewed_at: 2026-05-26T08:27:17+02:00
+- state: reviewed
+
+Facts:
+- Reviewed the implemented tea wrapper, repo discovery, Ollama health check, Landing rendering, and related tests against the ticket and docs/design.md.
+- Confirmed discovery uses tokio::join! for tool, workspace, remote, tea auth, and Ollama probes so discovery latency is bounded by the slowest probe.
+- Confirmed the tea wrapper only exposes read-only version and login list command builders.
+- Ran `just verify` successfully before and after review changes.
+
+Improvements made:
+- Tightened tea login host matching to normalize URLs, ports, case, and user prefixes consistently.
+- Added parser coverage for URL-form tea login rows, portless tea hosts against ported remotes, and partial-host false positives.
+
+Residual risk:
+- `tea login list` remains best-effort parsed because the command output format may vary by tea version.

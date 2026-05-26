@@ -359,22 +359,16 @@ fn normalize_token(token: &str) -> String {
 }
 
 fn token_matches_host(token: &str, host: &str) -> bool {
-    let token = normalize_host_candidate(token);
-    let host = host.trim();
+    let token = normalize_host_key(token);
+    let host = normalize_host_key(host);
     if token.is_empty() || host.is_empty() {
         return false;
     }
 
-    let token = token.to_ascii_lowercase();
-    let host = host.to_ascii_lowercase();
-    let token_base = token
-        .split_once(':')
-        .map(|(value, _)| value)
-        .unwrap_or(&token);
-    token_base == host || token.ends_with(&host) || host.ends_with(token_base)
+    token == host || token.ends_with(&format!(".{host}"))
 }
 
-fn normalize_host_candidate(candidate: &str) -> String {
+fn normalize_host_key(candidate: &str) -> String {
     let candidate = candidate.trim();
     if candidate.is_empty() {
         return String::new();
@@ -392,9 +386,14 @@ fn normalize_host_candidate(candidate: &str) -> String {
         .split_once('/')
         .map(|(value, _)| value)
         .unwrap_or(candidate);
+    let candidate = candidate
+        .split_once(':')
+        .map(|(value, _)| value)
+        .unwrap_or(candidate);
 
     candidate
         .trim_matches(|ch: char| matches!(ch, ',' | ';' | ')' | '('))
+        .to_ascii_lowercase()
         .to_string()
 }
 
@@ -558,6 +557,38 @@ code.example.com alice
             r#"
 host user
 other.example.com bob
+"#,
+            "code.example.com",
+        );
+
+        assert_eq!(auth, TeaAuth::NotConfigured);
+    }
+
+    #[test]
+    fn parses_tea_login_list_match_from_url_with_portless_remote_host() {
+        let auth = parse_tea_login_list(
+            r#"
+Name URL User Default
+gitea https://code.example.com alice true
+"#,
+            "code.example.com:2222",
+        );
+
+        assert_eq!(
+            auth,
+            TeaAuth::Configured {
+                host: "code.example.com:2222".into(),
+                user: Some("alice".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn does_not_match_partial_host_suffixes() {
+        let auth = parse_tea_login_list(
+            r#"
+host user
+notcode.example.com alice
 "#,
             "code.example.com",
         );
