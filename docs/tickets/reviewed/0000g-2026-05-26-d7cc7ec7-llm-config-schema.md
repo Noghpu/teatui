@@ -2,8 +2,8 @@
 id: 0000g-2026-05-26-d7cc7ec7-llm-config-schema
 created_at: 2026-05-26T18:00:35+02:00
 created_by_model: claude-sonnet-4-6/high
-state: implemented
-state_updated_at: 2026-05-26T20:56:25+02:00
+state: reviewed
+state_updated_at: 2026-05-26T20:59:28+02:00
 ---
 # LLM Config Schema: Multi-Backend `[[llm.backends]]`
 
@@ -129,3 +129,31 @@ Important files changed:
 Residual risks:
 - The active backend must still be an Ollama-compatible endpoint for the current client implementation.
 - Legacy `[ollama]` compatibility is intentionally transitional and may be removed in a later ticket.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: gpt-5.5-medium
+- reviewed_at: 2026-05-26T20:59:28+02:00
+- state: reviewed
+
+Review postmortem for 0000g-2026-05-26-d7cc7ec7-llm-config-schema
+
+Facts:
+- Reviewed the persisted ticket, design document, implementation note, and changed config/repo/app/ui/client/test areas.
+- The implementation replaces the old RepoState Ollama fields with llm_active and llm_backends, uses LlmStatus/LlmBackendStatus, and health-checks configured backends concurrently.
+- The new [[llm.backends]] schema and legacy [ollama] table path were covered by tests before review.
+- I found an acceptance gap in the legacy TEATUI_OLLAMA_BASE_URL and TEATUI_OLLAMA_MODEL aliases: the loader did not explicitly apply them to the new backend schema.
+- I fixed that gap by applying non-empty legacy env aliases after config deserialization to the active backend, falling back to the first backend or inserting a default backend if needed.
+- I added focused unit coverage that verifies legacy aliases update only the active backend and leave other configured backends untouched.
+- `just verify` passed after the review fix.
+
+Inferences:
+- Keeping aliases post-deserialization is the least invasive transitional behavior because it avoids depending on config crate key-splitting details for array-of-table fields.
+- Applying aliases to the active backend is the most useful compatibility interpretation for a multi-backend config because existing single-backend users expect those env vars to affect generation.
+
+Residual risks:
+- Legacy aliases remain transitional and may be removed by a future ticket.
+- The current client still assumes the active backend is Ollama-compatible until the next client-abstraction ticket lands.

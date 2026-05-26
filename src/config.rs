@@ -202,7 +202,67 @@ impl Config {
             .try_deserialize()
             .wrap_err("Failed to deserialize configuration")?;
 
-        Ok(raw.into())
+        let mut config = raw.into();
+        apply_legacy_ollama_env_aliases(&mut config);
+
+        Ok(config)
+    }
+}
+
+fn apply_legacy_ollama_env_aliases(config: &mut Config) {
+    apply_legacy_ollama_aliases(
+        config,
+        std::env::var("TEATUI_OLLAMA_BASE_URL").ok(),
+        std::env::var("TEATUI_OLLAMA_MODEL").ok(),
+    );
+}
+
+fn apply_legacy_ollama_aliases(
+    config: &mut Config,
+    base_url: Option<String>,
+    model: Option<String>,
+) {
+    let base_url = base_url.filter(|value| !value.trim().is_empty());
+    let model = model.filter(|value| !value.trim().is_empty());
+    if base_url.is_none() && model.is_none() {
+        return;
+    }
+
+    let backend_index = config
+        .llm
+        .backends
+        .iter()
+        .position(|backend| backend.name == config.llm.active)
+        .or_else(|| (!config.llm.backends.is_empty()).then_some(0));
+
+    let backend = match backend_index {
+        Some(index) => &mut config.llm.backends[index],
+        None => {
+            let name = if config.llm.active.trim().is_empty() {
+                "default".to_string()
+            } else {
+                config.llm.active.clone()
+            };
+            if config.llm.active.trim().is_empty() {
+                config.llm.active = name.clone();
+            }
+            config.llm.backends.push(LlmBackendConfig {
+                name,
+                ..LlmBackendConfig::default()
+            });
+            config
+                .llm
+                .backends
+                .last_mut()
+                .expect("backend was just inserted")
+        }
+    };
+
+    if let Some(base_url) = base_url {
+        backend.base_url = base_url;
+    }
+    if let Some(model) = model {
+        backend.model = model;
     }
 }
 
@@ -312,5 +372,39 @@ model = "qwen2.5-coder:latest"
         assert_eq!(backend.backend_type, "ollama");
         assert_eq!(backend.base_url, "http://localhost:11434");
         assert_eq!(backend.model, "qwen2.5-coder:latest");
+    }
+
+    #[test]
+    fn legacy_ollama_env_aliases_update_the_active_backend() {
+        let mut config = deserialize(
+            r#"
+[llm]
+active = "main"
+
+[[llm.backends]]
+name = "main"
+type = "ollama"
+base_url = "http://localhost:11434"
+model = "qwen2.5-coder:latest"
+
+[[llm.backends]]
+name = "backup"
+type = "vllm"
+base_url = "http://localhost:8000"
+model = "qwen2"
+"#,
+        );
+
+        apply_legacy_ollama_aliases(
+            &mut config,
+            Some("http://example.test:11434".into()),
+            Some("codellama:latest".into()),
+        );
+
+        let active = config.llm.active_backend().expect("active backend");
+        assert_eq!(active.name, "main");
+        assert_eq!(active.base_url, "http://example.test:11434");
+        assert_eq!(active.model, "codellama:latest");
+        assert_eq!(config.llm.backends[1].base_url, "http://localhost:8000");
     }
 }
