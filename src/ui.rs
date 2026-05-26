@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 
-use crate::app::{App, Screen};
+use crate::app::{App, JobRecord, Screen};
 use crate::generate::{
     ExecutionPlan, FieldId, Focus, GeneratePhase, GenerateState, PromptView, StaleCheckResult,
 };
@@ -332,6 +332,12 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
 
     if app.screen() == Screen::Generate {
         segments.push(format!(" phase:{} ", app.generate().phase.label()).dim());
+        let job_segment = app
+            .jobs()
+            .active_status()
+            .map(|status| format!(" job:{} ", status.label()))
+            .unwrap_or_else(|| " job:idle ".to_string());
+        segments.push(job_segment.dim());
         let prompt_mode = match app.generate().prompt_view {
             PromptView::Manifest => "prompt:manifest",
             PromptView::Prompt => "prompt:text",
@@ -382,6 +388,23 @@ fn render_help(frame: &mut Frame, app: &App, area: Rect) {
                 "verifying repo context ".dim(),
             ])
         }
+        Screen::Generate if app.generate().phase == GeneratePhase::Executing => Line::from(vec![
+            " waiting ".dim(),
+            "execution in progress ".dim(),
+            " Esc ".bold().cyan(),
+            "ignored ".dim(),
+        ]),
+        Screen::Generate if app.generate().phase == GeneratePhase::Complete => Line::from(vec![
+            " Esc ".bold().cyan(),
+            "back ".dim(),
+            " execution done ".dim(),
+        ]),
+        Screen::Generate if app.generate().phase == GeneratePhase::Failed => Line::from(vec![
+            " c ".bold().cyan(),
+            "retry ".dim(),
+            " Esc ".bold().cyan(),
+            "back ".dim(),
+        ]),
         Screen::Generate if app.focus() == Focus::Preview => Line::from(vec![
             " p ".bold().cyan(),
             "toggle prompt ".dim(),
@@ -745,9 +768,45 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             lines.push(Line::from(""));
             lines.extend(render_recent_logs(&app.logs().entries, 6));
             lines.push(Line::from(""));
+            lines.push(Line::from("Press Enter to start execution.".yellow()));
+        }
+        GeneratePhase::Executing => {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Executing PR plan".bold()));
+            if let Some(step) = generate.execution_step {
+                let total = generate.execution_total.unwrap_or(0);
+                lines.push(Line::from(format!("step: {}/{}", step + 1, total)).cyan());
+            }
             lines.push(Line::from(
-                "Enter keeps this preview open and logs the execution placeholder.".yellow(),
+                "The current step stays visible in the job registry.".dim(),
             ));
+            lines.push(Line::from("Wait for the current command to finish.".dim()));
+            lines.push(Line::from(""));
+            lines.extend(render_job_records(&app.jobs().records));
+            if let Some(plan) = generate.execution_plan.as_ref() {
+                lines.push(Line::from(""));
+                lines.extend(render_execution_plan(plan));
+            }
+            lines.push(Line::from(""));
+            lines.extend(render_recent_logs(&app.logs().entries, 6));
+        }
+        GeneratePhase::Complete => {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Execution complete".bold()));
+            if let Some(completion) = generate.completion.as_ref() {
+                lines.push(Line::from(match completion.pr_url.as_ref() {
+                    Some(url) => format!("PR URL: {url}"),
+                    None => "PR URL: (not parsed)".to_string(),
+                }));
+                lines.push(Line::from(""));
+                lines.extend(render_execution_plan(&completion.plan));
+            } else {
+                lines.push(Line::from("completion details unavailable").red());
+            }
+            lines.push(Line::from(""));
+            lines.extend(render_recent_logs(&app.logs().entries, 6));
+            lines.push(Line::from(""));
+            lines.push(Line::from("Press Esc to return to the draft review.".dim()));
         }
         GeneratePhase::Failed => {
             lines.push(Line::from(""));
@@ -781,11 +840,21 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
                     }
                 });
             }
+            if let Some(step) = generate.execution_failed_step {
+                lines.push(Line::from(format!("execution failed at step {}", step + 1)).red());
+            }
+            if let Some(error) = &generate.execution_error {
+                lines.push(Line::from(error.clone()).red());
+            }
+            if let Some(plan) = generate.execution_plan.as_ref() {
+                lines.push(Line::from(""));
+                lines.extend(render_execution_plan(plan));
+            }
             lines.push(Line::from(""));
             lines.extend(render_recent_logs(&app.logs().entries, 6));
             lines.push(Line::from(""));
             lines.push(Line::from(
-                "Press g to retry with the retained context.".dim(),
+                "Press c to retry with the retained context.".dim(),
             ));
         }
         _ => {
@@ -854,6 +923,45 @@ fn render_execution_plan(plan: &ExecutionPlan) -> Vec<Line<'static>> {
     for (index, step) in plan.steps.iter().enumerate() {
         lines.push(Line::from(format!("{}. {}", index + 1, step.label)).cyan());
         lines.push(Line::from(format!("   {}", step.command.redacted_display())).dim());
+    }
+
+    lines
+}
+
+fn render_job_records(records: &[JobRecord]) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from("Job registry".bold())];
+
+    if records.is_empty() {
+        lines.push(Line::from("  (no jobs yet)").dim());
+        return lines;
+    }
+
+    for record in records {
+        let marker = match record.status {
+            crate::event::JobStatus::Queued => "[queued]",
+            crate::event::JobStatus::Running => "[running]",
+            crate::event::JobStatus::Succeeded => "[succeeded]",
+            crate::event::JobStatus::Failed => "[failed]",
+            crate::event::JobStatus::TimedOut => "[timed-out]",
+        };
+        lines.push(Line::from(format!(
+            "{} {} {}",
+            record.name, marker, record.command
+        )));
+        if let Some(duration) = record.duration {
+            lines.push(Line::from(format!("   duration: {:?}", duration)).dim());
+        }
+        if record.status.is_active() {
+            lines.push(Line::from("   still running".dim()));
+        }
+        if !record.stderr.trim().is_empty() {
+            lines.push(Line::from(format!("   stderr: {}", record.stderr.trim())).red());
+        }
+        if !record.stdout.trim().is_empty()
+            && !matches!(record.status, crate::event::JobStatus::Succeeded)
+        {
+            lines.push(Line::from(format!("   stdout: {}", record.stdout.trim())).dim());
+        }
     }
 
     lines

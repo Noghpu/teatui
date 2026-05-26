@@ -2,7 +2,8 @@
 id: 0000d-2026-05-26-f1ff665b-pr-exec-job-runner-and-execute
 created_at: 2026-05-26T08:01:34+02:00
 created_by_model: claude-opus-4-7/high
-state: open
+state: implemented
+state_updated_at: 2026-05-26T09:49:50+02:00
 ---
 # Job Runner and PR Execution
 
@@ -173,3 +174,42 @@ failure (e.g. push without auth) and verify state is preserved.
   re-receiving its own `BackgroundEvent::Job` messages.
 - The Failed â†’ retry path must not double-spawn jobs if the user presses
   `c` while `Executing`; gate `c` on non-Executing phases.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: gpt-5.4-mini
+- completed_at: 2026-05-26T09:49:50+02:00
+- state: implemented
+
+Completed the PR execution wiring for ticket 0000d-2026-05-26-f1ff665b-pr-exec-job-runner-and-execute.
+
+What changed:
+- Reintroduced job tracking with `JobStatus`, `JobResult`, `JobRecord`, and `JobRegistry`.
+- Added `BackgroundEvent::Job`, `ExecutionStep`, and `ExecutionDone` handling.
+- Implemented async job spawning plus sequential execution of the bookmark, push, and `tea pr create` steps.
+- Added typed `jj` bookmark/push builders and a typed `tea pr create` builder plus PR URL parsing.
+- Replaced the Confirming dead-end with the real execution path, completion state, and retry handling from Failed.
+- Updated the UI for job status, execution progress, completion, and failure previews.
+
+Deviations:
+- Used a small `PrCreateArgs` request struct to keep the `tea` builder clippy-clean instead of a wide argument list.
+- Kept execution output visible through the existing preview/status/log surfaces rather than adding a new logs screen.
+
+Verification:
+- `just verify`
+
+Files changed:
+- `src/app.rs`
+- `src/command.rs`
+- `src/event.rs`
+- `src/generate.rs`
+- `src/jj.rs`
+- `src/tea.rs`
+- `src/ui.rs`
+
+Residual risk:
+- PR URL parsing remains best-effort against `tea` stdout format drift.
+- The job registry keeps history across attempts, which is useful for inspection but not a hard reset between retries.

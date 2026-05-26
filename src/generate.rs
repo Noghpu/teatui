@@ -1,9 +1,11 @@
 use std::time::SystemTime;
 
-use crate::command::ExternalCommand;
+use crate::config::Config;
 use crate::context::ContextBundle;
+use crate::jj::JjClient;
 use crate::prompt::{DEFAULT_PROMPT_BYTE_BUDGET, PromptBuild};
 use crate::repo::RepoState;
+use crate::tea::{PrCreateArgs, TeaClient};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputMode {
@@ -237,6 +239,12 @@ pub struct GeneratedDraft {
     pub raw_model_response: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completion {
+    pub pr_url: Option<String>,
+    pub plan: ExecutionPlan,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DraftReview {
     pub summary: String,
@@ -352,6 +360,11 @@ pub struct GenerateState {
     pub execution_plan: Option<ExecutionPlan>,
     pub confirmation_summary: Option<String>,
     pub freshness_result: Option<StaleCheckResult>,
+    pub completion: Option<Completion>,
+    pub execution_step: Option<usize>,
+    pub execution_total: Option<usize>,
+    pub execution_error: Option<String>,
+    pub execution_failed_step: Option<usize>,
     pub review: DraftReview,
     pub prompt_view: PromptView,
     prompt_cache: Option<PromptBuild>,
@@ -382,6 +395,11 @@ impl GenerateState {
             execution_plan: None,
             confirmation_summary: None,
             freshness_result: None,
+            completion: None,
+            execution_step: None,
+            execution_total: None,
+            execution_error: None,
+            execution_failed_step: None,
             review: DraftReview::default(),
             prompt_view: PromptView::default(),
             prompt_cache: None,
@@ -537,6 +555,7 @@ impl GenerateState {
         self.generation_error = None;
         self.context = None;
         self.prompt_cache = None;
+        self.clear_completion_state();
         self.clear_confirmation_state();
     }
 
@@ -547,6 +566,7 @@ impl GenerateState {
         self.generation_error = None;
         self.context = Some(context);
         self.refresh_prompt_cache();
+        self.clear_completion_state();
         self.clear_confirmation_state();
     }
 
@@ -554,6 +574,7 @@ impl GenerateState {
         self.phase = GeneratePhase::Failed;
         self.context_error = Some(error.into());
         self.generation_error = None;
+        self.clear_completion_state();
         self.clear_confirmation_state();
     }
 
@@ -561,6 +582,7 @@ impl GenerateState {
         self.phase = GeneratePhase::Generating;
         self.context_error = None;
         self.generation_error = None;
+        self.clear_completion_state();
         self.clear_confirmation_state();
     }
 
@@ -568,6 +590,7 @@ impl GenerateState {
         self.phase = GeneratePhase::DraftReady;
         self.context_error = None;
         self.generation_error = None;
+        self.clear_completion_state();
         self.clear_confirmation_state();
         self.sync_form_from_draft(&draft);
         self.review = DraftReview {
@@ -583,6 +606,7 @@ impl GenerateState {
         self.phase = GeneratePhase::Failed;
         self.context_error = None;
         self.generation_error = Some(error.clone());
+        self.clear_completion_state();
         self.clear_confirmation_state();
         if self.draft.is_none() {
             self.review = DraftReview {
@@ -605,6 +629,10 @@ impl GenerateState {
         self.confirmation_summary = Some("validation passed".into());
         self.freshness_result = None;
         self.execution_plan = None;
+        self.execution_step = None;
+        self.execution_total = None;
+        self.execution_error = None;
+        self.execution_failed_step = None;
     }
 
     pub fn complete_confirmation(&mut self, plan: ExecutionPlan) {
@@ -612,6 +640,10 @@ impl GenerateState {
         self.confirmation_summary = Some("validation passed".into());
         self.freshness_result = Some(StaleCheckResult::Fresh);
         self.execution_plan = Some(plan);
+        self.execution_step = None;
+        self.execution_total = None;
+        self.execution_error = None;
+        self.execution_failed_step = None;
     }
 
     pub fn fail_confirmation(&mut self, reason: impl Into<String>) {
@@ -621,11 +653,55 @@ impl GenerateState {
             reason: reason.into(),
         });
         self.execution_plan = None;
+        self.execution_step = None;
+        self.execution_total = None;
+        self.execution_error = None;
+        self.execution_failed_step = None;
     }
 
     pub fn cancel_confirmation(&mut self) {
         self.phase = GeneratePhase::DraftReady;
         self.clear_confirmation_state();
+    }
+
+    pub fn begin_execution(&mut self) {
+        self.phase = GeneratePhase::Executing;
+        self.execution_step = None;
+        self.execution_total = None;
+        self.execution_error = None;
+        self.execution_failed_step = None;
+        self.completion = None;
+    }
+
+    pub fn record_execution_step(&mut self, index: usize, total: usize) {
+        self.execution_step = Some(index);
+        self.execution_total = Some(total);
+    }
+
+    pub fn complete_execution(&mut self, pr_url: Option<String>, plan: ExecutionPlan) {
+        self.phase = GeneratePhase::Complete;
+        self.completion = Some(Completion { pr_url, plan });
+        self.execution_step = None;
+        self.execution_total = None;
+        self.execution_error = None;
+        self.execution_failed_step = None;
+    }
+
+    pub fn fail_execution(&mut self, failed_step: Option<usize>, message: impl Into<String>) {
+        self.phase = GeneratePhase::Failed;
+        self.execution_error = Some(message.into());
+        self.execution_failed_step = failed_step;
+        self.execution_step = None;
+        self.execution_total = None;
+        self.completion = None;
+    }
+
+    pub fn clear_completion_state(&mut self) {
+        self.completion = None;
+        self.execution_step = None;
+        self.execution_total = None;
+        self.execution_error = None;
+        self.execution_failed_step = None;
     }
 
     pub fn prompt(&self) -> Option<&PromptBuild> {
@@ -742,7 +818,12 @@ pub fn validate_for_execution(form: &PrForm, _repo: &RepoState) -> Result<(), Ve
 }
 
 impl ExecutionPlan {
-    pub fn from_draft(form: &PrForm, repo: &RepoState, revset: &RevsetSummary) -> Self {
+    pub fn from_draft(
+        form: &PrForm,
+        repo: &RepoState,
+        revset: &RevsetSummary,
+        config: &Config,
+    ) -> Self {
         let cwd = repo
             .workspace_root
             .clone()
@@ -754,62 +835,17 @@ impl ExecutionPlan {
         } else {
             form.base.display_value().trim().to_string()
         };
-
+        let jj = JjClient::new(config);
+        let tea = TeaClient::new(config);
         let bookmark_command = if revset
             .bookmarks()
             .iter()
             .any(|bookmark| bookmark == &branch_name)
         {
-            ExternalCommand::new(
-                "jj",
-                [
-                    "bookmark",
-                    "move",
-                    branch_name.as_str(),
-                    "--to",
-                    head.as_str(),
-                ],
-                &cwd,
-            )
+            jj.bookmark_move_command(&cwd, &branch_name, &head)
         } else {
-            ExternalCommand::new(
-                "jj",
-                [
-                    "bookmark",
-                    "create",
-                    branch_name.as_str(),
-                    "-r",
-                    head.as_str(),
-                ],
-                &cwd,
-            )
+            jj.bookmark_create_command(&cwd, &branch_name, &head)
         };
-
-        let mut tea_args = vec![
-            "pr".to_string(),
-            "create".to_string(),
-            "--title".to_string(),
-            form.title.display_value().trim().to_string(),
-            "--description".to_string(),
-            form.description.display_value().trim().to_string(),
-            "--base".to_string(),
-            base,
-            "--head".to_string(),
-            branch_name.clone(),
-        ];
-
-        for label in split_multi_values(form.labels.display_value()) {
-            tea_args.push("--label".into());
-            tea_args.push(label);
-        }
-        for assignee in split_multi_values(form.assignees.display_value()) {
-            tea_args.push("--assignee".into());
-            tea_args.push(assignee);
-        }
-        if let Some(milestone) = optional_single_value(form.milestone.display_value()) {
-            tea_args.push("--milestone".into());
-            tea_args.push(milestone);
-        }
 
         Self {
             steps: vec![
@@ -819,15 +855,22 @@ impl ExecutionPlan {
                 },
                 ExecutionStep {
                     label: "push bookmark to origin".into(),
-                    command: ExternalCommand::new(
-                        "jj",
-                        ["git", "push", "--bookmark", branch_name.as_str()],
-                        &cwd,
-                    ),
+                    command: jj.git_push_bookmark_command(&cwd, &branch_name),
                 },
                 ExecutionStep {
                     label: "create gitea PR".into(),
-                    command: ExternalCommand::new("tea", tea_args, &cwd),
+                    command: tea.pr_create_command(
+                        &cwd,
+                        PrCreateArgs {
+                            title: form.title.display_value(),
+                            body: form.description.display_value(),
+                            base: &base,
+                            head: &branch_name,
+                            labels: form.labels.display_value(),
+                            assignees: form.assignees.display_value(),
+                            milestone: form.milestone.display_value(),
+                        },
+                    ),
                 },
             ],
         }
@@ -854,20 +897,6 @@ fn validate_no_shell_metacharacters(label: &str, value: &str) -> Vec<String> {
 
 fn is_shell_metacharacter(ch: char) -> bool {
     matches!(ch, ';' | '&' | '|' | '`' | '$' | '<' | '>' | '\n' | '\r')
-}
-
-fn split_multi_values(value: &str) -> Vec<String> {
-    value
-        .split([',', '\n'])
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
-}
-
-fn optional_single_value(value: &str) -> Option<String> {
-    let value = value.trim();
-    (!value.is_empty()).then(|| value.to_string())
 }
 
 #[cfg(test)]
@@ -1095,7 +1124,8 @@ mod tests {
         form.title = FieldState::new("Create a PR");
         form.description = FieldState::new("Body");
 
-        let plan = ExecutionPlan::from_draft(&form, &repo_state(), &revset("@"));
+        let config = crate::config::Config::default();
+        let plan = ExecutionPlan::from_draft(&form, &repo_state(), &revset("@"), &config);
 
         assert_eq!(plan.steps.len(), 3);
         assert_eq!(plan.steps[0].label, "create or move bookmark");
@@ -1137,7 +1167,8 @@ mod tests {
             Vec::new(),
         );
 
-        let plan = ExecutionPlan::from_draft(&form, &repo_state(), &revset);
+        let config = crate::config::Config::default();
+        let plan = ExecutionPlan::from_draft(&form, &repo_state(), &revset, &config);
 
         assert_eq!(
             plan.steps[0].command.args,

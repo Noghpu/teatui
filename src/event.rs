@@ -24,12 +24,59 @@ pub enum BackgroundEvent {
     Repo(Box<RepoState>),
     Revsets(Vec<RevsetSummary>),
     StaleCheck(StaleCheckResult),
+    Job(JobResult),
+    ExecutionStep { index: usize, total: usize },
+    ExecutionDone(ExecutionOutcome),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GenerationResult {
     Ready(GeneratedDraft),
     Failed(OllamaError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobStatus {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    TimedOut,
+}
+
+impl JobStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed-out",
+        }
+    }
+
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Queued | Self::Running)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobResult {
+    pub id: u64,
+    pub name: String,
+    pub command: String,
+    pub status: JobStatus,
+    pub duration: Option<Duration>,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ExecutionOutcome {
+    pub pr_url: Option<String>,
+    pub failed_step: Option<usize>,
+    pub message: Option<String>,
 }
 
 pub struct EventHandler {

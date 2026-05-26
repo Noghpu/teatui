@@ -6,8 +6,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::action::{Action, Direction};
+use crate::command::run_plan_sequentially;
 use crate::context::{self, ContextResult};
-use crate::event::{AppEvent, BackgroundEvent, EventHandler, GenerationResult};
+use crate::event::{
+    AppEvent, BackgroundEvent, EventHandler, ExecutionOutcome, GenerationResult, JobResult,
+    JobStatus,
+};
 use crate::generate::{
     ExecutionPlan, Focus, GeneratePhase, GenerateState, InputMode, RevsetSummary, StaleCheckResult,
     validate_for_execution,
@@ -44,6 +48,61 @@ pub struct LogState {
     pub entries: VecDeque<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobRecord {
+    pub id: u64,
+    pub name: String,
+    pub command: String,
+    pub status: JobStatus,
+    pub duration: Option<std::time::Duration>,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+}
+
+impl From<JobResult> for JobRecord {
+    fn from(result: JobResult) -> Self {
+        Self {
+            id: result.id,
+            name: result.name,
+            command: result.command,
+            status: result.status,
+            duration: result.duration,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            timed_out: result.timed_out,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct JobRegistry {
+    pub records: Vec<JobRecord>,
+}
+
+impl JobRegistry {
+    pub fn upsert(&mut self, result: JobResult) {
+        let record = JobRecord::from(result);
+        if let Some(existing) = self
+            .records
+            .iter_mut()
+            .find(|existing| existing.id == record.id)
+        {
+            *existing = record;
+        } else {
+            self.records.push(record);
+        }
+    }
+
+    pub fn active_status(&self) -> Option<JobStatus> {
+        self.records
+            .iter()
+            .rev()
+            .find(|record| record.status.is_active())
+            .map(|record| record.status)
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct LandingState {
     pub selected_entry: usize,
@@ -67,6 +126,7 @@ pub struct App {
     pull_requests: ListState,
     issues: ListState,
     logs: LogState,
+    jobs: JobRegistry,
     should_quit: bool,
 }
 
@@ -87,6 +147,7 @@ impl App {
             pull_requests: ListState::default(),
             issues: ListState::default(),
             logs: LogState::default(),
+            jobs: JobRegistry::default(),
             should_quit: false,
         }
     }
@@ -129,7 +190,18 @@ impl App {
                         _ => Action::Tick,
                     };
                 }
+                GeneratePhase::Executing => {
+                    return match key.code {
+                        KeyCode::Esc => Action::Tick,
+                        _ => Action::Tick,
+                    };
+                }
                 GeneratePhase::DraftReady => {
+                    if matches!(key.code, KeyCode::Char('c')) {
+                        return Action::ConfirmExecution;
+                    }
+                }
+                GeneratePhase::Failed => {
                     if matches!(key.code, KeyCode::Char('c')) {
                         return Action::ConfirmExecution;
                     }
@@ -198,6 +270,11 @@ impl App {
             BackgroundEvent::Repo(repo) => self.apply_repo(*repo),
             BackgroundEvent::Revsets(revsets) => self.apply_revsets(revsets),
             BackgroundEvent::StaleCheck(result) => self.apply_stale_check(result),
+            BackgroundEvent::Job(job) => self.apply_job(job),
+            BackgroundEvent::ExecutionStep { index, total } => {
+                self.apply_execution_step(index, total)
+            }
+            BackgroundEvent::ExecutionDone(outcome) => self.apply_execution_done(outcome),
         }
     }
 
@@ -212,6 +289,20 @@ impl App {
             self.focus = Focus::Form;
             self.input_mode = InputMode::Normal;
             self.log("execution preview cancelled");
+            return;
+        }
+
+        if self.screen == Screen::Generate && self.generate.phase == GeneratePhase::Executing {
+            self.log("execution in progress");
+            return;
+        }
+
+        if self.screen == Screen::Generate && self.generate.phase == GeneratePhase::Complete {
+            self.generate.clear_completion_state();
+            self.generate.phase = GeneratePhase::DraftReady;
+            self.focus = Focus::Form;
+            self.input_mode = InputMode::Normal;
+            self.log("execution results cleared");
             return;
         }
 
@@ -341,7 +432,12 @@ impl App {
     }
 
     fn confirm_execution(&mut self) {
-        if self.screen != Screen::Generate || self.generate.phase != GeneratePhase::DraftReady {
+        if self.screen != Screen::Generate
+            || !matches!(
+                self.generate.phase,
+                GeneratePhase::DraftReady | GeneratePhase::Failed
+            )
+        {
             return;
         }
 
@@ -394,9 +490,28 @@ impl App {
     }
 
     fn execute_confirmed(&mut self) {
-        if self.screen == Screen::Generate && self.generate.phase == GeneratePhase::Confirming {
-            self.log("execution not yet wired (see ticket 0000d-2026-05-26-pr-exec-job-runner-and-execute)");
+        if self.screen != Screen::Generate || self.generate.phase != GeneratePhase::Confirming {
+            return;
         }
+
+        let Some(plan) = self.generate.execution_plan.clone() else {
+            self.log("execution blocked: missing execution plan");
+            self.generate.fail_execution(None, "missing execution plan");
+            self.focus = Focus::Form;
+            self.input_mode = InputMode::Normal;
+            return;
+        };
+
+        self.generate.begin_execution();
+        self.focus = Focus::Preview;
+        self.input_mode = InputMode::Normal;
+        self.log("execution started");
+
+        let tx = self.bg_tx.clone();
+        tokio::spawn(async move {
+            let outcome = run_plan_sequentially(plan, tx.clone()).await;
+            let _ = tx.send(BackgroundEvent::ExecutionDone(outcome));
+        });
     }
 
     fn start_context_collection(&mut self) {
@@ -555,6 +670,7 @@ impl App {
                     &self.generate.form,
                     &self.repo,
                     self.generate.selected_revset(),
+                    &self.config,
                 );
                 self.generate.complete_confirmation(plan);
                 self.focus = Focus::Preview;
@@ -569,6 +685,52 @@ impl App {
                 self.log("press r to refresh revsets/context");
             }
         }
+    }
+
+    fn apply_job(&mut self, job: JobResult) {
+        let status = job.status;
+        self.jobs.upsert(job.clone());
+
+        if matches!(status, JobStatus::Failed | JobStatus::TimedOut) {
+            let label = format!("job {}", job.name);
+            self.log_command_capture(&label, &job.command, &job.stdout, &job.stderr);
+        }
+    }
+
+    fn apply_execution_step(&mut self, index: usize, total: usize) {
+        self.generate.record_execution_step(index, total);
+        self.log(format!("execution step {}/{}", index + 1, total));
+    }
+
+    fn apply_execution_done(&mut self, outcome: ExecutionOutcome) {
+        if let Some(message) = outcome.message.as_ref() {
+            self.log(message.clone());
+        }
+
+        if let Some(failed_step) = outcome.failed_step {
+            let message = outcome
+                .message
+                .clone()
+                .unwrap_or_else(|| "execution step failed".into());
+            self.generate
+                .fail_execution(Some(failed_step), message.clone());
+            self.log(format!(
+                "execution failed at step {}: {}",
+                failed_step + 1,
+                message
+            ));
+            return;
+        }
+
+        let plan = self.generate.execution_plan.clone().unwrap_or_default();
+        self.generate
+            .complete_execution(outcome.pr_url.clone(), plan);
+        if let Some(pr_url) = outcome.pr_url {
+            self.log(format!("PR created: {pr_url}"));
+        } else {
+            self.log("execution completed without a parsed PR URL");
+        }
+        self.log("execution complete");
     }
 
     fn log_raw_model_response(&mut self, raw_response: &str) {
@@ -668,6 +830,10 @@ impl App {
 
     pub fn logs(&self) -> &LogState {
         &self.logs
+    }
+
+    pub fn jobs(&self) -> &JobRegistry {
+        &self.jobs
     }
 }
 
@@ -780,6 +946,36 @@ mod tests {
         assert!(app.generate.freshness_result.is_none());
         assert_eq!(app.input_mode, InputMode::Normal);
         assert_eq!(app.focus, Focus::Form);
+    }
+
+    #[test]
+    fn back_from_complete_returns_to_draft_ready_and_clears_completion() {
+        let mut app = test_app();
+        app.screen = Screen::Generate;
+        app.generate.phase = GeneratePhase::Complete;
+        app.generate.completion = Some(crate::generate::Completion {
+            pr_url: Some("https://code.example.com/team/project/pulls/1".into()),
+            plan: ExecutionPlan::default(),
+        });
+        app.input_mode = InputMode::Normal;
+
+        app.back();
+
+        assert_eq!(app.generate.phase, GeneratePhase::DraftReady);
+        assert!(app.generate.completion.is_none());
+        assert_eq!(app.focus, Focus::Form);
+    }
+
+    #[test]
+    fn failed_phase_maps_c_to_confirm_execution() {
+        let mut app = test_app();
+        app.screen = Screen::Generate;
+        app.generate.phase = GeneratePhase::Failed;
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty())),
+            Action::ConfirmExecution
+        );
     }
 
     #[test]

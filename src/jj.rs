@@ -64,6 +64,44 @@ impl JjClient {
         )
     }
 
+    pub fn bookmark_create_command(
+        &self,
+        cwd: impl Into<PathBuf>,
+        bookmark: &str,
+        head: &str,
+    ) -> ExternalCommand {
+        ExternalCommand::new(
+            self.program.clone(),
+            ["bookmark", "create", bookmark, "-r", head],
+            cwd,
+        )
+    }
+
+    pub fn bookmark_move_command(
+        &self,
+        cwd: impl Into<PathBuf>,
+        bookmark: &str,
+        head: &str,
+    ) -> ExternalCommand {
+        ExternalCommand::new(
+            self.program.clone(),
+            ["bookmark", "move", bookmark, "--to", head],
+            cwd,
+        )
+    }
+
+    pub fn git_push_bookmark_command(
+        &self,
+        cwd: impl Into<PathBuf>,
+        bookmark: &str,
+    ) -> ExternalCommand {
+        ExternalCommand::new(
+            self.program.clone(),
+            ["git", "push", "--bookmark", bookmark],
+            cwd,
+        )
+    }
+
     pub async fn candidate_revsets(&self, cwd: &Path) -> Vec<RevsetSummary> {
         let mut summaries = Vec::with_capacity(CANDIDATE_REVSETS.len());
         for revset in CANDIDATE_REVSETS {
@@ -328,6 +366,30 @@ mod tests {
         assert_eq!(
             parse_revset_log_commit_ids(output),
             vec!["abc123".to_string(), "xyz789".to_string()]
+        );
+    }
+
+    #[test]
+    fn builds_bookmark_and_push_commands() {
+        let config = Config::default();
+        let client = JjClient::new(&config);
+
+        let create = client.bookmark_create_command("C:/repo", "feature/example", "@");
+        assert_eq!(
+            create.args,
+            vec!["bookmark", "create", "feature/example", "-r", "@"]
+        );
+
+        let move_command = client.bookmark_move_command("C:/repo", "feature/example", "@");
+        assert_eq!(
+            move_command.args,
+            vec!["bookmark", "move", "feature/example", "--to", "@"]
+        );
+
+        let push = client.git_push_bookmark_command("C:/repo", "feature/example");
+        assert_eq!(
+            push.args,
+            vec!["git", "push", "--bookmark", "feature/example"]
         );
     }
 
