@@ -2,8 +2,8 @@
 id: 00008-2026-05-25-polished-pr-gen-ollama-client
 created_at: 2026-05-25T21:55:34+02:00
 created_by_model: migration-placeholder
-state: implemented
-state_updated_at: 2026-05-25T22:18:41+02:00
+state: reviewed
+state_updated_at: 2026-05-26T06:36:53+02:00
 ---
 # Ollama Client
 
@@ -107,3 +107,26 @@ Files changed:
 Residual risks:
 - Ollama-compatible servers may vary in wrapper response shape or endpoint behavior.
 - Full end-to-end generation still depends on a live configured Ollama endpoint at runtime.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: gpt-5 medium
+- reviewed_at: 2026-05-26T06:36:53+02:00
+- state: reviewed
+
+Review postmortem for 00008-2026-05-25-polished-pr-gen-ollama-client
+
+Facts:
+- Reviewed the ticket, implementation note, design source, implementation diff, and the Ollama/generation/app/UI code paths.
+- Verified the implementation adds a non-streaming Ollama `/api/generate` client, strict generated draft parsing, raw model response logging, generation progress state, and recoverable generation failures that retain context.
+- Found one design mismatch: form validation required a branch name before generation, but the design allows the branch name field to start empty so the model can propose one.
+- Fixed form validation so an empty user-entered branch name is allowed before generation, while generated model output still uses strict required branch-name validation.
+- Updated tests to cover empty branch-name generation eligibility and retained invalid branch-name blocking behavior.
+- Ran `just verify`; it passed.
+
+Inferences:
+- The dedicated generation event channel is acceptable for this slice because it keeps network IO off the render loop and preserves the existing explicit app-state flow.
+- Raw model responses are visible enough for this stage through the app log entries; a richer logs screen can improve inspection later without blocking this ticket.

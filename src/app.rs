@@ -752,11 +752,11 @@ mod tests {
     }
 
     #[test]
-    fn generate_action_stays_in_form_when_required_fields_are_invalid() {
+    fn generate_action_stays_in_form_when_form_fields_are_invalid() {
         let mut app = test_app();
         app.screen = Screen::Generate;
         app.focus = Focus::Form;
-        app.generate.form.branch_name = crate::generate::FieldState::new("");
+        app.generate.form.branch_name = crate::generate::FieldState::new("Feature Bad");
 
         app.generate_pr();
 

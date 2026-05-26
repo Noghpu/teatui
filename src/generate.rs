@@ -460,7 +460,8 @@ impl GenerateState {
 
     pub fn validate_form(&mut self) {
         self.form.head.errors = required_field_errors("head", self.form.head.display_value());
-        self.form.branch_name.errors = validate_branch_name(self.form.branch_name.display_value());
+        self.form.branch_name.errors =
+            validate_optional_branch_name(self.form.branch_name.display_value());
         self.form.base.errors = required_field_errors("base", self.form.base.display_value());
         self.form.title.errors.clear();
         self.form.description.errors.clear();
@@ -579,6 +580,14 @@ pub fn validate_branch_name(value: &str) -> Vec<String> {
     }
 }
 
+fn validate_optional_branch_name(value: &str) -> Vec<String> {
+    if value.trim().is_empty() {
+        Vec::new()
+    } else {
+        validate_branch_name(value)
+    }
+}
+
 fn required_field_errors(label: &str, value: &str) -> Vec<String> {
     if value.trim().is_empty() {
         vec![format!("{label} is required")]
@@ -647,11 +656,11 @@ mod tests {
     }
 
     #[test]
-    fn empty_title_does_not_block_generation() {
+    fn empty_branch_name_and_title_do_not_block_generation() {
         let mut state = GenerateState::new(vec![revset("@")]);
-        state.form.branch_name = FieldState::new("feature/example");
         state.validate_form();
 
+        assert!(state.form.branch_name.errors.is_empty());
         assert!(state.form.title.errors.is_empty());
         assert!(state.blocking_errors().is_empty());
     }
