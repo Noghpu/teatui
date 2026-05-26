@@ -2,8 +2,8 @@
 id: 00009-2026-05-25-polished-pr-gen-draft-review
 created_at: 2026-05-25T21:55:35+02:00
 created_by_model: migration-placeholder
-state: implemented
-state_updated_at: 2026-05-26T06:44:11+02:00
+state: reviewed
+state_updated_at: 2026-05-26T06:46:03+02:00
 ---
 # Draft Review
 
@@ -100,3 +100,25 @@ Files changed:
 Residual risks:
 - The preview still depends on line wrapping and clipped terminal height for very large drafts.
 - A retry can still overwrite any in-progress edits if generation finishes while the user is editing the same fields.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: gpt-5 medium
+- reviewed_at: 2026-05-26T06:46:03+02:00
+- state: reviewed
+
+Facts:
+- Reviewed ticket 00009-2026-05-25-polished-pr-gen-draft-review against docs/design.md, the implementation note, and the changed Generate PR UI/model code.
+- The implementation added DraftReady rendering, visible generated draft details, recent log preview, retry visibility, and editable form synchronization from generated draft data.
+- Found and fixed a retry race: `complete_generation` unconditionally replaced branch/title/body form fields when an async generation completed, so user edits made during a retry could be overwritten.
+- Updated draft synchronization to populate only fields that are not dirty and to revalidate after syncing.
+- Added a focused unit test proving a retry draft preserves a user-edited title while still accepting fresh generated values for untouched fields.
+- `just test` passed.
+- `just verify` passed.
+
+Inferences:
+- The remaining very-small-terminal clipping risk is acceptable for this slice because the UI uses wrapped paragraphs and the ticket only requires ordinary terminal sizes to remain readable.
+- The non-mutating preview language is sufficient for this slice because branch/push/tea execution is explicitly not implemented yet.

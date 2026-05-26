@@ -548,9 +548,16 @@ impl GenerateState {
     }
 
     fn sync_form_from_draft(&mut self, draft: &GeneratedDraft) {
-        self.form.branch_name = FieldState::new(draft.branch_name.clone());
-        self.form.title = FieldState::new(draft.title.clone());
-        self.form.description = FieldState::new(draft.body.clone());
+        if !self.form.branch_name.dirty {
+            self.form.branch_name = FieldState::new(draft.branch_name.clone());
+        }
+        if !self.form.title.dirty {
+            self.form.title = FieldState::new(draft.title.clone());
+        }
+        if !self.form.description.dirty {
+            self.form.description = FieldState::new(draft.body.clone());
+        }
+        self.validate_form();
     }
 }
 
@@ -693,6 +700,37 @@ mod tests {
         assert_eq!(state.review.summary, "Generated draft for feature/example");
         assert_eq!(state.review.notes, draft.review_notes);
         assert_eq!(state.draft, Some(draft));
+    }
+
+    #[test]
+    fn complete_generation_preserves_user_edited_draft_fields() {
+        let mut state = GenerateState::new(vec![revset("@")]);
+        state.complete_generation(GeneratedDraft {
+            branch_name: "feature/example".into(),
+            title: "Polished draft".into(),
+            body: "Summary".into(),
+            review_notes: Vec::new(),
+            raw_model_response: "{}".into(),
+        });
+        state.form.title.begin_edit();
+        for ch in " edited".chars() {
+            state.form.title.insert(ch);
+        }
+        state.form.title.commit();
+        state.begin_generation();
+
+        let retry_draft = GeneratedDraft {
+            branch_name: "feature/retry".into(),
+            title: "Retry draft".into(),
+            body: "Retry summary".into(),
+            review_notes: Vec::new(),
+            raw_model_response: "{}".into(),
+        };
+        state.complete_generation(retry_draft);
+
+        assert_eq!(state.form.branch_name.value, "feature/retry");
+        assert_eq!(state.form.title.value, "Polished draft edited");
+        assert_eq!(state.form.description.value, "Retry summary");
     }
 
     #[test]
