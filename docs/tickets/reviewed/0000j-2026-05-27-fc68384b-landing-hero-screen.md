@@ -2,8 +2,8 @@
 id: 0000j-2026-05-27-fc68384b-landing-hero-screen
 created_at: 2026-05-27T15:28:43+02:00
 created_by_model: claude-sonnet-4-6
-state: implemented
-state_updated_at: 2026-05-27T15:53:19+02:00
+state: reviewed
+state_updated_at: 2026-05-27T15:57:08+02:00
 ---
 # Landing Hero Screen (LazyVim-Style Full-Width Dashboard)
 
@@ -148,3 +148,51 @@ Implemented the LazyVim-style landing hero screen as described in ticket 0000j. 
 
 - Key padding arithmetic uses `center_width` from `area.width`; at very narrow terminal widths the padding may underflow to a single space, but the fallback `" ".to_string()` prevents subtraction overflow.
 - The `render_menu` and `render_work` Landing branches are now dead code; they can be cleaned up in a future ticket.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: claude-opus-4-7
+- reviewed_at: 2026-05-27T15:57:08+02:00
+- state: reviewed
+
+## Review summary
+
+Implementation of the LazyVim-style landing hero screen meets every acceptance criterion. The landing branch now short-circuits the 3-pane layout before any horizontal split, all other screens are untouched, selection is driven by the existing `LandingState.selected_entry` (still bounded `0..=2` in `app.rs`, matching the three selectable rows), the footer uses live `RepoState` data, and all colors come from `colors::*` constants. `cargo build` and `cargo clippy` are clean.
+
+## Findings (fact)
+
+- `src/ui.rs::render()` correctly branches on `Screen::Landing` and returns early after rendering hero/status/help, so the old Landing branches in `render_menu`/`render_work`/`render_preview` are unreachable rather than incorrect.
+- `app.rs` line 330 still clamps Landing navigation with `.min(2)`, matching the three selectable hero rows (Quit is intentionally non-selectable).
+- `colors::*` constants are used everywhere in the hero, including the new footer tool indicators. No raw `.cyan()`/`.dim()` calls were introduced.
+- Symbols (`â—†`, `â–¶`, `âœ“`, `âœ—`, `Â·`) are plain Unicode, satisfying the no-nerd-font requirement.
+
+## Findings (inference)
+
+- The hero layout will be visually correct at typical terminal widths. At very narrow widths the right-aligned key hint collapses to a single space rather than panicking, thanks to saturating arithmetic.
+- The dead Landing branches in `render_menu`/`render_work`/`render_preview` remain useful as fallbacks if the early return is ever removed; cleaning them up is a separate concern (out of scope for this ticket).
+
+## Fixes applied during review
+
+All in `src/ui.rs`:
+
+1. Extracted `center_horizontally(area)` helper. The 20%/60%/20% horizontal split was duplicated three times in `render_landing_hero`; it is now defined once.
+2. Extracted `landing_action_line(icon, label, key, is_selected, center_width)`. Previously the row builder duplicated the left-text format string (`"â–¶ {} {}"` vs the `left_text` used for length math) once for selected rows and again in a different shape for unselected rows; the Quit row reimplemented the padding math inline. The new helper computes `left_len` from the structural parts (`prefix + icon + ' ' + label`) so length and rendering can never drift, and the Quit row reuses the same helper.
+3. Replaced fully-qualified `ratatui::style::Style::new()` calls with the already-imported `Style`. Replaced `Span::styled(padding, Style::new())` and the `"  "` separator with `Span::raw(...)`.
+4. Factored the LLM-status match into `llm_status_indicator`, mirroring the existing `tool_status_indicator` shape, and let the footer use a small `push_tool` closure so all four tool segments use the same pattern.
+5. Replaced the `if center_width > total { repeat } else { " ".to_string() }` branch with `center_width.saturating_sub(left_len + key_len).max(1)`, which is shorter and removes the implicit underflow guard.
+
+These are non-behavioral cleanups: the rendered output is identical for normal terminal widths. Verified with `cargo build` and `cargo clippy` (both clean).
+
+## Verification
+
+- `cargo build` clean.
+- `cargo clippy` clean (no warnings).
+- Manual run not performed in this review (no TTY available to subagent), but the impl note confirms the implementer ran it.
+
+## Residual notes
+
+- The implementer's note about dead Landing branches in `render_menu`/`render_work`/`render_preview` still applies; a future cleanup ticket can remove them safely.
+- The Quit row in the hero is intentionally non-selectable. `q` keeps quitting the app via the existing global handler.

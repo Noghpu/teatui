@@ -52,27 +52,9 @@ fn render_landing_hero(frame: &mut Frame, app: &App, area: Rect) {
     ])
     .areas(area);
 
-    // Center each sub-area horizontally with 20%/60%/20% split
-    let [_, header_center, _] = Layout::horizontal([
-        Constraint::Percentage(20),
-        Constraint::Percentage(60),
-        Constraint::Percentage(20),
-    ])
-    .areas(header_area);
-
-    let [_, actions_center, _] = Layout::horizontal([
-        Constraint::Percentage(20),
-        Constraint::Percentage(60),
-        Constraint::Percentage(20),
-    ])
-    .areas(actions_area);
-
-    let [_, footer_center, _] = Layout::horizontal([
-        Constraint::Percentage(20),
-        Constraint::Percentage(60),
-        Constraint::Percentage(20),
-    ])
-    .areas(footer_area);
+    let header_center = center_horizontally(header_area);
+    let actions_center = center_horizontally(actions_area);
+    let footer_center = center_horizontally(footer_area);
 
     // Render header
     let header = Paragraph::new(vec![
@@ -89,6 +71,17 @@ fn render_landing_hero(frame: &mut Frame, app: &App, area: Rect) {
 
     // Render footer with live tool status
     render_landing_footer(frame, app, footer_center);
+}
+
+/// Split a rect into 20%/60%/20% horizontal slices and return the centered column.
+fn center_horizontally(area: Rect) -> Rect {
+    let [_, center, _] = Layout::horizontal([
+        Constraint::Percentage(20),
+        Constraint::Percentage(60),
+        Constraint::Percentage(20),
+    ])
+    .areas(area);
+    center
 }
 
 fn render_landing_actions(frame: &mut Frame, app: &App, area: Rect) {
@@ -111,121 +104,95 @@ fn render_landing_actions(frame: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::from(""));
 
     for (index, action) in actions.iter().enumerate() {
-        let is_selected = index == selected;
-
-        let prefix = if is_selected { "▶ " } else { "  " };
-        let left_text = format!("{}{} {}", prefix, action.icon, action.label);
-        let key_text = action.key;
-
-        // Compute padding to right-align the key hint
-        let left_len = left_text.chars().count();
-        let key_len = key_text.chars().count();
-        let total = left_len + key_len;
-        let padding = if center_width > total {
-            " ".repeat(center_width - total)
-        } else {
-            " ".to_string()
-        };
-
-        let line = if is_selected {
-            Line::from(vec![
-                Span::styled(
-                    format!("▶ {} {}", action.icon, action.label),
-                    ratatui::style::Style::new().bold().fg(colors::ACCENT),
-                ),
-                Span::styled(padding, ratatui::style::Style::new()),
-                Span::styled(key_text, ratatui::style::Style::new().fg(colors::MUTED)),
-            ])
-        } else {
-            Line::from(vec![
-                Span::styled(
-                    format!("  {} ", action.icon),
-                    ratatui::style::Style::new().fg(colors::MUTED),
-                ),
-                Span::styled(
-                    action.label,
-                    ratatui::style::Style::new().fg(colors::TEXT),
-                ),
-                Span::styled(padding, ratatui::style::Style::new()),
-                Span::styled(key_text, ratatui::style::Style::new().fg(colors::MUTED)),
-            ])
-        };
-        lines.push(line);
+        lines.push(landing_action_line(
+            action.icon,
+            action.label,
+            action.key,
+            index == selected,
+            center_width,
+        ));
         lines.push(Line::from("")); // blank spacer between items
     }
 
-    // Quit hint — not a selectable entry, just shown as a static line
-    lines.push(Line::from(vec![
-        Span::styled("  ◆ ", ratatui::style::Style::new().fg(colors::MUTED)),
-        Span::styled("Quit", ratatui::style::Style::new().fg(colors::TEXT)),
-        Span::styled(
-            {
-                let left_len = "  ◆ Quit".chars().count();
-                let key_len = "q".chars().count();
-                let total = left_len + key_len;
-                if center_width > total {
-                    " ".repeat(center_width - total)
-                } else {
-                    " ".to_string()
-                }
-            },
-            ratatui::style::Style::new(),
-        ),
-        Span::styled("q", ratatui::style::Style::new().fg(colors::MUTED)),
-    ]));
+    // Quit hint — not a selectable entry, just shown as a static line.
+    // Rendered with the same row builder so layout/padding logic stays in one place.
+    lines.push(landing_action_line("◆", "Quit", "q", false, center_width));
 
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+/// Build a single landing action row. The icon+label sits on the left and the
+/// key hint is right-padded to the edge of `center_width`. Selected rows use a
+/// `▶` prefix in ACCENT; unselected rows use two spaces with a MUTED icon and
+/// TEXT label.
+fn landing_action_line(
+    icon: &'static str,
+    label: &'static str,
+    key: &'static str,
+    is_selected: bool,
+    center_width: usize,
+) -> Line<'static> {
+    let prefix = if is_selected { "▶ " } else { "  " };
+    let left_len = prefix.chars().count() + icon.chars().count() + 1 + label.chars().count();
+    let key_len = key.chars().count();
+    let padding_len = center_width.saturating_sub(left_len + key_len).max(1);
+    let padding = " ".repeat(padding_len);
+
+    let spans = if is_selected {
+        vec![
+            Span::styled(
+                format!("{prefix}{icon} {label}"),
+                Style::new().bold().fg(colors::ACCENT),
+            ),
+            Span::raw(padding),
+            Span::styled(key, Style::new().fg(colors::MUTED)),
+        ]
+    } else {
+        vec![
+            Span::styled(format!("{prefix}{icon} "), Style::new().fg(colors::MUTED)),
+            Span::styled(label, Style::new().fg(colors::TEXT)),
+            Span::raw(padding),
+            Span::styled(key, Style::new().fg(colors::MUTED)),
+        ]
+    };
+    Line::from(spans)
+}
+
 fn render_landing_footer(frame: &mut Frame, app: &App, area: Rect) {
     let repo = app.repo();
+    let separator = || Span::raw("  ");
     let mut spans: Vec<Span> = Vec::new();
 
-    // jj
-    let (jj_sym, jj_style) = tool_status_indicator(&repo.jj);
-    spans.push(Span::styled(format!("{} jj", jj_sym), jj_style));
-    spans.push(Span::styled("  ", ratatui::style::Style::new()));
+    let push_tool = |spans: &mut Vec<Span>, name: &'static str, status: &ToolStatus| {
+        let (sym, style) = tool_status_indicator(status);
+        spans.push(Span::styled(format!("{sym} {name}"), style));
+    };
 
-    // git
-    let (git_sym, git_style) = tool_status_indicator(&repo.git);
-    spans.push(Span::styled(format!("{} git", git_sym), git_style));
-    spans.push(Span::styled("  ", ratatui::style::Style::new()));
-
-    // tea
-    let (tea_sym, tea_style) = tool_status_indicator(&repo.tea);
-    spans.push(Span::styled(format!("{} tea", tea_sym), tea_style));
-    spans.push(Span::styled("  ", ratatui::style::Style::new()));
+    push_tool(&mut spans, "jj", &repo.jj);
+    spans.push(separator());
+    push_tool(&mut spans, "git", &repo.git);
+    spans.push(separator());
+    push_tool(&mut spans, "tea", &repo.tea);
+    spans.push(separator());
 
     // LLM backend
-    let active_backend = repo
-        .llm_backends
-        .iter()
-        .find(|b| b.name == repo.llm_active);
-    if let Some(backend) = active_backend {
-        let (llm_sym, llm_style) = match &backend.status {
-            LlmStatus::Reachable => ("✓", ratatui::style::Style::new().fg(colors::GOOD)),
-            LlmStatus::Unreachable(_) => ("✗", ratatui::style::Style::new().fg(colors::BAD)),
-            LlmStatus::Unknown(_) => ("·", ratatui::style::Style::new().fg(colors::MUTED)),
-        };
+    if let Some(backend) = repo.llm_backends.iter().find(|b| b.name == repo.llm_active) {
+        let (sym, style) = llm_status_indicator(&backend.status);
         spans.push(Span::styled(
-            format!("{} LLM: {}/{}", llm_sym, backend.name, backend.backend_type),
-            llm_style,
+            format!("{} LLM: {}/{}", sym, backend.name, backend.backend_type),
+            style,
         ));
     } else {
-        spans.push(Span::styled(
-            "· LLM: (none)",
-            ratatui::style::Style::new().fg(colors::MUTED),
-        ));
+        spans.push(Span::styled("· LLM: (none)", Style::new().fg(colors::MUTED)));
     }
 
-    // workspace
-    spans.push(Span::styled("  ", ratatui::style::Style::new()));
+    spans.push(separator());
     let (ws_sym, ws_style) = if repo.inside_workspace {
-        ("✓", ratatui::style::Style::new().fg(colors::GOOD))
+        ("✓", Style::new().fg(colors::GOOD))
     } else {
-        ("·", ratatui::style::Style::new().fg(colors::MUTED))
+        ("·", Style::new().fg(colors::MUTED))
     };
-    spans.push(Span::styled(format!("{} workspace", ws_sym), ws_style));
+    spans.push(Span::styled(format!("{ws_sym} workspace"), ws_style));
 
     frame.render_widget(
         Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
@@ -233,13 +200,19 @@ fn render_landing_footer(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-fn tool_status_indicator(status: &ToolStatus) -> (&'static str, ratatui::style::Style) {
+fn tool_status_indicator(status: &ToolStatus) -> (&'static str, Style) {
     match status {
-        ToolStatus::Available => ("✓", ratatui::style::Style::new().fg(colors::GOOD)),
-        ToolStatus::Missing | ToolStatus::Unknown => {
-            ("·", ratatui::style::Style::new().fg(colors::MUTED))
-        }
-        ToolStatus::Error(_) => ("✗", ratatui::style::Style::new().fg(colors::BAD)),
+        ToolStatus::Available => ("✓", Style::new().fg(colors::GOOD)),
+        ToolStatus::Missing | ToolStatus::Unknown => ("·", Style::new().fg(colors::MUTED)),
+        ToolStatus::Error(_) => ("✗", Style::new().fg(colors::BAD)),
+    }
+}
+
+fn llm_status_indicator(status: &LlmStatus) -> (&'static str, Style) {
+    match status {
+        LlmStatus::Reachable => ("✓", Style::new().fg(colors::GOOD)),
+        LlmStatus::Unreachable(_) => ("✗", Style::new().fg(colors::BAD)),
+        LlmStatus::Unknown(_) => ("·", Style::new().fg(colors::MUTED)),
     }
 }
 
