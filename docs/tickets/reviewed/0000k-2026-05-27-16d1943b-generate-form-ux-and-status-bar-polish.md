@@ -2,8 +2,8 @@
 id: 0000k-2026-05-27-16d1943b-generate-form-ux-and-status-bar-polish
 created_at: 2026-05-27T15:29:07+02:00
 created_by_model: claude-sonnet-4-6
-state: implemented
-state_updated_at: 2026-05-27T16:00:13+02:00
+state: reviewed
+state_updated_at: 2026-05-27T16:03:36+02:00
 ---
 # Generate Form UX and Status Bar Polish
 
@@ -111,3 +111,43 @@ None. Implementation followed the plan exactly. The separator string uses `â”
 
 - Separator line is fixed-width (30 `â”€` chars). If the form pane is wider, it won't span the full width, but this matches the design decision in the ticket to use a fixed-length dim separator.
 - The `(N/M)` counter uses `generate.selected_field` directly, which is correct when the focused field is the selected field (the only case where `focused=true` is passed).
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: claude-opus-4-7
+- reviewed_at: 2026-05-27T16:03:36+02:00
+- state: reviewed
+
+# Review postmortem: 0000k generate form ux and status bar polish
+
+## Verdict
+Accepted with one minor polish applied during review.
+
+## What was verified
+- `cargo build` clean, no warnings.
+- `cargo check` clean.
+- Read full `src/ui.rs` and compared all touched functions against the ticket plan and acceptance criteria.
+
+## Acceptance criteria
+- Dim separator between each field (not after last): present at `render_generate_fields` lines 423-445. Uses `last = total.saturating_sub(1)` and `index < last` guard. Correct.
+- `(N/M)` index counter on focused field header: present in `render_generate_field` lines 936-989. Only emitted when `focused == true`. All three call sites pass `FieldId::ALL.len()` for `total_fields`.
+- Status bar `â”‚` dividers in SURFACE1: present in `render_status` lines 586-630 via interleaved `Span::styled(" â”‚ ", Style::new().fg(colors::SURFACE1))`, with the final divider correctly omitted via `i < last_idx`.
+- `cargo build` clean with no new warnings: confirmed.
+
+## Changes applied during review
+The original implementation only added the `(N/M)` counter via `render_generate_field`. In Editing mode, `render_generate_editor` renders its own header (`â–¶ {label}`) for the focused field, bypassing `render_generate_field`, so the counter was missing exactly when the user is most engaged with a field. Added the suffix to the editor-mode header for consistent UX:
+
+- `src/ui.rs` `render_generate_editor`: header now `format!("â–¶ {}  ({}/{})", selected.label(), app.generate().selected_field + 1, total)` using the already-computed `total = FieldId::ALL.len()`.
+
+This is a literal extension of the ticket's intent ("field index counter shows (N/M) on focused field header") â€” the editor-mode header is the most focused state â€” and required no new parameters or surface changes.
+
+## Observations (no action taken)
+- Separator is a fixed 30-char run as the ticket explicitly designed. If the form pane is wider it won't span the full width; ticket intentionally avoids threading `Rect` width.
+- `Span` clone of the divider in `render_status` is cheap (interior `Cow`/`Style`) â€” fine.
+- `index_suffix` correctness relies on the call-site invariant that `focused == true` implies `selected == true` (so `generate.selected_field` is the right N). All three current call sites uphold this; if a future caller passes `focused=true` for a non-selected field the suffix would be wrong. Low risk given the small surface; not worth refactoring to take N as a parameter for now.
+
+## Files touched in review
+- `C:\Users\pdao\projects\teatui-rs\teatui\src\ui.rs`
