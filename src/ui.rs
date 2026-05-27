@@ -1,10 +1,12 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::Stylize,
+    style::{Style, Stylize},
     text::Line,
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, List, ListItem, Padding, Paragraph, Wrap},
 };
+
+use crate::colors;
 
 use crate::app::{App, JobRecord, Screen};
 use crate::generate::{
@@ -86,11 +88,10 @@ fn render_menu(frame: &mut Frame, app: &App, area: Rect) {
         ),
     };
 
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(focused_title(title, app.focus() == Focus::Menu)),
-    );
+    let list = List::new(items).block(themed_block(
+        focused_title(title, app.focus() == Focus::Menu),
+        app.focus() == Focus::Menu,
+    ));
 
     frame.render_widget(list, area);
 }
@@ -100,7 +101,7 @@ fn selectable_list(labels: &[&str], selected: usize) -> Vec<ListItem<'static>> {
         .iter()
         .enumerate()
         .map(|(index, label)| {
-            let marker = if index == selected { ">" } else { " " };
+            let marker = if index == selected { "▶" } else { " " };
             let line = format!("{marker} {label}");
             list_item(&line, index == selected)
         })
@@ -109,9 +110,9 @@ fn selectable_list(labels: &[&str], selected: usize) -> Vec<ListItem<'static>> {
 
 fn list_item(text: &str, selected: bool) -> ListItem<'static> {
     if selected {
-        ListItem::new(text.to_string().bold().cyan())
+        ListItem::new(text.to_string().bold().fg(colors::ACCENT))
     } else {
-        ListItem::new(text.to_string().dim())
+        ListItem::new(text.to_string().fg(colors::MUTED))
     }
 }
 
@@ -164,9 +165,9 @@ fn render_work(frame: &mut Frame, app: &App, area: Rect) {
             ));
 
             if let Some(remote) = &repo.remote {
-                lines.push(Line::from(format!("Remote URL: {}", remote.raw_url)).dim());
+                lines.push(Line::from(format!("Remote URL: {}", remote.raw_url)).fg(colors::MUTED));
                 if let Some(warning) = &remote.warning {
-                    lines.push(Line::from(format!("Remote warning: {warning}")).yellow());
+                    lines.push(Line::from(format!("Remote warning: {warning}")).fg(colors::WARN));
                 }
             }
 
@@ -181,14 +182,14 @@ fn render_work(frame: &mut Frame, app: &App, area: Rect) {
             ));
             if let Some(detail) = repo.tea_auth.detail() {
                 lines.push(match &repo.tea_auth {
-                    TeaAuth::Error(_) => Line::from(detail.to_string()).red(),
-                    _ => Line::from(detail.to_string()).dim(),
+                    TeaAuth::Error(_) => Line::from(detail.to_string()).fg(colors::BAD),
+                    _ => Line::from(detail.to_string()).fg(colors::MUTED),
                 });
             }
             if let TeaAuth::Configured { host, user } = &repo.tea_auth {
-                lines.push(Line::from(format!("Tea host: {host}")).green());
+                lines.push(Line::from(format!("Tea host: {host}")).fg(colors::GOOD));
                 if let Some(user) = user {
-                    lines.push(Line::from(format!("Tea user: {user}")).green());
+                    lines.push(Line::from(format!("Tea user: {user}")).fg(colors::GOOD));
                 }
             }
 
@@ -198,9 +199,9 @@ fn render_work(frame: &mut Frame, app: &App, area: Rect) {
                 "Base branch: {}",
                 repo.base_branch.name
             )));
-            lines.push(Line::from(format!("Logs: {}", app.logs().entries.len())).dim());
+            lines.push(Line::from(format!("Logs: {}", app.logs().entries.len())).fg(colors::MUTED));
             lines.push(Line::from(""));
-            lines.push(Line::from("Select a mode on the left.".dim()));
+            lines.push(Line::from("Select a mode on the left.".fg(colors::MUTED)));
             lines
         }
         Screen::Generate
@@ -214,14 +215,14 @@ fn render_work(frame: &mut Frame, app: &App, area: Rect) {
         Screen::PullRequests => vec![
             Line::from("Manage PRs".bold()),
             Line::from(""),
-            Line::from("List open PRs, preview details, and add a simple comment.".dim()),
-            Line::from("This mode stays intentionally small.".dim()),
+            Line::from("List open PRs, preview details, and add a simple comment.".fg(colors::MUTED)),
+            Line::from("This mode stays intentionally small.".fg(colors::MUTED)),
         ],
         Screen::Issues => vec![
             Line::from("Manage Issues".bold()),
             Line::from(""),
-            Line::from("List open issues, preview details, and add a simple comment.".dim()),
-            Line::from("This mode stays intentionally small.".dim()),
+            Line::from("List open issues, preview details, and add a simple comment.".fg(colors::MUTED)),
+            Line::from("This mode stays intentionally small.".fg(colors::MUTED)),
         ],
     };
 
@@ -232,11 +233,10 @@ fn render_work(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let form = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(focused_title(title, app.focus() == Focus::Form)),
-        )
+        .block(themed_block(
+            focused_title(title, app.focus() == Focus::Form),
+            app.focus() == Focus::Form,
+        ))
         .wrap(Wrap { trim: false });
     frame.render_widget(form, area);
 }
@@ -258,9 +258,7 @@ fn render_generate_fields(app: &App) -> Vec<Line<'static>> {
 
 fn render_generate_editor(frame: &mut Frame, app: &App, area: Rect) {
     let title = generate_work_title(app.generate().phase);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(focused_title(title, true));
+    let block = themed_block(focused_title(title, true), true);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -320,7 +318,10 @@ fn render_generate_editor(frame: &mut Frame, app: &App, area: Rect) {
         before_area,
     );
     frame.render_widget(
-        Paragraph::new(Line::from(format!("> {}", selected.label())).bold().cyan()),
+        Paragraph::new(
+            Line::from(format!("▶ {}", selected.label()))
+                .style(Style::new().bold().fg(colors::ACCENT)),
+        ),
         header_area,
     );
     frame.render_widget(&field.editor, editor_area);
@@ -328,7 +329,7 @@ fn render_generate_editor(frame: &mut Frame, app: &App, area: Rect) {
     let errors = field
         .errors
         .iter()
-        .map(|error| Line::from(format!("    - {error}")).red())
+        .map(|error| Line::from(format!("    - {error}")).fg(colors::BAD))
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(errors), errors_area);
     frame.render_widget(Paragraph::new(after).wrap(Wrap { trim: false }), after_area);
@@ -353,7 +354,7 @@ fn render_preview(frame: &mut Frame, app: &App, area: Rect) {
                 Line::from("Landing".bold()),
                 Line::from(""),
                 Line::from("Generate PR, Manage PRs, and Manage Issues are separate modes."),
-                Line::from("Press Enter to open the selected mode.".dim()),
+                Line::from("Press Enter to open the selected mode.".fg(colors::MUTED)),
             ];
 
             let blockers = app.repo().blocker_lines();
@@ -361,7 +362,7 @@ fn render_preview(frame: &mut Frame, app: &App, area: Rect) {
                 lines.push(Line::from(""));
                 lines.push(Line::from("Setup blockers".bold()));
                 for blocker in blockers {
-                    lines.push(Line::from(format!("- {blocker}")).red());
+                    lines.push(Line::from(format!("- {blocker}")).fg(colors::BAD));
                 }
             }
 
@@ -372,22 +373,21 @@ fn render_preview(frame: &mut Frame, app: &App, area: Rect) {
             Line::from("PR Preview".bold()),
             Line::from(""),
             Line::from("Selected PR body, status, and comments will appear here."),
-            Line::from("Esc returns to Landing.".dim()),
+            Line::from("Esc returns to Landing.".fg(colors::MUTED)),
         ],
         Screen::Issues => vec![
             Line::from("Issue Preview".bold()),
             Line::from(""),
             Line::from("Selected issue body and comments will appear here."),
-            Line::from("Esc returns to Landing.".dim()),
+            Line::from("Esc returns to Landing.".fg(colors::MUTED)),
         ],
     };
 
     let preview = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(focused_title("Preview", app.focus() == Focus::Preview)),
-        )
+        .block(themed_block(
+            focused_title("Preview", app.focus() == Focus::Preview),
+            app.focus() == Focus::Preview,
+        ))
         .wrap(Wrap { trim: false });
     frame.render_widget(preview, area);
 }
@@ -400,24 +400,29 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let mut segments = vec![
-        format!(" {} ", app.input_mode().label()).bold().on_cyan(),
-        format!(" {} ", app.screen().title()).dim(),
-        format!(" {focus} ").dim(),
+        format!(" {} ", app.input_mode().label())
+            .bold()
+            .fg(colors::BASE)
+            .bg(colors::ACCENT),
+        format!(" {} ", app.screen().title()).fg(colors::MUTED),
+        format!(" {focus} ").fg(colors::MUTED),
     ];
 
     if app.screen() == Screen::Generate {
-        segments.push(format!(" phase:{} ", app.generate().phase.label()).dim());
+        segments.push(
+            format!(" phase:{} ", app.generate().phase.label()).fg(colors::MUTED),
+        );
         let job_segment = app
             .jobs()
             .active_status()
             .map(|status| format!(" job:{} ", status.label()))
             .unwrap_or_else(|| " job:idle ".to_string());
-        segments.push(job_segment.dim());
+        segments.push(job_segment.fg(colors::MUTED));
         let prompt_mode = match app.generate().prompt_view {
             PromptView::Manifest => "prompt:manifest",
             PromptView::Prompt => "prompt:text",
         };
-        segments.push(format!(" {prompt_mode} ").dim());
+        segments.push(format!(" {prompt_mode} ").fg(colors::MUTED));
     }
 
     frame.render_widget(Paragraph::new(Line::from(segments)), area);
@@ -426,103 +431,103 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
 fn render_help(frame: &mut Frame, app: &App, area: Rect) {
     let help = match app.screen() {
         Screen::Landing => Line::from(vec![
-            " ↑/k ".bold().cyan(),
-            "up ".dim(),
-            " ↓/j ".bold().cyan(),
-            "down ".dim(),
-            " Enter ".bold().cyan(),
-            "open ".dim(),
-            " Esc ".bold().cyan(),
-            "back ".dim(),
-            " q ".bold().cyan(),
-            "quit ".dim(),
+            " ↑/k ".bold().fg(colors::ACCENT),
+            "up ".fg(colors::MUTED),
+            " ↓/j ".bold().fg(colors::ACCENT),
+            "down ".fg(colors::MUTED),
+            " Enter ".bold().fg(colors::ACCENT),
+            "open ".fg(colors::MUTED),
+            " Esc ".bold().fg(colors::ACCENT),
+            "back ".fg(colors::MUTED),
+            " q ".bold().fg(colors::ACCENT),
+            "quit ".fg(colors::MUTED),
         ]),
         Screen::Generate if app.input_mode() == crate::generate::InputMode::Editing => {
             Line::from(vec![
-                " typing ".bold().cyan(),
-                "edit field ".dim(),
-                " Enter ".bold().cyan(),
-                "save single-line / newline description ".dim(),
-                " Ctrl+S ".bold().cyan(),
-                "commit description ".dim(),
-                " Esc ".bold().cyan(),
-                "cancel ".dim(),
+                " typing ".bold().fg(colors::ACCENT),
+                "edit field ".fg(colors::MUTED),
+                " Enter ".bold().fg(colors::ACCENT),
+                "save single-line / newline description ".fg(colors::MUTED),
+                " Ctrl+S ".bold().fg(colors::ACCENT),
+                "commit description ".fg(colors::MUTED),
+                " Esc ".bold().fg(colors::ACCENT),
+                "cancel ".fg(colors::MUTED),
             ])
         }
         Screen::Generate if app.input_mode() == crate::generate::InputMode::Confirm => {
             Line::from(vec![
-                " Enter ".bold().cyan(),
-                "execute ".dim(),
-                " Esc ".bold().cyan(),
-                "cancel ".dim(),
+                " Enter ".bold().fg(colors::ACCENT),
+                "execute ".fg(colors::MUTED),
+                " Esc ".bold().fg(colors::ACCENT),
+                "cancel ".fg(colors::MUTED),
             ])
         }
         Screen::Generate if app.generate().phase == GeneratePhase::CheckingFreshness => {
             Line::from(vec![
-                " Esc ".bold().cyan(),
-                "cancel ".dim(),
-                " waiting ".dim(),
-                "verifying repo context ".dim(),
+                " Esc ".bold().fg(colors::ACCENT),
+                "cancel ".fg(colors::MUTED),
+                " waiting ".fg(colors::MUTED),
+                "verifying repo context ".fg(colors::MUTED),
             ])
         }
         Screen::Generate if app.generate().phase == GeneratePhase::Executing => Line::from(vec![
-            " waiting ".dim(),
-            "execution in progress ".dim(),
-            " Esc ".bold().cyan(),
-            "ignored ".dim(),
+            " waiting ".fg(colors::MUTED),
+            "execution in progress ".fg(colors::MUTED),
+            " Esc ".bold().fg(colors::ACCENT),
+            "ignored ".fg(colors::MUTED),
         ]),
         Screen::Generate if app.generate().phase == GeneratePhase::Complete => Line::from(vec![
-            " Esc ".bold().cyan(),
-            "back ".dim(),
-            " execution done ".dim(),
+            " Esc ".bold().fg(colors::ACCENT),
+            "back ".fg(colors::MUTED),
+            " execution done ".fg(colors::MUTED),
         ]),
         Screen::Generate if app.generate().phase == GeneratePhase::Failed => Line::from(vec![
-            " c ".bold().cyan(),
-            "retry ".dim(),
-            " Esc ".bold().cyan(),
-            "back ".dim(),
+            " c ".bold().fg(colors::ACCENT),
+            "retry ".fg(colors::MUTED),
+            " Esc ".bold().fg(colors::ACCENT),
+            "back ".fg(colors::MUTED),
         ]),
         Screen::Generate if app.focus() == Focus::Preview => Line::from(vec![
-            " p ".bold().cyan(),
-            "toggle prompt ".dim(),
-            " g ".bold().cyan(),
-            "regenerate ".dim(),
-            " Esc ".bold().cyan(),
-            "back ".dim(),
+            " p ".bold().fg(colors::ACCENT),
+            "toggle prompt ".fg(colors::MUTED),
+            " g ".bold().fg(colors::ACCENT),
+            "regenerate ".fg(colors::MUTED),
+            " Esc ".bold().fg(colors::ACCENT),
+            "back ".fg(colors::MUTED),
         ]),
         Screen::Generate => Line::from(vec![
-            " ↑/k ".bold().cyan(),
-            "up ".dim(),
-            " ↓/j ".bold().cyan(),
-            "down ".dim(),
-            " h/l ".bold().cyan(),
-            "move focus ".dim(),
-            " Enter ".bold().cyan(),
-            "select/edit ".dim(),
-            " i ".bold().cyan(),
-            "edit ".dim(),
-            " g ".bold().cyan(),
-            "generate ".dim(),
-            " c ".bold().cyan(),
-            "confirm ".dim(),
-            " p ".bold().cyan(),
-            "prompt ".dim(),
-            " r ".bold().cyan(),
-            "refresh ".dim(),
-            " Esc ".bold().cyan(),
-            "back ".dim(),
+            " ↑/k ".bold().fg(colors::ACCENT),
+            "up ".fg(colors::MUTED),
+            " ↓/j ".bold().fg(colors::ACCENT),
+            "down ".fg(colors::MUTED),
+            " h/l ".bold().fg(colors::ACCENT),
+            "move focus ".fg(colors::MUTED),
+            " Enter ".bold().fg(colors::ACCENT),
+            "select/edit ".fg(colors::MUTED),
+            " i ".bold().fg(colors::ACCENT),
+            "edit ".fg(colors::MUTED),
+            " g ".bold().fg(colors::ACCENT),
+            "generate ".fg(colors::MUTED),
+            " c ".bold().fg(colors::ACCENT),
+            "confirm ".fg(colors::MUTED),
+            " p ".bold().fg(colors::ACCENT),
+            "prompt ".fg(colors::MUTED),
+            " r ".bold().fg(colors::ACCENT),
+            "refresh ".fg(colors::MUTED),
+            " Esc ".bold().fg(colors::ACCENT),
+            "back ".fg(colors::MUTED),
         ]),
         Screen::PullRequests | Screen::Issues => Line::from(vec![
-            " ↑/k ".bold().cyan(),
-            "up ".dim(),
-            " ↓/j ".bold().cyan(),
-            "down ".dim(),
-            " Enter ".bold().cyan(),
-            "select ".dim(),
-            " c ".bold().cyan(),
-            "comment ".dim(),
-            " Esc ".bold().cyan(),
-            "back ".dim(),
+            " ↑/k ".bold().fg(colors::ACCENT),
+            "up ".fg(colors::MUTED),
+            " ↓/j ".bold().fg(colors::ACCENT),
+            "down ".fg(colors::MUTED),
+            " Enter ".bold().fg(colors::ACCENT),
+            "select ".fg(colors::MUTED),
+            " c ".bold().fg(colors::ACCENT),
+            "comment ".fg(colors::MUTED),
+            " Esc ".bold().fg(colors::ACCENT),
+            "back ".fg(colors::MUTED),
         ]),
     };
     frame.render_widget(Paragraph::new(help), area);
@@ -530,10 +535,24 @@ fn render_help(frame: &mut Frame, app: &App, area: Rect) {
 
 fn focused_title(title: &'static str, focused: bool) -> Line<'static> {
     if focused {
-        title.bold().cyan().into()
+        Line::from(title.bold().fg(colors::ACCENT))
     } else {
-        title.dim().into()
+        Line::from(title.fg(colors::MUTED))
     }
+}
+
+fn themed_block(title: Line<'static>, focused: bool) -> Block<'static> {
+    let border_style = if focused {
+        Style::new().fg(colors::FOCUSED_BORDER)
+    } else {
+        Style::new().fg(colors::BORDER)
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(border_style)
+        .title(title)
+        .padding(Padding::horizontal(1))
 }
 
 #[derive(Clone, Copy)]
@@ -554,9 +573,9 @@ fn tool_tone(status: &ToolStatus) -> StatusTone {
 fn status_line(label: &str, value: impl Into<String>, tone: StatusTone) -> Line<'static> {
     let line = Line::from(format!("{label}: {}", value.into()));
     match tone {
-        StatusTone::Good => line.green(),
-        StatusTone::Muted => line.dim(),
-        StatusTone::Bad => line.red(),
+        StatusTone::Good => line.fg(colors::GOOD),
+        StatusTone::Muted => line.fg(colors::MUTED),
+        StatusTone::Bad => line.fg(colors::BAD),
     }
 }
 
@@ -577,12 +596,12 @@ fn render_llm_lines(repo: &crate::repo::RepoState) -> Vec<Line<'static>> {
                 LlmStatus::Unknown(_) => StatusTone::Muted,
             },
         ));
-        lines.push(Line::from(format!("LLM endpoint: {}", backend.base_url)).dim());
-        lines.push(Line::from(format!("LLM model: {}", backend.model)).dim());
+        lines.push(Line::from(format!("LLM endpoint: {}", backend.base_url)).fg(colors::MUTED));
+        lines.push(Line::from(format!("LLM model: {}", backend.model)).fg(colors::MUTED));
         if let Some(detail) = backend.status.detail() {
             lines.push(match &backend.status {
-                LlmStatus::Unreachable(_) => Line::from(detail.to_string()).red(),
-                _ => Line::from(detail.to_string()).dim(),
+                LlmStatus::Unreachable(_) => Line::from(detail.to_string()).fg(colors::BAD),
+                _ => Line::from(detail.to_string()).fg(colors::MUTED),
             });
         }
     } else {
@@ -619,9 +638,9 @@ fn render_prompt_manifest(prompt: &PromptBuild) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from("Prompt manifest".bold()),
         Line::from(""),
-        Line::from(format!("selected revset: {}", manifest.selected_revset).cyan()),
+        Line::from(format!("selected revset: {}", manifest.selected_revset).fg(colors::ACCENT)),
         Line::from(format!("base branch: {}", manifest.base_branch)),
-        Line::from(format!("prompt bytes: {}", manifest.byte_count)).dim(),
+        Line::from(format!("prompt bytes: {}", manifest.byte_count)).fg(colors::MUTED),
         Line::from(format!(
             "included sections: {}",
             manifest.included_sections.len()
@@ -662,7 +681,7 @@ fn render_prompt_manifest(prompt: &PromptBuild) -> Vec<Line<'static>> {
         lines.push(Line::from(""));
         lines.push(Line::from("Truncation warnings".bold()));
         for warning in &manifest.truncation_warnings {
-            lines.push(Line::from(warning.clone()).yellow());
+            lines.push(Line::from(warning.clone()).fg(colors::WARN));
         }
     }
 
@@ -691,13 +710,13 @@ fn render_prompt_manifest(prompt: &PromptBuild) -> Vec<Line<'static>> {
                     "- {}: {} ({} bytes)",
                     section.title, section.reason, section.byte_count
                 ))
-                .red(),
+                .fg(colors::BAD),
             );
         }
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from("Press p to view the full prompt text.".dim()));
+    lines.push(Line::from("Press p to view the full prompt text.".fg(colors::MUTED)));
     lines
 }
 
@@ -709,7 +728,7 @@ fn render_prompt_text(prompt: &PromptBuild) -> Vec<Line<'static>> {
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from("Press p to return to the manifest.".dim()));
+    lines.push(Line::from("Press p to return to the manifest.".fg(colors::MUTED)));
     lines
 }
 
@@ -723,7 +742,7 @@ fn render_generate_field(
     let label = field_id.label();
     let value = field.display_value().to_string();
     let error_count = field.errors.len();
-    let marker = if selected { ">" } else { " " };
+    let marker = if selected { "▶" } else { " " };
     let header = if matches!(field_id, FieldId::Description) {
         if error_count > 0 {
             format!("{marker} {label} ({error_count} errors)")
@@ -739,14 +758,14 @@ fn render_generate_field(
     let mut lines =
         Vec::with_capacity(1 + error_count + usize::from(matches!(field_id, FieldId::Description)));
     if focused {
-        lines.push(Line::from(header.bold().cyan()));
+        lines.push(Line::from(header.bold().fg(colors::ACCENT)));
     } else {
-        lines.push(Line::from(header.dim()));
+        lines.push(Line::from(header.fg(colors::MUTED)));
     }
 
     if matches!(field_id, FieldId::Description) {
         if value.trim().is_empty() {
-            lines.push(Line::from("    (empty)").dim());
+            lines.push(Line::from("    (empty)").fg(colors::MUTED));
         } else {
             for line in value.lines() {
                 lines.push(Line::from(format!("    {line}")));
@@ -755,7 +774,7 @@ fn render_generate_field(
     }
 
     for error in &field.errors {
-        lines.push(Line::from(format!("    - {error}")).red());
+        lines.push(Line::from(format!("    - {error}")).fg(colors::BAD));
     }
 
     lines
@@ -767,16 +786,16 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from("Selected Revset".bold()),
         Line::from(""),
-        Line::from(format!("revset: {}", revset.label()).cyan()),
+        Line::from(format!("revset: {}", revset.label()).fg(colors::ACCENT)),
         Line::from(format!("description: {}", revset.description())),
-        Line::from(format!("bookmarks: {}", revset.bookmarks().join(", ")).dim()),
-        Line::from(format!("stats: {}", revset.stats()).dim()),
+        Line::from(format!("bookmarks: {}", revset.bookmarks().join(", ")).fg(colors::MUTED)),
+        Line::from(format!("stats: {}", revset.stats()).fg(colors::MUTED)),
         Line::from(format!("commits: {}", revset.commit_count())),
         Line::from(format!("commit ids: {}", revset.commit_ids().join(", "))),
         Line::from(format!("change ids: {}", revset.change_ids().join(", "))),
         Line::from(""),
-        Line::from(format!("phase: {}", generate.phase.label()).dim()),
-        Line::from(format!("input mode: {}", app.input_mode().label()).dim()),
+        Line::from(format!("phase: {}", generate.phase.label()).fg(colors::MUTED)),
+        Line::from(format!("input mode: {}", app.input_mode().label()).fg(colors::MUTED)),
         Line::from(format!("focused field: {}", generate.selected_field_name())),
         Line::from(format!(
             "base branch: {} ({:?})",
@@ -797,18 +816,18 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
                 "base branch: {}",
                 generate.form.base.display_value()
             )));
-            lines.push(Line::from("jj status".dim()));
-            lines.push(Line::from("jj log".dim()));
-            lines.push(Line::from("jj diff --stat".dim()));
-            lines.push(Line::from("jj diff".dim()));
+            lines.push(Line::from("jj status".fg(colors::MUTED)));
+            lines.push(Line::from("jj log".fg(colors::MUTED)));
+            lines.push(Line::from("jj diff --stat".fg(colors::MUTED)));
+            lines.push(Line::from("jj diff".fg(colors::MUTED)));
         }
         GeneratePhase::Generating => {
             lines.push(Line::from(""));
             lines.push(Line::from("Generating draft".bold()));
             lines.push(Line::from(
-                "The retained draft stays visible while a fresh response is requested.".dim(),
+                "The retained draft stays visible while a fresh response is requested.".fg(colors::MUTED),
             ));
-            lines.push(Line::from("Waiting for a validated JSON draft.".dim()));
+            lines.push(Line::from("Waiting for a validated JSON draft.".fg(colors::MUTED)));
             if let Some(draft) = generate.draft.as_ref() {
                 lines.push(Line::from(""));
                 lines.extend(render_draft_section(draft));
@@ -832,9 +851,9 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
         GeneratePhase::DraftReady => {
             lines.push(Line::from(""));
             lines.push(Line::from("Draft review".bold()));
-            lines.push(Line::from(format!("status: {}", generate.review.summary)).cyan());
+            lines.push(Line::from(format!("status: {}", generate.review.summary)).fg(colors::ACCENT));
             lines.push(Line::from(
-                "The generated draft is editable in the center pane.".dim(),
+                "The generated draft is editable in the center pane.".fg(colors::MUTED),
             ));
             if let Some(draft) = generate.draft.as_ref() {
                 lines.push(Line::from(""));
@@ -849,10 +868,10 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             lines.push(Line::from(""));
             lines.push(Line::from(
                 "The execution preview will show branch, push, and tea commands before mutation."
-                    .yellow(),
+                    .fg(colors::WARN),
             ));
             lines.push(Line::from(
-                "Press c to validate the execution plan and check repo freshness.".dim(),
+                "Press c to validate the execution plan and check repo freshness.".fg(colors::MUTED),
             ));
         }
         GeneratePhase::CheckingFreshness => {
@@ -865,7 +884,7 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
                     .map(|summary| format!("validation: {summary}"))
                     .unwrap_or_else(|| "validation: running".to_string()),
             ));
-            lines.push(Line::from("freshness: verifying repo context...").yellow());
+            lines.push(Line::from("freshness: verifying repo context...").fg(colors::WARN));
             if let Some(draft) = generate.draft.as_ref() {
                 lines.push(Line::from(""));
                 lines.extend(render_draft_section(draft));
@@ -873,7 +892,7 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             lines.push(Line::from(""));
             lines.extend(render_recent_logs(&app.logs().entries, 6));
             lines.push(Line::from(""));
-            lines.push(Line::from("Wait for the freshness check to finish.".dim()));
+            lines.push(Line::from("Wait for the freshness check to finish.".fg(colors::MUTED)));
         }
         GeneratePhase::Confirming => {
             lines.push(Line::from(""));
@@ -886,11 +905,11 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
                     .unwrap_or_else(|| "validation: passed".to_string()),
             ));
             lines.push(match generate.freshness_result.as_ref() {
-                Some(StaleCheckResult::Fresh) => Line::from("freshness: verified").green(),
+                Some(StaleCheckResult::Fresh) => Line::from("freshness: verified").fg(colors::GOOD),
                 Some(StaleCheckResult::Stale { reason }) => {
-                    Line::from(format!("freshness: stale - {reason}")).red()
+                    Line::from(format!("freshness: stale - {reason}")).fg(colors::BAD)
                 }
-                None => Line::from("freshness: unavailable").yellow(),
+                None => Line::from("freshness: unavailable").fg(colors::WARN),
             });
             if let Some(plan) = generate.execution_plan.as_ref() {
                 lines.push(Line::from(""));
@@ -899,19 +918,19 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             lines.push(Line::from(""));
             lines.extend(render_recent_logs(&app.logs().entries, 6));
             lines.push(Line::from(""));
-            lines.push(Line::from("Press Enter to start execution.".yellow()));
+            lines.push(Line::from("Press Enter to start execution.".fg(colors::WARN)));
         }
         GeneratePhase::Executing => {
             lines.push(Line::from(""));
             lines.push(Line::from("Executing PR plan".bold()));
             if let Some(step) = generate.execution_step {
                 let total = generate.execution_total.unwrap_or(0);
-                lines.push(Line::from(format!("step: {}/{}", step + 1, total)).cyan());
+                lines.push(Line::from(format!("step: {}/{}", step + 1, total)).fg(colors::ACCENT));
             }
             lines.push(Line::from(
-                "The current step stays visible in the job registry.".dim(),
+                "The current step stays visible in the job registry.".fg(colors::MUTED),
             ));
-            lines.push(Line::from("Wait for the current command to finish.".dim()));
+            lines.push(Line::from("Wait for the current command to finish.".fg(colors::MUTED)));
             lines.push(Line::from(""));
             lines.extend(render_job_records(&app.jobs().records));
             if let Some(plan) = generate.execution_plan.as_ref() {
@@ -932,24 +951,24 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
                 lines.push(Line::from(""));
                 lines.extend(render_execution_plan(&completion.plan));
             } else {
-                lines.push(Line::from("completion details unavailable").red());
+                lines.push(Line::from("completion details unavailable").fg(colors::BAD));
             }
             lines.push(Line::from(""));
             lines.extend(render_recent_logs(&app.logs().entries, 6));
             lines.push(Line::from(""));
-            lines.push(Line::from("Press Esc to return to the draft review.".dim()));
+            lines.push(Line::from("Press Esc to return to the draft review.".fg(colors::MUTED)));
         }
         GeneratePhase::Failed => {
             lines.push(Line::from(""));
             lines.push(Line::from("Draft workflow failed".bold()));
-            lines.push(Line::from(format!("status: {}", generate.review.summary)).cyan());
+            lines.push(Line::from(format!("status: {}", generate.review.summary)).fg(colors::ACCENT));
             if let Some(error) = &generate.context_error {
                 lines.push(Line::from("Context failed".bold()));
-                lines.push(Line::from(error.clone()).red());
+                lines.push(Line::from(error.clone()).fg(colors::BAD));
             }
             if let Some(error) = &generate.generation_error {
                 lines.push(Line::from("Generation failed".bold()));
-                lines.push(Line::from(error.clone()).red());
+                lines.push(Line::from(error.clone()).fg(colors::BAD));
             }
             if let Some(draft) = generate.draft.as_ref() {
                 lines.push(Line::from(""));
@@ -961,21 +980,21 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             }
             if let Some(summary) = generate.confirmation_summary.as_ref() {
                 lines.push(Line::from(""));
-                lines.push(Line::from(format!("validation: {summary}")).cyan());
+                lines.push(Line::from(format!("validation: {summary}")).fg(colors::ACCENT));
             }
             if let Some(result) = generate.freshness_result.as_ref() {
                 lines.push(match result {
-                    StaleCheckResult::Fresh => Line::from("freshness: verified").green(),
+                    StaleCheckResult::Fresh => Line::from("freshness: verified").fg(colors::GOOD),
                     StaleCheckResult::Stale { reason } => {
-                        Line::from(format!("freshness: stale - {reason}")).red()
+                        Line::from(format!("freshness: stale - {reason}")).fg(colors::BAD)
                     }
                 });
             }
             if let Some(step) = generate.execution_failed_step {
-                lines.push(Line::from(format!("execution failed at step {}", step + 1)).red());
+                lines.push(Line::from(format!("execution failed at step {}", step + 1)).fg(colors::BAD));
             }
             if let Some(error) = &generate.execution_error {
-                lines.push(Line::from(error.clone()).red());
+                lines.push(Line::from(error.clone()).fg(colors::BAD));
             }
             if let Some(plan) = generate.execution_plan.as_ref() {
                 lines.push(Line::from(""));
@@ -985,7 +1004,7 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             lines.extend(render_recent_logs(&app.logs().entries, 6));
             lines.push(Line::from(""));
             lines.push(Line::from(
-                "Press c to retry with the retained context.".dim(),
+                "Press c to retry with the retained context.".fg(colors::MUTED),
             ));
         }
         _ => {
@@ -995,13 +1014,13 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             }
             lines.push(Line::from(""));
             lines.push(Line::from(
-                "Press Enter on the revset list to move to the PR form.".dim(),
+                "Press Enter on the revset list to move to the PR form.".fg(colors::MUTED),
             ));
             lines.push(Line::from(
-                "Press g from navigation mode to generate using all form values.".dim(),
+                "Press g from navigation mode to generate using all form values.".fg(colors::MUTED),
             ));
             lines.push(Line::from(
-                "Press p to toggle prompt manifest and prompt text.".dim(),
+                "Press p to toggle prompt manifest and prompt text.".fg(colors::MUTED),
             ));
         }
     }
@@ -1012,20 +1031,20 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
 fn render_draft_section(draft: &crate::generate::GeneratedDraft) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from("Generated draft".bold()),
-        Line::from(format!("branch: {}", draft.branch_name).cyan()),
+        Line::from(format!("branch: {}", draft.branch_name).fg(colors::ACCENT)),
         Line::from(format!("title: {}", draft.title)),
-        Line::from(format!("body chars: {}", draft.body.len())).dim(),
+        Line::from(format!("body chars: {}", draft.body.len())).fg(colors::MUTED),
         Line::from(format!(
             "raw response chars: {}",
             draft.raw_model_response.len()
         ))
-        .dim(),
+        .fg(colors::MUTED),
         Line::from(""),
         Line::from("body".bold()),
     ];
 
     if draft.body.trim().is_empty() {
-        lines.push(Line::from("  (empty)").dim());
+        lines.push(Line::from("  (empty)").fg(colors::MUTED));
     } else {
         for line in draft.body.lines() {
             lines.push(Line::from(format!("  {line}")));
@@ -1038,7 +1057,7 @@ fn render_draft_section(draft: &crate::generate::GeneratedDraft) -> Vec<Line<'st
         draft.review_notes.len()
     )));
     if draft.review_notes.is_empty() {
-        lines.push(Line::from("  (no review notes)").dim());
+        lines.push(Line::from("  (no review notes)").fg(colors::MUTED));
     } else {
         for note in &draft.review_notes {
             lines.push(Line::from(format!("  - {note}")));
@@ -1052,8 +1071,8 @@ fn render_execution_plan(plan: &ExecutionPlan) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from("Execution plan".bold())];
 
     for (index, step) in plan.steps.iter().enumerate() {
-        lines.push(Line::from(format!("{}. {}", index + 1, step.label)).cyan());
-        lines.push(Line::from(format!("   {}", step.command.redacted_display())).dim());
+        lines.push(Line::from(format!("{}. {}", index + 1, step.label)).fg(colors::ACCENT));
+        lines.push(Line::from(format!("   {}", step.command.redacted_display())).fg(colors::MUTED));
     }
 
     lines
@@ -1063,7 +1082,7 @@ fn render_job_records(records: &[JobRecord]) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from("Job registry".bold())];
 
     if records.is_empty() {
-        lines.push(Line::from("  (no jobs yet)").dim());
+        lines.push(Line::from("  (no jobs yet)").fg(colors::MUTED));
         return lines;
     }
 
@@ -1080,18 +1099,18 @@ fn render_job_records(records: &[JobRecord]) -> Vec<Line<'static>> {
             record.name, marker, record.command
         )));
         if let Some(duration) = record.duration {
-            lines.push(Line::from(format!("   duration: {:?}", duration)).dim());
+            lines.push(Line::from(format!("   duration: {:?}", duration)).fg(colors::MUTED));
         }
         if record.status.is_active() {
-            lines.push(Line::from("   still running".dim()));
+            lines.push(Line::from("   still running".fg(colors::MUTED)));
         }
         if !record.stderr.trim().is_empty() {
-            lines.push(Line::from(format!("   stderr: {}", record.stderr.trim())).red());
+            lines.push(Line::from(format!("   stderr: {}", record.stderr.trim())).fg(colors::BAD));
         }
         if !record.stdout.trim().is_empty()
             && !matches!(record.status, crate::event::JobStatus::Succeeded)
         {
-            lines.push(Line::from(format!("   stdout: {}", record.stdout.trim())).dim());
+            lines.push(Line::from(format!("   stdout: {}", record.stdout.trim())).fg(colors::MUTED));
         }
     }
 
@@ -1102,10 +1121,10 @@ fn render_manifest_warnings(prompt: &PromptBuild) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from("Prompt manifest warnings".bold())];
 
     if prompt.manifest.truncation_warnings.is_empty() {
-        lines.push(Line::from("  (none)").dim());
+        lines.push(Line::from("  (none)").fg(colors::MUTED));
     } else {
         for warning in &prompt.manifest.truncation_warnings {
-            lines.push(Line::from(format!("  - {warning}")).yellow());
+            lines.push(Line::from(format!("  - {warning}")).fg(colors::WARN));
         }
     }
 
@@ -1120,7 +1139,7 @@ fn render_recent_logs(
     let recent: Vec<_> = entries.iter().rev().take(limit).cloned().collect();
 
     if recent.is_empty() {
-        lines.push(Line::from("  (no logs yet)").dim());
+        lines.push(Line::from("  (no logs yet)").fg(colors::MUTED));
     } else {
         for entry in recent.into_iter().rev() {
             lines.push(Line::from(format!("  {entry}")));

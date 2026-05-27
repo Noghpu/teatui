@@ -1,5 +1,6 @@
 pub mod action;
 pub mod app;
+pub mod colors;
 pub mod command;
 pub mod config;
 pub mod context;

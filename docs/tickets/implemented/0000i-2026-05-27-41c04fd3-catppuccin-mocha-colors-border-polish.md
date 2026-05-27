@@ -2,7 +2,8 @@
 id: 0000i-2026-05-27-41c04fd3-catppuccin-mocha-colors-border-polish
 created_at: 2026-05-27T15:27:55+02:00
 created_by_model: claude-sonnet-4-6
-state: open
+state: implemented
+state_updated_at: 2026-05-27T15:46:16+02:00
 ---
 # Catppuccin Mocha Color Module and Border Polish
 
@@ -119,3 +120,46 @@ The Catppuccin Mocha palette (dark variant) is being adopted as the app's color 
 ## Risks
 - Terminals without true-color support will show incorrect colors; this is an accepted tradeoff for the aesthetic gain
 - Some `.bold()` calls are on `Line` values created from `String` â€” the `Stylize` trait method chains may need refactoring to use `Style::new().fg(...).bold()` applied via `.style()` instead
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: claude-sonnet-4-6
+- completed_at: 2026-05-27T15:46:16+02:00
+- state: implemented
+
+## What was completed
+
+Created `src/colors.rs` with the full Catppuccin Mocha palette (26 raw color constants + 7 semantic aliases). Added `pub mod colors;` to `src/lib.rs`. Updated `src/ui.rs` with:
+
+- `use crate::colors;` import
+- `Padding` and `BorderType` added to widget imports
+- New `themed_block()` helper returning `Block` with `BorderType::Rounded`, `FOCUSED_BORDER`/`BORDER` style, and `Padding::horizontal(1)`
+- All 3 panes (menu, work, preview) switched to `themed_block()` with focus-dependent border color
+- `render_generate_editor` block also uses `themed_block()`
+- `â–¶` replaces `>` in `selectable_list`, `render_generate_field`, and `render_generate_editor` header
+- All `.cyan()` â†’ `.fg(colors::ACCENT)`, `.dim()` â†’ `.fg(colors::MUTED)`, `.green()` â†’ `.fg(colors::GOOD)`, `.red()` â†’ `.fg(colors::BAD)`, `.yellow()` â†’ `.fg(colors::WARN)` throughout
+- Status bar mode badge uses `.fg(colors::BASE).bg(colors::ACCENT)` instead of `.on_cyan()`
+
+## Deviations from plan
+
+- `Padding` is in `ratatui::widgets` not `ratatui::layout` â€” import corrected accordingly.
+- `title.dim().fg(colors::MUTED)` in `focused_title` was simplified to just `title.fg(colors::MUTED)` (no double-apply needed).
+
+## Verification
+
+- `cargo build` â€” clean, no warnings
+- `cargo check` â€” clean, no warnings
+
+## Important files changed
+
+- `src/colors.rs` (new) â€” 26 palette entries + 7 semantic aliases
+- `src/ui.rs` â€” full color migration + rounded borders + â–¶ markers + padding
+- `src/lib.rs` â€” added `pub mod colors;`
+
+## Residual risks / follow-up
+
+- Terminals without true-color (24-bit) support will show nearest-palette colors; accepted tradeoff as noted in the ticket.
+- The `Padding::horizontal(1)` on all panes may slightly affect text layout in very narrow terminals; no structural changes were needed but worth watching in testing.
