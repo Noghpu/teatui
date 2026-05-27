@@ -2,7 +2,8 @@
 id: 0000j-2026-05-27-fc68384b-landing-hero-screen
 created_at: 2026-05-27T15:28:43+02:00
 created_by_model: claude-sonnet-4-6
-state: open
+state: implemented
+state_updated_at: 2026-05-27T15:53:19+02:00
 ---
 # Landing Hero Screen (LazyVim-Style Full-Width Dashboard)
 
@@ -101,3 +102,49 @@ This ticket depends on ticket `0000i` (Catppuccin Mocha colors) being implemente
 ## Risks
 - Key padding arithmetic for right-aligning key hints may be off if the center column width is dynamic; test at multiple terminal widths
 - If `LandingState.selected_entry` only handles 3 items (0-2) but we add a Quit row, ensure `j`/`k` bounds are correct â€” the Quit action may need to be special-cased as a key press rather than a selectable entry
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: claude-sonnet-4-6
+- completed_at: 2026-05-27T15:53:19+02:00
+- state: implemented
+
+## What was completed
+
+Implemented the LazyVim-style landing hero screen as described in ticket 0000j. The landing screen now uses a full-width hero layout instead of the 3-pane layout used by Generate/PRs/Issues screens.
+
+## Changes made
+
+- `src/ui.rs`: Modified `render()` to branch on `Screen::Landing` before the horizontal split; added three new functions: `render_landing_hero`, `render_landing_actions`, `render_landing_footer`, and `tool_status_indicator`.
+- Added `Alignment` and `Span` to ratatui imports.
+
+## Layout details
+
+- `render_landing_hero`: Splits `main_area` into header (5 lines), actions (fill), footer (1 line). Each sub-area is centered with 20%/60%/20% horizontal split.
+- Header: "teatui" in bold TEXT color, dim tagline "jj Â· Gitea Â· LLM", center-aligned.
+- Actions: Three mode actions (Generate PR, Manage PRs, Manage Issues). Selected row uses "â–¶" prefix in ACCENT; unselected rows use "  " prefix. Key hints right-padded to right edge of center column. Quit is rendered as a non-selectable row at the bottom (key navigation bounds in app.rs remain 0-2 so no app.rs changes needed).
+- Footer: Single centered line showing âœ“/âœ—/Â· symbols for jj, git, tea, LLM backend, and workspace status using GOOD/BAD/MUTED colors.
+
+## Deviations from plan
+
+- The `render_menu` and `render_work` Landing branches were left in place as dead code (the `render()` function now returns early for Landing before calling them). This is safe â€” they are never executed for Landing.
+- The Quit entry is rendered as a non-selectable display row rather than a fourth selectable entry, which avoids modifying `app.rs` navigation bounds (`.min(2)` stays correct for 3 selectable entries).
+- Left-side icon calculation: for unselected rows, icon and label are split into separate spans (icon in MUTED, label in TEXT) to match the ticket spec.
+
+## Verification
+
+- `cargo check`: clean
+- `cargo build`: clean
+- Manual verification: pending (terminal launch required)
+
+## Key files changed
+
+- `src/ui.rs`
+
+## Residual risks / follow-up
+
+- Key padding arithmetic uses `center_width` from `area.width`; at very narrow terminal widths the padding may underflow to a single space, but the fallback `" ".to_string()` prevents subtraction overflow.
+- The `render_menu` and `render_work` Landing branches are now dead code; they can be cleaned up in a future ticket.

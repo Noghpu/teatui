@@ -1,8 +1,8 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Style, Stylize},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, BorderType, Borders, List, ListItem, Padding, Paragraph, Wrap},
 };
 
@@ -23,6 +23,13 @@ pub fn render(frame: &mut Frame, app: &App) {
     ])
     .areas(frame.area());
 
+    if app.screen() == Screen::Landing {
+        render_landing_hero(frame, app, main_area);
+        render_status(frame, app, status_area);
+        render_help(frame, app, help_area);
+        return;
+    }
+
     let [menu_area, form_area, preview_area] = Layout::horizontal([
         Constraint::Length(28),
         Constraint::Percentage(42),
@@ -35,6 +42,205 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_preview(frame, app, preview_area);
     render_status(frame, app, status_area);
     render_help(frame, app, help_area);
+}
+
+fn render_landing_hero(frame: &mut Frame, app: &App, area: Rect) {
+    let [header_area, actions_area, footer_area] = Layout::vertical([
+        Constraint::Length(5),
+        Constraint::Fill(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+
+    // Center each sub-area horizontally with 20%/60%/20% split
+    let [_, header_center, _] = Layout::horizontal([
+        Constraint::Percentage(20),
+        Constraint::Percentage(60),
+        Constraint::Percentage(20),
+    ])
+    .areas(header_area);
+
+    let [_, actions_center, _] = Layout::horizontal([
+        Constraint::Percentage(20),
+        Constraint::Percentage(60),
+        Constraint::Percentage(20),
+    ])
+    .areas(actions_area);
+
+    let [_, footer_center, _] = Layout::horizontal([
+        Constraint::Percentage(20),
+        Constraint::Percentage(60),
+        Constraint::Percentage(20),
+    ])
+    .areas(footer_area);
+
+    // Render header
+    let header = Paragraph::new(vec![
+        Line::from(""),
+        Line::from("teatui".bold().fg(colors::TEXT)),
+        Line::from("jj · Gitea · LLM".fg(colors::MUTED)),
+        Line::from(""),
+    ])
+    .alignment(Alignment::Center);
+    frame.render_widget(header, header_center);
+
+    // Render actions list
+    render_landing_actions(frame, app, actions_center);
+
+    // Render footer with live tool status
+    render_landing_footer(frame, app, footer_center);
+}
+
+fn render_landing_actions(frame: &mut Frame, app: &App, area: Rect) {
+    let selected = app.landing().selected_entry;
+    let center_width = area.width as usize;
+
+    struct ActionItem {
+        icon: &'static str,
+        label: &'static str,
+        key: &'static str,
+    }
+
+    let actions = [
+        ActionItem { icon: "◆", label: "Generate PR", key: "Enter/g" },
+        ActionItem { icon: "◆", label: "Manage PRs", key: "p" },
+        ActionItem { icon: "◆", label: "Manage Issues", key: "i" },
+    ];
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(""));
+
+    for (index, action) in actions.iter().enumerate() {
+        let is_selected = index == selected;
+
+        let prefix = if is_selected { "▶ " } else { "  " };
+        let left_text = format!("{}{} {}", prefix, action.icon, action.label);
+        let key_text = action.key;
+
+        // Compute padding to right-align the key hint
+        let left_len = left_text.chars().count();
+        let key_len = key_text.chars().count();
+        let total = left_len + key_len;
+        let padding = if center_width > total {
+            " ".repeat(center_width - total)
+        } else {
+            " ".to_string()
+        };
+
+        let line = if is_selected {
+            Line::from(vec![
+                Span::styled(
+                    format!("▶ {} {}", action.icon, action.label),
+                    ratatui::style::Style::new().bold().fg(colors::ACCENT),
+                ),
+                Span::styled(padding, ratatui::style::Style::new()),
+                Span::styled(key_text, ratatui::style::Style::new().fg(colors::MUTED)),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled(
+                    format!("  {} ", action.icon),
+                    ratatui::style::Style::new().fg(colors::MUTED),
+                ),
+                Span::styled(
+                    action.label,
+                    ratatui::style::Style::new().fg(colors::TEXT),
+                ),
+                Span::styled(padding, ratatui::style::Style::new()),
+                Span::styled(key_text, ratatui::style::Style::new().fg(colors::MUTED)),
+            ])
+        };
+        lines.push(line);
+        lines.push(Line::from("")); // blank spacer between items
+    }
+
+    // Quit hint — not a selectable entry, just shown as a static line
+    lines.push(Line::from(vec![
+        Span::styled("  ◆ ", ratatui::style::Style::new().fg(colors::MUTED)),
+        Span::styled("Quit", ratatui::style::Style::new().fg(colors::TEXT)),
+        Span::styled(
+            {
+                let left_len = "  ◆ Quit".chars().count();
+                let key_len = "q".chars().count();
+                let total = left_len + key_len;
+                if center_width > total {
+                    " ".repeat(center_width - total)
+                } else {
+                    " ".to_string()
+                }
+            },
+            ratatui::style::Style::new(),
+        ),
+        Span::styled("q", ratatui::style::Style::new().fg(colors::MUTED)),
+    ]));
+
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_landing_footer(frame: &mut Frame, app: &App, area: Rect) {
+    let repo = app.repo();
+    let mut spans: Vec<Span> = Vec::new();
+
+    // jj
+    let (jj_sym, jj_style) = tool_status_indicator(&repo.jj);
+    spans.push(Span::styled(format!("{} jj", jj_sym), jj_style));
+    spans.push(Span::styled("  ", ratatui::style::Style::new()));
+
+    // git
+    let (git_sym, git_style) = tool_status_indicator(&repo.git);
+    spans.push(Span::styled(format!("{} git", git_sym), git_style));
+    spans.push(Span::styled("  ", ratatui::style::Style::new()));
+
+    // tea
+    let (tea_sym, tea_style) = tool_status_indicator(&repo.tea);
+    spans.push(Span::styled(format!("{} tea", tea_sym), tea_style));
+    spans.push(Span::styled("  ", ratatui::style::Style::new()));
+
+    // LLM backend
+    let active_backend = repo
+        .llm_backends
+        .iter()
+        .find(|b| b.name == repo.llm_active);
+    if let Some(backend) = active_backend {
+        let (llm_sym, llm_style) = match &backend.status {
+            LlmStatus::Reachable => ("✓", ratatui::style::Style::new().fg(colors::GOOD)),
+            LlmStatus::Unreachable(_) => ("✗", ratatui::style::Style::new().fg(colors::BAD)),
+            LlmStatus::Unknown(_) => ("·", ratatui::style::Style::new().fg(colors::MUTED)),
+        };
+        spans.push(Span::styled(
+            format!("{} LLM: {}/{}", llm_sym, backend.name, backend.backend_type),
+            llm_style,
+        ));
+    } else {
+        spans.push(Span::styled(
+            "· LLM: (none)",
+            ratatui::style::Style::new().fg(colors::MUTED),
+        ));
+    }
+
+    // workspace
+    spans.push(Span::styled("  ", ratatui::style::Style::new()));
+    let (ws_sym, ws_style) = if repo.inside_workspace {
+        ("✓", ratatui::style::Style::new().fg(colors::GOOD))
+    } else {
+        ("·", ratatui::style::Style::new().fg(colors::MUTED))
+    };
+    spans.push(Span::styled(format!("{} workspace", ws_sym), ws_style));
+
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
+        area,
+    );
+}
+
+fn tool_status_indicator(status: &ToolStatus) -> (&'static str, ratatui::style::Style) {
+    match status {
+        ToolStatus::Available => ("✓", ratatui::style::Style::new().fg(colors::GOOD)),
+        ToolStatus::Missing | ToolStatus::Unknown => {
+            ("·", ratatui::style::Style::new().fg(colors::MUTED))
+        }
+        ToolStatus::Error(_) => ("✗", ratatui::style::Style::new().fg(colors::BAD)),
+    }
 }
 
 fn render_menu(frame: &mut Frame, app: &App, area: Rect) {
