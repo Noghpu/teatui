@@ -1,5 +1,14 @@
 set shell := ["powershell", "-NoLogo", "-Command"]
 
+build:
+    cargo build --release
+
+build-linux:
+    cargo zigbuild --release --target x86_64-unknown-linux-musl
+
+build-windows:
+    cargo build --release --target x86_64-pc-windows-msvc
+
 fmt:
     cargo fmt --check
 

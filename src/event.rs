@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use color_eyre::eyre::Result;
-use crossterm::event::{Event, EventStream, KeyEvent};
+use crossterm::event::{Event, EventStream, KeyEvent, KeyEventKind};
 use futures::StreamExt;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::{select, time::interval_at};
@@ -101,7 +101,7 @@ impl EventHandler {
         select! {
             Some(Ok(event)) = events.next() => {
                 match event {
-                    Event::Key(key) => Ok(AppEvent::Key(key)),
+                    Event::Key(key) if key.kind == KeyEventKind::Press => Ok(AppEvent::Key(key)),
                     Event::Resize(_, _) => Ok(AppEvent::Resize),
                     _ => Ok(AppEvent::Tick),
                 }
