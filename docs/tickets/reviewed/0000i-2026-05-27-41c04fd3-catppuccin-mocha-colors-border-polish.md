@@ -2,8 +2,8 @@
 id: 0000i-2026-05-27-41c04fd3-catppuccin-mocha-colors-border-polish
 created_at: 2026-05-27T15:27:55+02:00
 created_by_model: claude-sonnet-4-6
-state: implemented
-state_updated_at: 2026-05-27T15:46:16+02:00
+state: reviewed
+state_updated_at: 2026-05-27T15:50:01+02:00
 ---
 # Catppuccin Mocha Color Module and Border Polish
 
@@ -163,3 +163,45 @@ Created `src/colors.rs` with the full Catppuccin Mocha palette (26 raw color con
 
 - Terminals without true-color (24-bit) support will show nearest-palette colors; accepted tradeoff as noted in the ticket.
 - The `Padding::horizontal(1)` on all panes may slightly affect text layout in very narrow terminals; no structural changes were needed but worth watching in testing.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: claude-opus-4-7
+- reviewed_at: 2026-05-27T15:50:01+02:00
+- state: reviewed
+
+# Review Postmortem: 0000i Catppuccin Mocha Color Module and Border Polish
+
+## Outcome
+Accepted as implemented. No code changes required during review.
+
+## Verification performed
+- `cargo build` â€” clean, no warnings.
+- `cargo check` â€” clean.
+- `cargo clippy --no-deps --all-targets` â€” clean.
+- `cargo test --lib` â€” 66 passed, 0 failed.
+- Grep audit confirmed no residual `.cyan()`/`.dim()`/`.green()`/`.red()`/`.yellow()`/`.on_cyan()` style calls in `src/ui.rs`.
+- Spot-checked Catppuccin Mocha RGB values against the published spec (BASE=#1e1e2e, MANTLE=#181825, TEXT=#cdd6f4, BLUE=#89b4fa, GREEN=#a6e3a1, RED=#f38ba8) â€” all match exactly.
+
+## Acceptance criteria check
+- `src/colors.rs` exists with all 26 palette entries + 7 semantic aliases. Verified.
+- `cargo build` clean with no warnings. Verified.
+- Rounded borders on all panes via `themed_block` helper. Verified.
+- Focused border uses `FOCUSED_BORDER` (blue), unfocused uses `BORDER` (surface0). Verified.
+- `â–¶` marker used in `selectable_list`, `render_generate_field`, and `render_generate_editor` header. Verified.
+- No raw `.cyan()`/`.dim()`/`.green()`/`.red()`/`.yellow()` in `ui.rs`. Verified.
+- Status bar mode badge uses `BASE` fg on `ACCENT` bg. Verified at lines 403-406.
+
+## Observations
+- The `themed_block` helper is a clean abstraction; it centralizes border type, color, padding, and title styling so future polish tickets (0000j, 0000k) only need to call it.
+- `Padding::horizontal(1)` on every pane is consistent. The implementation-note residual risk about very narrow terminals is acknowledged but no fix is warranted at this stage.
+- The implementation correctly used `ratatui::widgets::Padding` (not `ratatui::layout::Padding` as the original plan suggested). The deviation is documented in the implementation note.
+- The `focused_title` simplification (dropping `.dim()` in favor of pure `.fg(MUTED)`) is correct â€” `.dim()` would have been a no-op once an explicit fg color is applied via Stylize chain re-application.
+- All 26 palette constants are declared `pub`; only a subset are referenced by name today (BASE, ACCENT, MUTED, GOOD, BAD, WARN, FOCUSED_BORDER, BORDER, plus a few raw ones via aliases). The unused-but-defined raw palette entries are intentional foundation for the follow-up tickets and produce no warnings since they are `pub const` items in a library crate.
+
+## Risks / follow-up
+- True-color terminal dependency is an accepted tradeoff (already documented).
+- No tests were added â€” appropriate, since this is pure visual styling with no logic surface that could regress meaningfully via unit test.
