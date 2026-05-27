@@ -2,7 +2,8 @@
 id: 0000k-2026-05-27-16d1943b-generate-form-ux-and-status-bar-polish
 created_at: 2026-05-27T15:29:07+02:00
 created_by_model: claude-sonnet-4-6
-state: open
+state: implemented
+state_updated_at: 2026-05-27T16:00:13+02:00
 ---
 # Generate Form UX and Status Bar Polish
 
@@ -73,3 +74,40 @@ This ticket depends on ticket `0000i` (Catppuccin Mocha colors) for the `colors:
 
 ## Risks
 - `render_generate_field` signature change (adding `total_fields`) requires updating all three call sites in `render_generate_fields` and `render_generate_editor`; easy to miss one
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: claude-sonnet-4-6
+- completed_at: 2026-05-27T16:00:13+02:00
+- state: implemented
+
+## What was completed
+
+All three visual improvements from the ticket plan were implemented in `src/ui.rs`:
+
+1. **Field separators in `render_generate_fields`**: After each field's lines (except the last), a `Line::from("  â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€  ").fg(colors::BORDER)` separator is pushed. Used `last = total.saturating_sub(1)` guard to skip the separator after the final field.
+
+2. **Field index counter in `render_generate_field`**: Added `total_fields: usize` parameter. When `focused` is true, computes `index_suffix = format!("  ({n}/{})", total_fields)` using `generate.selected_field + 1` as N. The suffix is appended to the header string in all format branches. Updated all three call sites (in `render_generate_fields` and `render_generate_editor`'s `before`/`after` closures) to pass `FieldId::ALL.len()`.
+
+3. **Status bar `â”‚` dividers in `render_status`**: Renamed the direct `segments` vec to `raw_segments`, then built a new `segments` vec by interleaving `Span::styled(" â”‚ ", Style::new().fg(colors::SURFACE1))` clones between each raw segment before rendering.
+
+## Deviations from plan
+
+None. Implementation followed the plan exactly. The separator string uses `â”€` (U+2500) box-drawing characters as intended by the ticket.
+
+## Verification
+
+- `cargo build` clean, no warnings.
+- Manual inspection of logic: separator guard `index < last` correctly skips last field; focused index only shows when `focused == true`; dividers interleaved between all segments.
+
+## Important files changed
+
+- `C:\Users\pdao\projects\teatui-rs\teatui\src\ui.rs`
+
+## Residual risks / follow-up
+
+- Separator line is fixed-width (30 `â”€` chars). If the form pane is wider, it won't span the full width, but this matches the design decision in the ticket to use a fixed-length dim separator.
+- The `(N/M)` counter uses `generate.selected_field` directly, which is correct when the focused field is the selected field (the only case where `focused=true` is passed).

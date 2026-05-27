@@ -421,16 +421,25 @@ fn render_work(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_generate_fields(app: &App) -> Vec<Line<'static>> {
+    let total = FieldId::ALL.len();
+    let last = total.saturating_sub(1);
     FieldId::ALL
         .iter()
         .enumerate()
         .flat_map(|(index, field_id)| {
-            render_generate_field(
+            let mut lines = render_generate_field(
                 app.generate(),
                 *field_id,
                 index == app.generate().selected_field,
                 index == app.generate().selected_field && app.focus() == Focus::Form,
-            )
+                total,
+            );
+            if index < last {
+                lines.push(
+                    Line::from("  ──────────────────────────────  ").fg(colors::BORDER),
+                );
+            }
+            lines
         })
         .collect()
 }
@@ -442,6 +451,7 @@ fn render_generate_editor(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, area);
 
     let selected = app.generate().selected_field();
+    let total = FieldId::ALL.len();
     let before = FieldId::ALL
         .iter()
         .take_while(|field_id| **field_id != selected)
@@ -452,6 +462,7 @@ fn render_generate_editor(frame: &mut Frame, app: &App, area: Rect) {
                 *field_id,
                 index == app.generate().selected_field,
                 false,
+                total,
             )
         })
         .collect::<Vec<_>>();
@@ -467,6 +478,7 @@ fn render_generate_editor(frame: &mut Frame, app: &App, area: Rect) {
                 *field_id,
                 index == app.generate().selected_field,
                 false,
+                total,
             )
         })
         .collect::<Vec<_>>();
@@ -578,7 +590,7 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         Focus::Preview => "focus:preview",
     };
 
-    let mut segments = vec![
+    let mut raw_segments: Vec<Span<'static>> = vec![
         format!(" {} ", app.input_mode().label())
             .bold()
             .fg(colors::BASE)
@@ -588,7 +600,7 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     ];
 
     if app.screen() == Screen::Generate {
-        segments.push(
+        raw_segments.push(
             format!(" phase:{} ", app.generate().phase.label()).fg(colors::MUTED),
         );
         let job_segment = app
@@ -596,12 +608,22 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
             .active_status()
             .map(|status| format!(" job:{} ", status.label()))
             .unwrap_or_else(|| " job:idle ".to_string());
-        segments.push(job_segment.fg(colors::MUTED));
+        raw_segments.push(job_segment.fg(colors::MUTED));
         let prompt_mode = match app.generate().prompt_view {
             PromptView::Manifest => "prompt:manifest",
             PromptView::Prompt => "prompt:text",
         };
-        segments.push(format!(" {prompt_mode} ").fg(colors::MUTED));
+        raw_segments.push(format!(" {prompt_mode} ").fg(colors::MUTED));
+    }
+
+    let divider = Span::styled(" │ ", Style::new().fg(colors::SURFACE1));
+    let mut segments: Vec<Span<'static>> = Vec::with_capacity(raw_segments.len() * 2);
+    let last_idx = raw_segments.len().saturating_sub(1);
+    for (i, seg) in raw_segments.into_iter().enumerate() {
+        segments.push(seg);
+        if i < last_idx {
+            segments.push(divider.clone());
+        }
     }
 
     frame.render_widget(Paragraph::new(Line::from(segments)), area);
@@ -916,22 +938,29 @@ fn render_generate_field(
     field_id: FieldId,
     selected: bool,
     focused: bool,
+    total_fields: usize,
 ) -> Vec<Line<'static>> {
     let field = generate.form.field(field_id);
     let label = field_id.label();
     let value = field.display_value().to_string();
     let error_count = field.errors.len();
     let marker = if selected { "▶" } else { " " };
+    let index_suffix = if focused {
+        let n = generate.selected_field + 1;
+        format!("  ({n}/{})", total_fields)
+    } else {
+        String::new()
+    };
     let header = if matches!(field_id, FieldId::Description) {
         if error_count > 0 {
-            format!("{marker} {label} ({error_count} errors)")
+            format!("{marker} {label} ({error_count} errors){index_suffix}")
         } else {
-            format!("{marker} {label}")
+            format!("{marker} {label}{index_suffix}")
         }
     } else if error_count > 0 {
-        format!("{marker} {label}: {value} ({error_count} errors)")
+        format!("{marker} {label}: {value} ({error_count} errors){index_suffix}")
     } else {
-        format!("{marker} {label}: {value}")
+        format!("{marker} {label}: {value}{index_suffix}")
     };
 
     let mut lines =
