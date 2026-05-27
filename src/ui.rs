@@ -508,11 +508,14 @@ fn render_generate_editor(frame: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(before).wrap(Wrap { trim: false }),
         before_area,
     );
+    let editor_header = format!(
+        "▶ {}  ({}/{})",
+        selected.label(),
+        app.generate().selected_field + 1,
+        total
+    );
     frame.render_widget(
-        Paragraph::new(
-            Line::from(format!("▶ {}", selected.label()))
-                .style(Style::new().bold().fg(colors::ACCENT)),
-        ),
+        Paragraph::new(Line::from(editor_header).style(Style::new().bold().fg(colors::ACCENT))),
         header_area,
     );
     frame.render_widget(&field.editor, editor_area);
