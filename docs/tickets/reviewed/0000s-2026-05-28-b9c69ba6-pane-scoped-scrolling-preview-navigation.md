@@ -2,8 +2,8 @@
 id: 0000s-2026-05-28-b9c69ba6-pane-scoped-scrolling-preview-navigation
 created_at: 2026-05-28T11:40:59+02:00
 created_by_model: gpt-5
-state: implemented
-state_updated_at: 2026-05-28T12:34:49+02:00
+state: reviewed
+state_updated_at: 2026-05-28T12:38:48+02:00
 ---
 # Add Pane-Scoped Scrolling And Preview Navigation
 
@@ -105,3 +105,29 @@ Files changed:
 
 Residual risk:
 - The preview panes for Manage PRs and Manage Issues still render placeholder content, so their scroll behavior is wired but not exercised by longer real data yet.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: gpt-5.5-medium
+- reviewed_at: 2026-05-28T12:38:48+02:00
+- state: reviewed
+
+## Review Postmortem
+
+Facts:
+- Reviewed ticket 0000s-2026-05-28-b9c69ba6-pane-scoped-scrolling-preview-navigation against docs/design.md and the implemented changes in src/app.rs, src/generate.rs, and src/ui.rs.
+- Generate PR preview navigation no longer changes selected_revset; focused test coverage exists in app::tests::preview_navigation_scrolls_without_moving_the_selected_revset.
+- Generate PR menu, form, and preview scroll offsets are persistent and clamped during rendering.
+- Found that preview clamp height used raw Line count while Paragraph::wrap can render one long Line as multiple terminal rows, which could make the tail of long prompt/draft/log lines unreachable.
+- Fixed preview clamping to estimate wrapped content height from Ratatui Line::width for Generate, PR, and Issue preview panes, and added ui::tests::wrapped_content_height_accounts_for_wrapped_preview_lines.
+
+Inferences:
+- The wrapped-height estimate may allow a little extra blank scroll for word-wrapped text, but it avoids under-clamping and is preferable for long prompt/draft/log review content.
+- Manage PRs and Manage Issues still use placeholder preview content, so the shared preview clamp path is covered structurally rather than by real list/detail data.
+
+Verification:
+- Ran focused tests for wrapped content height, preview navigation isolation, and scroll range clamping.
+- Ran just verify successfully.
