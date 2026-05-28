@@ -175,15 +175,47 @@ impl From<RawConfig> for Config {
     }
 }
 
+/// Returns the default config file candidate path, preferring `XDG_CONFIG_HOME` on Windows when
+/// it is set and non-empty (non-whitespace). Falls back to `platform_config_dir` (from
+/// `dirs::config_dir()`) when XDG is absent or blank. Returns `None` when neither is available.
+///
+/// On non-Windows platforms, XDG is already handled by `dirs::config_dir()` so this function
+/// always uses `platform_config_dir` directly.
+fn default_config_candidate(
+    xdg_config_home: Option<std::ffi::OsString>,
+    platform_config_dir: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        if let Some(xdg) = xdg_config_home {
+            let xdg_str = xdg.to_string_lossy();
+            if !xdg_str.trim().is_empty() {
+                return Some(
+                    std::path::PathBuf::from(xdg.as_os_str())
+                        .join("teatui")
+                        .join("config.toml"),
+                );
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        // On non-Windows, suppress unused-variable warning; XDG is handled by dirs.
+        let _ = xdg_config_home;
+    }
+    platform_config_dir.map(|d| d.join("teatui").join("config.toml"))
+}
+
 impl Config {
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let mut builder = config::Config::builder();
 
-        if let Some(config_dir) = dirs::config_dir() {
-            let default_path = config_dir.join("teatui").join("config.toml");
-            if default_path.exists() {
-                builder = builder.add_source(config::File::from(default_path));
-            }
+        let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        let platform_config_dir = dirs::config_dir();
+        if let Some(default_path) = default_config_candidate(xdg_config_home, platform_config_dir)
+            && default_path.exists()
+        {
+            builder = builder.add_source(config::File::from(default_path));
         }
 
         if let Some(path) = path {
@@ -294,6 +326,62 @@ mod humantime_serde {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- default_config_candidate tests ---
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_xdg_set_uses_xdg_path() {
+        use std::ffi::OsString;
+        let xdg: Option<OsString> = Some(OsString::from(r"C:\Users\example\.config"));
+        let platform: Option<std::path::PathBuf> = Some(std::path::PathBuf::from(
+            r"C:\Users\example\AppData\Roaming",
+        ));
+
+        let candidate = default_config_candidate(xdg, platform).expect("should have a path");
+        assert_eq!(
+            candidate,
+            std::path::PathBuf::from(r"C:\Users\example\.config\teatui\config.toml")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_xdg_empty_falls_back_to_platform() {
+        use std::ffi::OsString;
+        let xdg: Option<OsString> = Some(OsString::from("   "));
+        let platform: Option<std::path::PathBuf> = Some(std::path::PathBuf::from(
+            r"C:\Users\example\AppData\Roaming",
+        ));
+
+        let candidate = default_config_candidate(xdg, platform).expect("should have a path");
+        assert_eq!(
+            candidate,
+            std::path::PathBuf::from(r"C:\Users\example\AppData\Roaming\teatui\config.toml")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_xdg_missing_falls_back_to_platform() {
+        let xdg = None;
+        let platform: Option<std::path::PathBuf> = Some(std::path::PathBuf::from(
+            r"C:\Users\example\AppData\Roaming",
+        ));
+
+        let candidate = default_config_candidate(xdg, platform).expect("should have a path");
+        assert_eq!(
+            candidate,
+            std::path::PathBuf::from(r"C:\Users\example\AppData\Roaming\teatui\config.toml")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_no_xdg_and_no_platform_returns_none() {
+        let candidate = default_config_candidate(None, None);
+        assert!(candidate.is_none());
+    }
 
     fn deserialize(raw: &str) -> Config {
         let config = config::Config::builder()

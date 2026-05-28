@@ -589,7 +589,8 @@ Streaming can be added later if the review pane needs progressive output.
 Initial config file location:
 
 - Linux/macOS: `$XDG_CONFIG_HOME/teatui/config.toml`.
-- Windows: platform config directory via `dirs`.
+- Windows: `$XDG_CONFIG_HOME/teatui/config.toml` when `XDG_CONFIG_HOME` is set to a non-blank
+  value; otherwise the platform config directory via `dirs` (Roaming AppData).
 
 Initial fields:
 
