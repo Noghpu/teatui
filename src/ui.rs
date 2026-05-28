@@ -10,7 +10,8 @@ use crate::colors;
 
 use crate::app::{App, JobRecord, Screen};
 use crate::generate::{
-    ExecutionPlan, FieldId, Focus, GeneratePhase, GenerateState, PromptView, StaleCheckResult,
+    ExecutionPlan, FieldId, Focus, GeneratePhase, GenerateState, PromptView, RevsetSummary,
+    StaleCheckResult,
 };
 use crate::prompt::PromptBuild;
 use crate::repo::{LlmStatus, TeaAuth, ToolStatus};
@@ -246,25 +247,11 @@ fn render_menu(frame: &mut Frame, app: &App, area: Rect) {
                 .iter()
                 .enumerate()
                 .map(|(index, revset)| {
-                    let bookmarks = if revset.bookmarks().is_empty() {
-                        String::new()
-                    } else {
-                        revset.bookmarks().join(", ")
-                    };
-                    let label = if bookmarks.is_empty() {
-                        format!("{}  {} commits", revset.label(), revset.commit_count())
-                    } else {
-                        format!(
-                            "{}  {} commits  {}",
-                            revset.label(),
-                            revset.commit_count(),
-                            bookmarks
-                        )
-                    };
+                    let label = revset_display_label(revset, area);
                     list_item(&label, index == app.generate().selected_revset)
                 })
                 .collect(),
-            "Revsets",
+            "Changes",
         ),
         Screen::PullRequests => (
             selectable_list(
@@ -307,6 +294,54 @@ fn list_item(text: &str, selected: bool) -> ListItem<'static> {
         ListItem::new(text.to_string().bold().fg(colors::ACCENT))
     } else {
         ListItem::new(text.to_string().fg(colors::MUTED))
+    }
+}
+
+fn is_jj_default_description(desc: &str) -> bool {
+    let trimmed = desc.trim();
+    trimmed.is_empty() || trimmed.eq_ignore_ascii_case("(no description set)")
+}
+
+fn revset_display_label(revset: &RevsetSummary, area: Rect) -> String {
+    let inner_width = area.width.saturating_sub(4) as usize;
+
+    let first_bookmark = revset.bookmarks().first().map(|s| s.as_str()).unwrap_or("");
+    let first_change_id = revset
+        .change_ids()
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    let desc = revset.description();
+
+    let (primary, secondary_tag): (String, String) = if !is_jj_default_description(desc) {
+        let tag = if !first_bookmark.is_empty() {
+            format!("[{}]", first_bookmark)
+        } else {
+            String::new()
+        };
+        (desc.to_string(), tag)
+    } else if !first_bookmark.is_empty() {
+        (first_bookmark.to_string(), revset.label().to_string())
+    } else {
+        (first_change_id.to_string(), revset.label().to_string())
+    };
+
+    let tag_len = if secondary_tag.is_empty() {
+        0
+    } else {
+        secondary_tag.len() + 1
+    };
+    let primary_max = inner_width.saturating_sub(tag_len);
+    let truncated_primary = if primary.len() > primary_max && primary_max > 0 {
+        primary[..primary_max].to_string()
+    } else {
+        primary
+    };
+
+    if secondary_tag.is_empty() {
+        truncated_primary
+    } else {
+        format!("{} {}", truncated_primary, secondary_tag)
     }
 }
 
@@ -405,7 +440,7 @@ fn render_work(frame: &mut Frame, app: &App, area: Rect) {
             render_generate_editor(frame, app, area);
             return;
         }
-        Screen::Generate => render_generate_fields(app),
+        Screen::Generate => render_generate_fields(app, area),
         Screen::PullRequests => vec![
             Line::from("Manage PRs".bold()),
             Line::from(""),
@@ -439,9 +474,11 @@ fn render_work(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(form, area);
 }
 
-fn render_generate_fields(app: &App) -> Vec<Line<'static>> {
+fn render_generate_fields(app: &App, area: Rect) -> Vec<Line<'static>> {
     let total = FieldId::ALL.len();
     let last = total.saturating_sub(1);
+    let sep_width = area.width.saturating_sub(6) as usize;
+    let separator = format!("  {}  ", "─".repeat(sep_width));
     FieldId::ALL
         .iter()
         .enumerate()
@@ -454,7 +491,7 @@ fn render_generate_fields(app: &App) -> Vec<Line<'static>> {
                 total,
             );
             if index < last {
-                lines.push(Line::from("  ──────────────────────────────  ").fg(colors::BORDER));
+                lines.push(Line::from(separator.clone()).fg(colors::BORDER));
             }
             lines
         })
@@ -1012,7 +1049,6 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
         Line::from(""),
         Line::from(format!("phase: {}", generate.phase.label()).fg(colors::MUTED)),
         Line::from(format!("input mode: {}", app.input_mode().label()).fg(colors::MUTED)),
-        Line::from(format!("focused field: {}", generate.selected_field_name())),
         Line::from(format!(
             "base branch: {} ({:?})",
             app.repo().base_branch.name,

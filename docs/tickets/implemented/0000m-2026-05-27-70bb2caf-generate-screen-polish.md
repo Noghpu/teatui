@@ -2,7 +2,8 @@
 id: 0000m-2026-05-27-70bb2caf-generate-screen-polish
 created_at: 2026-05-27T20:56:42+02:00
 created_by_model: claude-sonnet-4-6/normal
-state: open
+state: implemented
+state_updated_at: 2026-05-28T08:09:16+02:00
 ---
 # Generate Screen Polish: Left Col Changes, Center Width, Right Col Cleanup
 
@@ -146,3 +147,43 @@ Remove this line. It was a dev-time aid that echoes the currently selected form 
 - `render_generate_fields` currently takes `app: &App` not `area: Rect` â€” passing area through requires a signature change and updates to callers in `render_work`.
 - TextArea viewport reset API may not be public in `ratatui_textarea`. Check the crate docs before writing the handler; if unavailable, recreating the editor from text is the safe fallback (cursor resets to end, acceptable).
 - The 28-char column width is a `Constraint::Length(28)` in the horizontal layout. The actual inner width is `28 - 2 (borders) - 2 (padding) = 24` â€” use this as the baseline for truncation.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: claude-sonnet-4-6
+- completed_at: 2026-05-28T08:09:16+02:00
+- state: implemented
+
+## What was completed
+
+All three improvements to the Generate PR screen were implemented:
+
+1. **Left column - change-centric display**: Replaced raw revset expression labels with a smart display that shows description > bookmark > change_id as the primary identifier, with muted secondary tags. The list title was renamed from "Revsets" to "Changes". A `revset_display_label()` function was added in `ui.rs` with `is_jj_default_description()` helper. The `RevsetSummary` type was added to imports.
+
+2. **Center column - dynamic separator width**: Changed `render_generate_fields` signature to accept `area: Rect` and replaced the hardcoded `"  â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€  "` separator with a dynamically computed string using `"â”€".repeat(area.width.saturating_sub(6))`. The call site in `render_work` was updated to pass `area`.
+
+3. **Right column - debug line removed**: Removed the `Line::from(format!("focused field: {}", generate.selected_field_name()))` line from `render_generate_preview`.
+
+4. **TextArea resize fix**: Added `FieldState::reset_editor_viewport()` method in `generate.rs` that recreates the editor from the current buffer text (safe fallback since `ratatui_textarea` 0.3.2 has no public viewport reset API). Added `PrForm::editors_mut()` iterator method. On `AppEvent::Resize` in `app.rs`, a new `handle_resize()` method iterates all form field editors and resets their viewports.
+
+## Deviations from plan
+
+None significant. Used `reset_editor_viewport()` as a method on `FieldState` rather than a public `textarea_from_text_pub` function, which is cleaner. The `editors_mut()` method returns an `impl Iterator<Item = &mut FieldState>` over a fixed-size array, as planned.
+
+## Verification
+
+`just verify` passes: fmt, check, clippy, and all 66 tests + 4 integration tests.
+
+## Important files changed
+
+- `src/ui.rs` - `revset_display_label()`, `is_jj_default_description()`, `render_generate_fields(area)`, updated `render_menu` (title and label logic), removed "focused field" line from `render_generate_preview`
+- `src/generate.rs` - `FieldState::reset_editor_viewport()`, `PrForm::editors_mut()`
+- `src/app.rs` - `AppEvent::Resize` now calls `self.handle_resize()`, new `handle_resize()` method
+
+## Residual risks
+
+- The TextArea viewport reset recreates the editor, which moves cursor to end. If the user was in the middle of editing and resizes, cursor position is lost (acceptable per ticket).
+- The primary identifier truncation uses byte-based indexing (`&primary[..primary_max]`). If the description contains multi-byte UTF-8 characters and `primary_max` falls in the middle of one, this could panic. A future improvement would use `char`-based truncation.

@@ -157,7 +157,8 @@ impl App {
             tui.draw(|frame| ui::render(frame, self))?;
 
             match events.next().await? {
-                AppEvent::Tick | AppEvent::Resize => {}
+                AppEvent::Tick => {}
+                AppEvent::Resize => self.handle_resize(),
                 AppEvent::Key(key) => self.update(self.handle_key(key)),
                 AppEvent::Background(event) => self.handle_background(event),
             }
@@ -168,6 +169,12 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn handle_resize(&mut self) {
+        for field in self.generate.form.editors_mut() {
+            field.reset_editor_viewport();
+        }
     }
 
     fn handle_key(&self, key: KeyEvent) -> Action {
