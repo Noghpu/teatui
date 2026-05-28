@@ -326,23 +326,28 @@ fn revset_display_label(revset: &RevsetSummary, area: Rect) -> String {
         (first_change_id.to_string(), revset.label().to_string())
     };
 
-    let tag_len = if secondary_tag.is_empty() {
-        0
-    } else {
-        secondary_tag.len() + 1
-    };
-    let primary_max = inner_width.saturating_sub(tag_len);
-    let truncated_primary = if primary.len() > primary_max && primary_max > 0 {
-        primary[..primary_max].to_string()
-    } else {
-        primary
-    };
+    let tag_chars = secondary_tag.chars().count();
+    let tag_budget = if tag_chars == 0 { 0 } else { tag_chars + 1 };
+    let primary_max = inner_width.saturating_sub(tag_budget);
+    let truncated_primary = truncate_chars(&primary, primary_max);
 
     if secondary_tag.is_empty() {
         truncated_primary
     } else {
         format!("{} {}", truncated_primary, secondary_tag)
     }
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let end = s
+        .char_indices()
+        .nth(max_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    s[..end].to_string()
 }
 
 fn render_work(frame: &mut Frame, app: &App, area: Rect) {
@@ -1418,4 +1423,28 @@ fn render_recent_logs(
     }
 
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_jj_default_description, truncate_chars};
+
+    #[test]
+    fn jj_default_description_recognises_placeholder() {
+        assert!(is_jj_default_description(""));
+        assert!(is_jj_default_description("   "));
+        assert!(is_jj_default_description("(no description set)"));
+        assert!(is_jj_default_description("  (No Description Set)  "));
+        assert!(!is_jj_default_description("feat: add config loader"));
+    }
+
+    #[test]
+    fn truncate_chars_handles_ascii_and_multibyte() {
+        assert_eq!(truncate_chars("hello world", 5), "hello");
+        assert_eq!(truncate_chars("hello", 10), "hello");
+        assert_eq!(truncate_chars("hello", 0), "");
+        // Multi-byte: each emoji is multiple bytes; must not panic on byte index.
+        assert_eq!(truncate_chars("héllo", 4), "héll");
+        assert_eq!(truncate_chars("🚀🚀🚀", 2), "🚀🚀");
+    }
 }
