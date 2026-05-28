@@ -18,7 +18,7 @@ use crate::repo::{LlmStatus, TeaAuth, ToolStatus};
 
 const DESCRIPTION_FIELD_DISPLAY_LINES: usize = 6;
 
-pub fn render(frame: &mut Frame, app: &App) {
+pub fn render(frame: &mut Frame, app: &mut App) {
     let [main_area, status_area, help_area] = Layout::vertical([
         Constraint::Fill(1),
         Constraint::Length(1),
@@ -27,9 +27,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     .areas(frame.area());
 
     if app.screen() == Screen::Landing {
-        render_landing_hero(frame, app, main_area);
-        render_status(frame, app, status_area);
-        render_help(frame, app, help_area);
+        render_landing_hero(frame, &*app, main_area);
+        render_status(frame, &*app, status_area);
+        render_help(frame, &*app, help_area);
         return;
     }
 
@@ -43,8 +43,8 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_menu(frame, app, menu_area);
     render_work(frame, app, form_area);
     render_preview(frame, app, preview_area);
-    render_status(frame, app, status_area);
-    render_help(frame, app, help_area);
+    render_status(frame, &*app, status_area);
+    render_help(frame, &*app, help_area);
 }
 
 fn render_landing_hero(frame: &mut Frame, app: &App, area: Rect) {
@@ -240,7 +240,7 @@ fn llm_status_indicator(status: &LlmStatus) -> (&'static str, Style) {
     }
 }
 
-fn render_menu(frame: &mut Frame, app: &App, area: Rect) {
+fn render_menu(frame: &mut Frame, app: &mut App, area: Rect) {
     match app.screen() {
         Screen::Generate => {
             render_generate_menu(frame, app, area);
@@ -281,7 +281,7 @@ fn render_menu(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn render_generate_menu(frame: &mut Frame, app: &App, area: Rect) {
+fn render_generate_menu(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = themed_block(
         focused_title("Changes", app.focus() == Focus::Menu),
         app.focus() == Focus::Menu,
@@ -290,16 +290,48 @@ fn render_generate_menu(frame: &mut Frame, app: &App, area: Rect) {
     // inner_width accounts for the horizontal padding of 1 on each side applied by themed_block
     let inner_width = inner.width.saturating_sub(2) as usize;
 
+    let (lines, selected_range) = render_generate_menu_lines(app, inner_width);
+    let content_height = lines.len();
+    let viewport_height = inner.height as usize;
+    {
+        let generate = app.generate_mut();
+        if let Some((start, end)) = selected_range {
+            generate
+                .menu_scroll
+                .ensure_visible(start, end, content_height, viewport_height);
+        }
+        generate.menu_scroll.clamp(content_height, viewport_height);
+    }
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .scroll((
+            app.generate().menu_scroll.offset.min(u16::MAX as usize) as u16,
+            0,
+        ))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
+}
+
+fn render_generate_menu_lines(
+    app: &App,
+    inner_width: usize,
+) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
     let revsets = &app.generate().revsets;
     let selected_idx = app.generate().selected_revset;
     let last_idx = revsets.len().saturating_sub(1);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut selected_range = None;
 
     for (index, revset) in revsets.iter().enumerate() {
+        let row_start = lines.len();
         let is_selected = index == selected_idx;
         let row_lines = build_revset_row_lines(revset, is_selected, inner_width);
         lines.extend(row_lines);
+        if is_selected {
+            selected_range = Some((row_start, lines.len()));
+        }
 
         // Separator between rows (not after the last)
         if index < last_idx {
@@ -308,10 +340,7 @@ fn render_generate_menu(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, area);
+    (lines, selected_range)
 }
 
 /// Build the display lines for one revset row in the per-change left column.
@@ -566,7 +595,7 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
     s[..end].to_string()
 }
 
-fn render_work(frame: &mut Frame, app: &App, area: Rect) {
+fn render_work(frame: &mut Frame, app: &mut App, area: Rect) {
     let lines = match app.screen() {
         Screen::Landing => {
             let repo = app.repo();
@@ -654,7 +683,38 @@ fn render_work(frame: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::from("Select a mode on the left.".fg(colors::MUTED)));
             lines
         }
-        Screen::Generate => render_generate_fields(app, area),
+        Screen::Generate => {
+            let (lines, selected_range) = render_generate_fields(app, area);
+            let block = themed_block(
+                focused_title("PR Form", app.focus() == Focus::Form),
+                app.focus() == Focus::Form,
+            );
+            let inner = block.inner(area);
+            let content_height = lines.len();
+            let viewport_height = inner.height as usize;
+            {
+                let generate = app.generate_mut();
+                if let Some((start, end)) = selected_range {
+                    generate.form_scroll.ensure_visible(
+                        start,
+                        end,
+                        content_height,
+                        viewport_height,
+                    );
+                }
+                generate.form_scroll.clamp(content_height, viewport_height);
+            }
+
+            let form = Paragraph::new(lines)
+                .block(block)
+                .scroll((
+                    app.generate().form_scroll.offset.min(u16::MAX as usize) as u16,
+                    0,
+                ))
+                .wrap(Wrap { trim: false });
+            frame.render_widget(form, area);
+            return;
+        }
         Screen::PullRequests => vec![
             Line::from("Manage PRs".bold()),
             Line::from(""),
@@ -678,7 +738,6 @@ fn render_work(frame: &mut Frame, app: &App, area: Rect) {
         Screen::Generate => generate_work_title(app.generate().phase),
         Screen::PullRequests | Screen::Issues => "Work",
     };
-
     let form = Paragraph::new(lines)
         .block(themed_block(
             focused_title(title, app.focus() == Focus::Form),
@@ -688,28 +747,33 @@ fn render_work(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(form, area);
 }
 
-fn render_generate_fields(app: &App, area: Rect) -> Vec<Line<'static>> {
+fn render_generate_fields(app: &App, area: Rect) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
     let total = FieldId::ALL.len();
     let last = total.saturating_sub(1);
     let sep_width = area.width.saturating_sub(6) as usize;
     let separator = format!("  {}  ", "─".repeat(sep_width));
-    FieldId::ALL
-        .iter()
-        .enumerate()
-        .flat_map(|(index, field_id)| {
-            let mut lines = render_generate_field(
-                app.generate(),
-                *field_id,
-                index == app.generate().selected_field,
-                index == app.generate().selected_field && app.focus() == Focus::Form,
-                total,
-            );
-            if index < last {
-                lines.push(Line::from(separator.clone()).fg(colors::BORDER));
-            }
-            lines
-        })
-        .collect()
+    let mut lines = Vec::new();
+    let mut selected_range = None;
+
+    for (index, field_id) in FieldId::ALL.iter().enumerate() {
+        let start = lines.len();
+        let mut field_lines = render_generate_field(
+            app.generate(),
+            *field_id,
+            index == app.generate().selected_field,
+            index == app.generate().selected_field && app.focus() == Focus::Form,
+            total,
+        );
+        lines.append(&mut field_lines);
+        if index == app.generate().selected_field {
+            selected_range = Some((start, lines.len()));
+        }
+        if index < last {
+            lines.push(Line::from(separator.clone()).fg(colors::BORDER));
+        }
+    }
+
+    (lines, selected_range)
 }
 
 fn generate_work_title(phase: GeneratePhase) -> &'static str {
@@ -727,7 +791,7 @@ fn generate_work_title(phase: GeneratePhase) -> &'static str {
     }
 }
 
-fn render_preview(frame: &mut Frame, app: &App, area: Rect) {
+fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
     let lines = match app.screen() {
         Screen::Landing => {
             let mut lines = vec![
@@ -748,19 +812,93 @@ fn render_preview(frame: &mut Frame, app: &App, area: Rect) {
 
             lines
         }
-        Screen::Generate => render_generate_preview(app),
-        Screen::PullRequests => vec![
-            Line::from("PR Preview".bold()),
-            Line::from(""),
-            Line::from("Selected PR body, status, and comments will appear here."),
-            Line::from("Esc returns to Landing.".fg(colors::MUTED)),
-        ],
-        Screen::Issues => vec![
-            Line::from("Issue Preview".bold()),
-            Line::from(""),
-            Line::from("Selected issue body and comments will appear here."),
-            Line::from("Esc returns to Landing.".fg(colors::MUTED)),
-        ],
+        Screen::Generate => {
+            let lines = render_generate_preview(&*app);
+            let block = themed_block(
+                focused_title("Preview", app.focus() == Focus::Preview),
+                app.focus() == Focus::Preview,
+            );
+            let inner = block.inner(area);
+            let content_height = lines.len();
+            let viewport_height = inner.height as usize;
+            {
+                let generate = app.generate_mut();
+                generate
+                    .preview_scroll
+                    .clamp(content_height, viewport_height);
+            }
+
+            let preview = Paragraph::new(lines)
+                .block(block)
+                .scroll((
+                    app.generate().preview_scroll.offset.min(u16::MAX as usize) as u16,
+                    0,
+                ))
+                .wrap(Wrap { trim: false });
+            frame.render_widget(preview, area);
+            return;
+        }
+        Screen::PullRequests => {
+            let lines = vec![
+                Line::from("PR Preview".bold()),
+                Line::from(""),
+                Line::from("Selected PR body, status, and comments will appear here."),
+                Line::from("Esc returns to Landing.".fg(colors::MUTED)),
+            ];
+            let block = themed_block(
+                focused_title("Preview", app.focus() == Focus::Preview),
+                app.focus() == Focus::Preview,
+            );
+            let inner = block.inner(area);
+            let content_height = lines.len();
+            let viewport_height = inner.height as usize;
+            {
+                let state = app.pull_requests_mut();
+                state.preview_scroll.clamp(content_height, viewport_height);
+            }
+
+            let preview = Paragraph::new(lines)
+                .block(block)
+                .scroll((
+                    app.pull_requests()
+                        .preview_scroll
+                        .offset
+                        .min(u16::MAX as usize) as u16,
+                    0,
+                ))
+                .wrap(Wrap { trim: false });
+            frame.render_widget(preview, area);
+            return;
+        }
+        Screen::Issues => {
+            let lines = vec![
+                Line::from("Issue Preview".bold()),
+                Line::from(""),
+                Line::from("Selected issue body and comments will appear here."),
+                Line::from("Esc returns to Landing.".fg(colors::MUTED)),
+            ];
+            let block = themed_block(
+                focused_title("Preview", app.focus() == Focus::Preview),
+                app.focus() == Focus::Preview,
+            );
+            let inner = block.inner(area);
+            let content_height = lines.len();
+            let viewport_height = inner.height as usize;
+            {
+                let state = app.issues_mut();
+                state.preview_scroll.clamp(content_height, viewport_height);
+            }
+
+            let preview = Paragraph::new(lines)
+                .block(block)
+                .scroll((
+                    app.issues().preview_scroll.offset.min(u16::MAX as usize) as u16,
+                    0,
+                ))
+                .wrap(Wrap { trim: false });
+            frame.render_widget(preview, area);
+            return;
+        }
     };
 
     let preview = Paragraph::new(lines)

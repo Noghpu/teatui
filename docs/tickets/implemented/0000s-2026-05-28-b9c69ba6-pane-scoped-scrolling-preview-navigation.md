@@ -2,7 +2,8 @@
 id: 0000s-2026-05-28-b9c69ba6-pane-scoped-scrolling-preview-navigation
 created_at: 2026-05-28T11:40:59+02:00
 created_by_model: gpt-5
-state: open
+state: implemented
+state_updated_at: 2026-05-28T12:34:49+02:00
 ---
 # Add Pane-Scoped Scrolling And Preview Navigation
 
@@ -73,3 +74,34 @@ The Generate PR screen has three panes: left revset list, center PR form, and ri
 ## Risks
 - Form row heights are dynamic because description and validation errors can add rows; keep row-height calculations centralized so scroll clamping matches rendering.
 - Ratatui `List` and `Paragraph` scrolling behave differently; use one small local abstraction if needed instead of scattering offset math.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: unknown
+- completed_at: 2026-05-28T12:34:49+02:00
+- state: implemented
+
+Completed the Generate PR pane-scoped scrolling work.
+
+What changed:
+- Added explicit scroll state for Generate PR menu, form, and preview panes, plus the same scroll path for the PR and issue preview placeholders.
+- Updated Generate PR navigation so Preview focus only scrolls the preview pane and never mutates the selected revset.
+- Kept the selected revset and form field visible by clamping scroll offsets from the measured rendered ranges.
+- Added focused unit coverage for preview-scroll isolation and scroll clamping.
+
+Deviations:
+- None material; the implementation followed the ticket plan.
+
+Verification:
+- Ran `just verify`.
+
+Files changed:
+- `src/app.rs`
+- `src/generate.rs`
+- `src/ui.rs`
+
+Residual risk:
+- The preview panes for Manage PRs and Manage Issues still render placeholder content, so their scroll behavior is wired but not exercised by longer real data yet.

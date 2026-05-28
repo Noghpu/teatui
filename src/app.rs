@@ -111,6 +111,7 @@ pub struct LandingState {
 #[derive(Debug, Default, Clone)]
 pub struct ListState {
     pub selected_item: usize,
+    pub preview_scroll: crate::generate::ScrollState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,8 +340,14 @@ impl App {
         match (self.screen, self.focus, direction) {
             (Screen::Generate, Focus::Form, Direction::Up) => self.generate.move_field_up(),
             (Screen::Generate, Focus::Form, Direction::Down) => self.generate.move_field_down(),
-            (Screen::Generate, _, Direction::Up) => self.generate.move_revset_up(),
-            (Screen::Generate, _, Direction::Down) => self.generate.move_revset_down(),
+            (Screen::Generate, Focus::Preview, Direction::Up) => {
+                self.generate.scroll_preview_up();
+            }
+            (Screen::Generate, Focus::Preview, Direction::Down) => {
+                self.generate.scroll_preview_down();
+            }
+            (Screen::Generate, Focus::Menu, Direction::Up) => self.generate.move_revset_up(),
+            (Screen::Generate, Focus::Menu, Direction::Down) => self.generate.move_revset_down(),
             (Screen::Landing, _, Direction::Up) => {
                 self.landing.selected_entry = self.landing.selected_entry.saturating_sub(1);
             }
@@ -940,12 +947,24 @@ impl App {
         &self.generate
     }
 
+    pub fn generate_mut(&mut self) -> &mut GenerateState {
+        &mut self.generate
+    }
+
     pub fn pull_requests(&self) -> &ListState {
         &self.pull_requests
     }
 
+    pub fn pull_requests_mut(&mut self) -> &mut ListState {
+        &mut self.pull_requests
+    }
+
     pub fn issues(&self) -> &ListState {
         &self.issues
+    }
+
+    pub fn issues_mut(&mut self) -> &mut ListState {
+        &mut self.issues
     }
 
     pub fn logs(&self) -> &LogState {
@@ -1311,5 +1330,23 @@ mod tests {
         app.open_selected_landing_entry();
 
         assert_eq!(app.screen, Screen::Generate);
+    }
+
+    #[test]
+    fn preview_navigation_scrolls_without_moving_the_selected_revset() {
+        let mut app = test_app();
+        app.screen = Screen::Generate;
+        app.focus = Focus::Preview;
+        app.generate.selected_revset = 1;
+
+        app.update(Action::Navigate(Direction::Down));
+
+        assert_eq!(app.generate.selected_revset, 1);
+        assert_eq!(app.generate.preview_scroll.offset, 1);
+
+        app.update(Action::Navigate(Direction::Up));
+
+        assert_eq!(app.generate.selected_revset, 1);
+        assert_eq!(app.generate.preview_scroll.offset, 0);
     }
 }
