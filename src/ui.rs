@@ -454,6 +454,17 @@ fn wrap_chars(text: &str, max_chars: usize) -> Vec<String> {
     lines
 }
 
+fn wrapped_content_height(lines: &[Line<'_>], width: usize) -> usize {
+    if width == 0 {
+        return 0;
+    }
+
+    lines
+        .iter()
+        .map(|line| line.width().max(1).div_ceil(width))
+        .sum()
+}
+
 fn selectable_list(labels: &[&str], selected: usize) -> Vec<ListItem<'static>> {
     labels
         .iter()
@@ -819,7 +830,7 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
                 app.focus() == Focus::Preview,
             );
             let inner = block.inner(area);
-            let content_height = lines.len();
+            let content_height = wrapped_content_height(&lines, inner.width as usize);
             let viewport_height = inner.height as usize;
             {
                 let generate = app.generate_mut();
@@ -850,7 +861,7 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
                 app.focus() == Focus::Preview,
             );
             let inner = block.inner(area);
-            let content_height = lines.len();
+            let content_height = wrapped_content_height(&lines, inner.width as usize);
             let viewport_height = inner.height as usize;
             {
                 let state = app.pull_requests_mut();
@@ -882,7 +893,7 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
                 app.focus() == Focus::Preview,
             );
             let inner = block.inner(area);
-            let content_height = lines.len();
+            let content_height = wrapped_content_height(&lines, inner.width as usize);
             let viewport_height = inner.height as usize;
             {
                 let state = app.issues_mut();
@@ -1710,8 +1721,9 @@ fn render_recent_logs(
 mod tests {
     use super::{
         bounded_multiline_field_lines, compact_diff_stat, is_jj_default_description,
-        truncate_chars, wrap_chars,
+        truncate_chars, wrap_chars, wrapped_content_height,
     };
+    use ratatui::text::{Line, Span};
 
     #[test]
     fn jj_default_description_recognises_placeholder() {
@@ -1743,6 +1755,18 @@ mod tests {
         // Multi-byte chars must split on char boundaries, not byte boundaries.
         assert_eq!(wrap_chars("héllo wörld", 5), vec!["héllo", " wörl", "d"]);
         assert_eq!(wrap_chars("🚀🚀🚀🚀", 2), vec!["🚀🚀", "🚀🚀"]);
+    }
+
+    #[test]
+    fn wrapped_content_height_accounts_for_wrapped_preview_lines() {
+        let lines = vec![
+            Line::from("abcdefghij"),
+            Line::from(vec![Span::raw("ab"), Span::raw("cdef")]),
+            Line::from(""),
+        ];
+
+        assert_eq!(wrapped_content_height(&lines, 4), 6);
+        assert_eq!(wrapped_content_height(&lines, 0), 0);
     }
 
     #[test]
