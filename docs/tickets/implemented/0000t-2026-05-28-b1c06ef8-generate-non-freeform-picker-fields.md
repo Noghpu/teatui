@@ -2,7 +2,8 @@
 id: 0000t-2026-05-28-b1c06ef8-generate-non-freeform-picker-fields
 created_at: 2026-05-28T11:41:31+02:00
 created_by_model: gpt-5
-state: open
+state: implemented
+state_updated_at: 2026-05-28T13:05:00+02:00
 ---
 # Replace Non-Freeform Generate Fields With Pickers
 

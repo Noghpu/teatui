@@ -460,8 +460,8 @@ async fn fake_happy_path_captures_prompt_and_pr_url() {
     state.complete_context_collection(bundle);
     state.complete_generation(draft.clone());
     assert_eq!(state.phase, GeneratePhase::DraftReady);
-    assert_eq!(state.form.branch_name.value, "feature/example");
-    assert_eq!(state.form.title.value, "Improve PR generation");
+    assert_eq!(state.form.branch_name.display_value(), "feature/example");
+    assert_eq!(state.form.title.display_value(), "Improve PR generation");
 
     let requests = server.requests();
     let request = requests.first().expect("request");

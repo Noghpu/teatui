@@ -1330,11 +1330,13 @@ fn render_generate_field(
 
         if field.picker_is_editing() {
             let filter = field.picker_filter().unwrap_or("").trim();
-            lines.push(Line::from(format!(
-                "    filter: {}",
-                if filter.is_empty() { "(none)" } else { filter }
-            ))
-            .fg(colors::MUTED));
+            lines.push(
+                Line::from(format!(
+                    "    filter: {}",
+                    if filter.is_empty() { "(none)" } else { filter }
+                ))
+                .fg(colors::MUTED),
+            );
 
             let visible_options = field.picker_visible_options();
             if visible_options.is_empty() {

@@ -124,10 +124,7 @@ pub enum PromptView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldKind {
     Text { multiline: bool },
-    Picker {
-        multi_select: bool,
-        optional: bool,
-    },
+    Picker { multi_select: bool, optional: bool },
 }
 
 impl FieldKind {
@@ -140,7 +137,13 @@ impl FieldKind {
     }
 
     pub fn is_multi_select(self) -> bool {
-        matches!(self, Self::Picker { multi_select: true, .. })
+        matches!(
+            self,
+            Self::Picker {
+                multi_select: true,
+                ..
+            }
+        )
     }
 
     pub fn is_optional(self) -> bool {
@@ -330,16 +333,24 @@ impl PickerFieldState {
             .visible_options()
             .iter()
             .position(|option| option.selected && option.enabled)
-            .or_else(|| self.visible_options().iter().position(|option| option.enabled))
+            .or_else(|| {
+                self.visible_options()
+                    .iter()
+                    .position(|option| option.enabled)
+            })
             .unwrap_or(0);
         self.sync_buffer();
     }
 
     pub fn commit(&mut self) {
+        if self.editing && !self.multi_select {
+            self.select_highlighted();
+        }
         self.committed = self.draft.clone();
         self.value = join_picker_values(&self.committed);
         self.buffer = self.value.clone();
         self.dirty = self.committed != self.initial;
+        self.filter.clear();
         self.editing = false;
     }
 
@@ -364,20 +375,22 @@ impl PickerFieldState {
                 if key.modifiers.is_empty() && ch != ' ' && !ch.is_control() =>
             {
                 self.filter.push(ch);
-                self.highlighted = self.highlighted.min(self.visible_options().len().saturating_sub(1));
+                self.highlighted = self
+                    .highlighted
+                    .min(self.visible_options().len().saturating_sub(1));
                 self.sync_buffer();
             }
             crossterm::event::KeyCode::Backspace => {
                 self.filter.pop();
-                self.highlighted = self.highlighted.min(self.visible_options().len().saturating_sub(1));
+                self.highlighted = self
+                    .highlighted
+                    .min(self.visible_options().len().saturating_sub(1));
                 self.sync_buffer();
             }
             crossterm::event::KeyCode::Up => self.move_highlight(-1),
             crossterm::event::KeyCode::Down => self.move_highlight(1),
-            crossterm::event::KeyCode::Char(' ') => {
-                if self.multi_select {
-                    self.toggle_highlighted();
-                }
+            crossterm::event::KeyCode::Char(' ') if self.multi_select => {
+                self.toggle_highlighted();
             }
             _ => {}
         }
@@ -454,7 +467,10 @@ impl PickerFieldState {
             .get(self.highlighted.min(visible.len().saturating_sub(1)))
             .copied()
             .unwrap_or(visible[0]);
-        let position = visible.iter().position(|index| *index == current).unwrap_or(0);
+        let position = visible
+            .iter()
+            .position(|index| *index == current)
+            .unwrap_or(0);
         let next = if direction < 0 {
             position.saturating_sub(1)
         } else {
@@ -489,14 +505,28 @@ impl PickerFieldState {
         self.sync_buffer();
     }
 
+    fn select_highlighted(&mut self) {
+        let Some(index) = self.visible_option_indices().get(self.highlighted).copied() else {
+            return;
+        };
+        let Some(option) = self.options.get(index) else {
+            return;
+        };
+        if !option.enabled {
+            return;
+        }
+
+        self.draft.clear();
+        self.draft.push(option.value.clone());
+        self.sync_buffer();
+    }
+
     fn ensure_valid_selection(&mut self) {
         if self.options.is_empty() {
-            if !self.optional {
-                self.committed.clear();
-                self.draft.clear();
-                self.value.clear();
-                self.buffer.clear();
-            }
+            self.committed.clear();
+            self.draft.clear();
+            self.value.clear();
+            self.buffer.clear();
             self.highlighted = 0;
             return;
         }
@@ -510,11 +540,12 @@ impl PickerFieldState {
         self.committed
             .retain(|value| enabled_values.iter().any(|candidate| candidate == value));
         self.draft = self.committed.clone();
-        if self.committed.is_empty() && !self.optional {
-            if let Some(value) = enabled_values.first() {
-                self.committed.push(value.clone());
-                self.draft = self.committed.clone();
-            }
+        if self.committed.is_empty()
+            && !self.optional
+            && let Some(value) = enabled_values.first()
+        {
+            self.committed.push(value.clone());
+            self.draft = self.committed.clone();
         }
         self.value = join_picker_values(&self.committed);
         self.buffer = self.value.clone();
@@ -553,13 +584,13 @@ impl Eq for PickerFieldState {}
 
 #[derive(Debug, Clone)]
 pub enum FieldState {
-    Text(TextFieldState),
+    Text(Box<TextFieldState>),
     Picker(PickerFieldState),
 }
 
 impl FieldState {
     pub fn new(value: impl Into<String>) -> Self {
-        Self::Text(TextFieldState::new(value))
+        Self::Text(Box::new(TextFieldState::new(value)))
     }
 
     pub fn picker(value: impl Into<String>, multi_select: bool, optional: bool) -> Self {
@@ -787,7 +818,11 @@ fn parse_picker_values(value: &str, multi_select: bool) -> Vec<String> {
     let mut values = Vec::new();
     let mut seen = BTreeSet::new();
 
-    for value in value.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+    for value in value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         if seen.insert(value.to_string()) {
             values.push(value.to_string());
         }
@@ -1242,8 +1277,7 @@ impl GenerateState {
     pub fn validate_form(&mut self) {
         let head_errors = self.form_picker_errors(&self.form.head, "head");
         let base_errors = self.form_picker_errors(&self.form.base, "base");
-        let branch_errors =
-            validate_optional_branch_name(self.form.branch_name.display_value());
+        let branch_errors = validate_optional_branch_name(self.form.branch_name.display_value());
 
         self.form.head.set_errors(head_errors);
         self.form.branch_name.set_errors(branch_errors);
@@ -1494,7 +1528,6 @@ impl GenerateState {
             FieldState::Text(_) => Vec::new(),
         }
     }
-
 }
 
 pub fn validate_branch_name(value: &str) -> Vec<String> {
@@ -1780,9 +1813,8 @@ mod tests {
         ));
         field.commit();
 
-        assert_eq!(field.value, "initialx");
         assert_eq!(field.display_value(), "initialx");
-        assert!(field.dirty);
+        assert!(field.dirty());
     }
 
     #[test]
@@ -1795,9 +1827,8 @@ mod tests {
         ));
         field.cancel();
 
-        assert_eq!(field.value, "initial");
         assert_eq!(field.display_value(), "initial");
-        assert!(!field.dirty);
+        assert!(!field.dirty());
     }
 
     #[test]
@@ -1814,9 +1845,8 @@ mod tests {
         ));
         field.commit();
 
-        assert_eq!(field.value, "initial\nx");
         assert_eq!(field.display_value(), "initial\nx");
-        assert!(field.dirty);
+        assert!(field.dirty());
     }
 
     #[test]
@@ -1833,9 +1863,92 @@ mod tests {
         ));
         field.cancel();
 
-        assert_eq!(field.value, "initial");
         assert_eq!(field.display_value(), "initial");
-        assert!(!field.dirty);
+        assert!(!field.dirty());
+    }
+
+    #[test]
+    fn single_select_picker_commits_highlighted_option() {
+        let mut field = FieldState::picker("alpha", false, false);
+        field.set_picker_options(vec![
+            PickerOption::new("Alpha", "alpha"),
+            PickerOption::new("Beta", "beta"),
+        ]);
+
+        field.begin_edit();
+        field.input(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Down,
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        field.commit();
+
+        assert_eq!(field.display_value(), "beta");
+        assert_eq!(field.picker_selected_values(), &["beta".to_string()]);
+        assert!(field.dirty());
+    }
+
+    #[test]
+    fn picker_filter_limits_visible_options_and_commit_selection() {
+        let mut field = FieldState::picker("", false, false);
+        field.set_picker_options(vec![
+            PickerOption::new("main@origin", "main@origin"),
+            PickerOption::new("release@origin", "release@origin"),
+        ]);
+
+        field.begin_edit();
+        for ch in "rel".chars() {
+            field.input(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(ch),
+                crossterm::event::KeyModifiers::empty(),
+            ));
+        }
+
+        let visible = field.picker_visible_options();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].value, "release@origin");
+
+        field.commit();
+
+        assert_eq!(field.display_value(), "release@origin");
+    }
+
+    #[test]
+    fn multi_select_picker_toggles_with_space_and_cancels_draft() {
+        let mut field = FieldState::picker("", true, true);
+        field.set_picker_options(vec![
+            PickerOption::new("bug", "bug"),
+            PickerOption::new("ui", "ui"),
+        ]);
+
+        field.begin_edit();
+        field.input(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(' '),
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        field.input(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Down,
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        field.input(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(' '),
+            crossterm::event::KeyModifiers::empty(),
+        ));
+
+        assert_eq!(field.display_value(), "bug, ui");
+
+        field.cancel();
+
+        assert_eq!(field.display_value(), "");
+        assert!(field.picker_selected_values().is_empty());
+    }
+
+    #[test]
+    fn picker_options_drop_unavailable_committed_values() {
+        let mut field = FieldState::picker("old", false, true);
+        field.set_picker_options(Vec::new());
+
+        assert_eq!(field.display_value(), "");
+        assert!(field.picker_selected_values().is_empty());
     }
 
     #[test]
@@ -1850,8 +1963,8 @@ mod tests {
         let mut state = GenerateState::new(vec![revset("@")]);
         state.validate_form();
 
-        assert!(state.form.branch_name.errors.is_empty());
-        assert!(state.form.title.errors.is_empty());
+        assert!(state.form.branch_name.errors().is_empty());
+        assert!(state.form.title.errors().is_empty());
         assert!(state.blocking_errors().is_empty());
     }
 
@@ -1869,9 +1982,9 @@ mod tests {
         state.complete_generation(draft.clone());
 
         assert_eq!(state.phase, GeneratePhase::DraftReady);
-        assert_eq!(state.form.branch_name.value, draft.branch_name);
-        assert_eq!(state.form.title.value, draft.title);
-        assert_eq!(state.form.description.value, draft.body);
+        assert_eq!(state.form.branch_name.display_value(), draft.branch_name);
+        assert_eq!(state.form.title.display_value(), draft.title);
+        assert_eq!(state.form.description.display_value(), draft.body);
         assert_eq!(state.review.summary, "Generated draft for feature/example");
         assert_eq!(state.review.notes, draft.review_notes);
         assert_eq!(state.draft, Some(draft));
@@ -1906,9 +2019,9 @@ mod tests {
         };
         state.complete_generation(retry_draft);
 
-        assert_eq!(state.form.branch_name.value, "feature/retry");
-        assert_eq!(state.form.title.value, "Polished draft edited");
-        assert_eq!(state.form.description.value, "Retry summary");
+        assert_eq!(state.form.branch_name.display_value(), "feature/retry");
+        assert_eq!(state.form.title.display_value(), "Polished draft edited");
+        assert_eq!(state.form.description.display_value(), "Retry summary");
     }
 
     #[test]
@@ -1929,9 +2042,9 @@ mod tests {
             state.draft.as_ref().map(|draft| draft.branch_name.as_str()),
             Some("feature/example")
         );
-        assert_eq!(state.form.branch_name.value, "feature/example");
-        assert_eq!(state.form.title.value, "Polished draft");
-        assert_eq!(state.form.description.value, "Summary");
+        assert_eq!(state.form.branch_name.display_value(), "feature/example");
+        assert_eq!(state.form.title.display_value(), "Polished draft");
+        assert_eq!(state.form.description.display_value(), "Summary");
     }
 
     #[test]
