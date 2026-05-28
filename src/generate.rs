@@ -77,6 +77,18 @@ pub enum PromptView {
     Prompt,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldKind {
+    SingleLine,
+    Multiline,
+}
+
+impl FieldKind {
+    pub fn is_multiline(self) -> bool {
+        matches!(self, Self::Multiline)
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct FieldState {
     initial: String,
@@ -279,6 +291,19 @@ impl FieldId {
             Self::Labels => "labels",
             Self::Assignees => "assignees",
             Self::Milestone => "milestone",
+        }
+    }
+
+    pub fn kind(self) -> FieldKind {
+        match self {
+            Self::Description => FieldKind::Multiline,
+            Self::Head
+            | Self::BranchName
+            | Self::Base
+            | Self::Title
+            | Self::Labels
+            | Self::Assignees
+            | Self::Milestone => FieldKind::SingleLine,
         }
     }
 }
@@ -1097,6 +1122,13 @@ mod tests {
         state.replace_revsets(vec![revset("@"), revset("@-"), revset("heads(trunk()..)")]);
 
         assert_eq!(state.selected_revset().label(), "@-");
+    }
+
+    #[test]
+    fn field_kind_distinguishes_multiline_description() {
+        assert!(FieldId::Description.kind().is_multiline());
+        assert!(!FieldId::Head.kind().is_multiline());
+        assert!(!FieldId::Title.kind().is_multiline());
     }
 
     #[test]

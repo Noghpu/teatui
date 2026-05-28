@@ -652,13 +652,6 @@ fn render_work(frame: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::from("Select a mode on the left.".fg(colors::MUTED)));
             lines
         }
-        Screen::Generate
-            if app.input_mode() == crate::generate::InputMode::Editing
-                && app.focus() == Focus::Form =>
-        {
-            render_generate_editor(frame, app, area);
-            return;
-        }
         Screen::Generate => render_generate_fields(app, area),
         Screen::PullRequests => vec![
             Line::from("Manage PRs".bold()),
@@ -715,91 +708,6 @@ fn render_generate_fields(app: &App, area: Rect) -> Vec<Line<'static>> {
             lines
         })
         .collect()
-}
-
-fn render_generate_editor(frame: &mut Frame, app: &App, area: Rect) {
-    let title = generate_work_title(app.generate().phase);
-    let block = themed_block(focused_title(title, true), true);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let selected = app.generate().selected_field();
-    let total = FieldId::ALL.len();
-    let before = FieldId::ALL
-        .iter()
-        .take_while(|field_id| **field_id != selected)
-        .enumerate()
-        .flat_map(|(index, field_id)| {
-            render_generate_field(
-                app.generate(),
-                *field_id,
-                index == app.generate().selected_field,
-                false,
-                total,
-            )
-        })
-        .collect::<Vec<_>>();
-    let after = FieldId::ALL
-        .iter()
-        .skip_while(|field_id| **field_id != selected)
-        .skip(1)
-        .enumerate()
-        .flat_map(|(offset, field_id)| {
-            let index = app.generate().selected_field + offset + 1;
-            render_generate_field(
-                app.generate(),
-                *field_id,
-                index == app.generate().selected_field,
-                false,
-                total,
-            )
-        })
-        .collect::<Vec<_>>();
-
-    let field = app.generate().form.field(selected);
-    let editor_height = if matches!(selected, FieldId::Description) {
-        6
-    } else {
-        1
-    };
-    let [
-        before_area,
-        header_area,
-        editor_area,
-        errors_area,
-        after_area,
-    ] = Layout::vertical([
-        Constraint::Length(before.len() as u16),
-        Constraint::Length(1),
-        Constraint::Length(editor_height),
-        Constraint::Length(field.errors.len() as u16),
-        Constraint::Fill(1),
-    ])
-    .areas(inner);
-
-    frame.render_widget(
-        Paragraph::new(before).wrap(Wrap { trim: false }),
-        before_area,
-    );
-    let editor_header = format!(
-        "▶ {}  ({}/{})",
-        selected.label(),
-        app.generate().selected_field + 1,
-        total
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(editor_header).style(Style::new().bold().fg(colors::ACCENT))),
-        header_area,
-    );
-    frame.render_widget(&field.editor, editor_area);
-
-    let errors = field
-        .errors
-        .iter()
-        .map(|error| Line::from(format!("    - {error}")).fg(colors::BAD))
-        .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(errors), errors_area);
-    frame.render_widget(Paragraph::new(after).wrap(Wrap { trim: false }), after_area);
 }
 
 fn generate_work_title(phase: GeneratePhase) -> &'static str {
@@ -1212,13 +1120,14 @@ fn render_generate_field(
     let value = field.display_value().to_string();
     let error_count = field.errors.len();
     let marker = if selected { "▶" } else { " " };
+    let is_multiline = field_id.kind().is_multiline();
     let index_suffix = if focused {
         let n = generate.selected_field + 1;
         format!("  ({n}/{})", total_fields)
     } else {
         String::new()
     };
-    let header = if matches!(field_id, FieldId::Description) {
+    let header = if is_multiline {
         if error_count > 0 {
             format!("{marker} {label} ({error_count} errors){index_suffix}")
         } else {
@@ -1230,15 +1139,14 @@ fn render_generate_field(
         format!("{marker} {label}: {value}{index_suffix}")
     };
 
-    let mut lines =
-        Vec::with_capacity(1 + error_count + usize::from(matches!(field_id, FieldId::Description)));
+    let mut lines = Vec::with_capacity(1 + error_count + usize::from(is_multiline));
     if focused {
         lines.push(Line::from(header.bold().fg(colors::ACCENT)));
     } else {
         lines.push(Line::from(header.fg(colors::MUTED)));
     }
 
-    if matches!(field_id, FieldId::Description) {
+    if is_multiline {
         if value.trim().is_empty() {
             lines.push(Line::from("    (empty)").fg(colors::MUTED));
         } else {

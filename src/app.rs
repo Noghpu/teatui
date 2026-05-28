@@ -423,7 +423,7 @@ impl App {
         match key.code {
             KeyCode::Esc => self.finish_editing(false),
             KeyCode::Enter => {
-                if self.generate.selected_field() == crate::generate::FieldId::Description {
+                if self.generate.selected_field().kind().is_multiline() {
                     self.generate
                         .form
                         .field_mut(self.generate.selected_field())
@@ -434,7 +434,7 @@ impl App {
             }
             KeyCode::Char('s')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.generate.selected_field() == crate::generate::FieldId::Description =>
+                    && self.generate.selected_field().kind().is_multiline() =>
             {
                 self.finish_editing(true);
             }
