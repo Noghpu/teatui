@@ -442,6 +442,117 @@ fn is_jj_default_description(desc: &str) -> bool {
     trimmed.is_empty() || trimmed.eq_ignore_ascii_case("(no description set)")
 }
 
+/// Parse a raw jj `--stat` summary string into a compact human-readable form.
+///
+/// Handles the typical jj output shape:
+/// `N files changed, X insertions(+), Y deletions(-)`
+///
+/// Returns e.g. `3 files · +42 / -7`.  Falls back to the first non-empty line
+/// of `raw` when parsing fails.
+pub fn compact_diff_stat(raw: &str) -> String {
+    // jj --stat produces the summary line followed by per-file lines.
+    // The last line of the block is the totals line (or it may be the only line).
+    let summary_line = raw
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .find(|l| l.contains("files changed") || l.contains("file changed"))
+        .or_else(|| raw.lines().find(|l| !l.trim().is_empty()))
+        .unwrap_or("")
+        .trim();
+
+    if summary_line.is_empty() {
+        return String::new();
+    }
+
+    // Try to parse "N files changed, X insertions(+), Y deletions(-)"
+    let files = parse_stat_count(summary_line, "file");
+    if files.is_none() {
+        // Fall back: return first non-empty line as-is.
+        return summary_line.to_string();
+    }
+    let files = files.unwrap();
+    let file_label = if files == 1 { "file" } else { "files" };
+
+    let insertions = parse_stat_count(summary_line, "insertion").unwrap_or(0);
+    let deletions = parse_stat_count(summary_line, "deletion").unwrap_or(0);
+
+    if insertions == 0 && deletions == 0 {
+        format!("{files} {file_label}")
+    } else {
+        format!("{files} {file_label} · +{insertions} / -{deletions}")
+    }
+}
+
+/// Extract a count from a jj stat line for a given noun (e.g. "file", "insertion").
+/// Matches patterns like "3 files changed" or "1 file changed".
+fn parse_stat_count(line: &str, noun: &str) -> Option<u64> {
+    // Walk the line tokens looking for `<number> <noun...>`.
+    let lower = line.to_lowercase();
+    let pos = lower.find(noun)?;
+    // Walk backwards past whitespace to find the number token.
+    let before = lower[..pos].trim_end();
+    let num_str = before.split_whitespace().next_back()?;
+    num_str.parse::<u64>().ok()
+}
+
+/// Render a two-line section header: a blank line followed by a bold title.
+fn render_section_header(title: &str) -> Vec<Line<'static>> {
+    vec![Line::from(""), Line::from(title.to_string().bold())]
+}
+
+/// Render the top-of-column identifier block for the selected change.
+fn render_change_identifier(revset: &RevsetSummary) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    // change_id in accent color (first change_id if multiple)
+    let change_id = revset.change_ids().first().cloned().unwrap_or_default();
+    lines.push(Line::from(change_id.fg(colors::ACCENT)));
+
+    // Bookmarks (bold), omit line if empty
+    if !revset.bookmarks().is_empty() {
+        let bookmark_spans: Vec<ratatui::text::Span<'static>> = revset
+            .bookmarks()
+            .iter()
+            .enumerate()
+            .flat_map(|(i, b)| {
+                let mut spans = vec![ratatui::text::Span::styled(
+                    b.clone(),
+                    ratatui::style::Style::new().bold(),
+                )];
+                if i + 1 < revset.bookmarks().len() {
+                    spans.push(ratatui::text::Span::raw(", "));
+                }
+                spans
+            })
+            .collect();
+        lines.push(Line::from(bookmark_spans));
+    }
+
+    // Description subject line
+    let desc = revset.description();
+    if !is_jj_default_description(desc) {
+        lines.push(Line::from(desc.to_string()));
+    }
+
+    // Description body (indented), omit if empty/placeholder
+    if revset.is_meaningful_body() {
+        for body_line in revset.description_body().lines() {
+            lines.push(Line::from(format!("  {body_line}")));
+        }
+    }
+
+    // Compact diff stat
+    let stat = compact_diff_stat(revset.stats());
+    if !stat.is_empty() {
+        lines.push(Line::from(stat.fg(colors::MUTED)));
+    }
+
+    // Scope revset (muted, for power users)
+    lines.push(Line::from(revset.label().to_string().fg(colors::MUTED)));
+
+    lines
+}
+
 fn truncate_chars(s: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
@@ -1145,67 +1256,56 @@ fn render_generate_field(
 fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
     let generate = app.generate();
     let revset = generate.selected_revset();
-    let mut lines = vec![
-        Line::from("Selected Revset".bold()),
-        Line::from(""),
-        Line::from(format!("revset: {}", revset.label()).fg(colors::ACCENT)),
-        Line::from(format!("description: {}", revset.description())),
-        Line::from(format!("bookmarks: {}", revset.bookmarks().join(", ")).fg(colors::MUTED)),
-        Line::from(format!("stats: {}", revset.stats()).fg(colors::MUTED)),
-        Line::from(format!("commits: {}", revset.commit_count())),
-        Line::from(format!("commit ids: {}", revset.commit_ids().join(", "))),
-        Line::from(format!("change ids: {}", revset.change_ids().join(", "))),
-        Line::from(""),
-        Line::from(format!("phase: {}", generate.phase.label()).fg(colors::MUTED)),
-        Line::from(format!("input mode: {}", app.input_mode().label()).fg(colors::MUTED)),
-        Line::from(format!(
-            "base branch: {} ({:?})",
-            app.repo().base_branch.name,
-            app.repo().base_branch.source
-        )),
-    ];
+
+    // Always-visible identifier block at the top.
+    let mut lines = render_change_identifier(revset);
+
+    // Base branch as a muted footer line of the identifier block.
+    lines.push(Line::from(
+        format!("base: {}", app.repo().base_branch.name,).fg(colors::MUTED),
+    ));
+
+    // Phase-specific section.
+    let phase_title = generate_work_title(generate.phase);
+    lines.extend(render_section_header(phase_title));
 
     match generate.phase {
         GeneratePhase::CollectingContext => {
-            lines.push(Line::from(""));
-            lines.push(Line::from("Collecting context".bold()));
-            lines.push(Line::from(format!(
-                "selected revset: {}",
-                generate.selected_revset().label()
-            )));
-            lines.push(Line::from(format!(
-                "base branch: {}",
-                generate.form.base.display_value()
-            )));
-            lines.push(Line::from("jj status".fg(colors::MUTED)));
-            lines.push(Line::from("jj log".fg(colors::MUTED)));
-            lines.push(Line::from("jj diff --stat".fg(colors::MUTED)));
-            lines.push(Line::from("jj diff".fg(colors::MUTED)));
+            // Status
+            lines.push(Line::from("Collecting context…".fg(colors::ACCENT)));
+            lines.push(Line::from(
+                format!("base branch: {}", generate.form.base.display_value()).fg(colors::MUTED),
+            ));
+            // Recent logs
+            lines.extend(render_section_header("Logs"));
+            lines.extend(render_recent_logs(&app.logs().entries, 6));
         }
         GeneratePhase::Generating => {
-            lines.push(Line::from(""));
-            lines.push(Line::from("Generating draft".bold()));
-            lines.push(Line::from(
-                "The retained draft stays visible while a fresh response is requested."
-                    .fg(colors::MUTED),
-            ));
+            // Status
+            lines.push(Line::from("Generating draft…".fg(colors::ACCENT)));
             lines.push(Line::from(
                 "Waiting for a validated JSON draft.".fg(colors::MUTED),
             ));
+            // Details
             if let Some(draft) = generate.draft.as_ref() {
-                lines.push(Line::from(""));
+                lines.extend(render_section_header("Draft"));
                 lines.extend(render_draft_section(draft));
             }
             if let Some(prompt) = generate.prompt() {
-                lines.push(Line::from(format!(
-                    "prompt bytes: {}",
-                    prompt.manifest.byte_count
-                )));
+                lines.push(Line::from(
+                    format!("prompt bytes: {}", prompt.manifest.byte_count).fg(colors::MUTED),
+                ));
             }
+            // Recent logs
+            lines.extend(render_section_header("Logs"));
+            lines.extend(render_recent_logs(&app.logs().entries, 6));
         }
         GeneratePhase::ContextReady => {
+            // Status
+            lines.push(Line::from("Context ready.".fg(colors::GOOD)));
+            // Details: prompt manifest or prompt text
             if let Some(prompt) = generate.prompt() {
-                lines.push(Line::from(""));
+                lines.extend(render_section_header("Prompt"));
                 match generate.prompt_view {
                     PromptView::Manifest => lines.extend(render_prompt_manifest(prompt)),
                     PromptView::Prompt => lines.extend(render_prompt_text(prompt)),
@@ -1213,23 +1313,24 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             }
         }
         GeneratePhase::DraftReady => {
-            lines.push(Line::from(""));
-            lines.push(Line::from("Draft review".bold()));
+            // Status
             lines.push(
                 Line::from(format!("status: {}", generate.review.summary)).fg(colors::ACCENT),
             );
             lines.push(Line::from(
                 "The generated draft is editable in the center pane.".fg(colors::MUTED),
             ));
+            // Details: draft + manifest warnings
             if let Some(draft) = generate.draft.as_ref() {
-                lines.push(Line::from(""));
+                lines.extend(render_section_header("Draft"));
                 lines.extend(render_draft_section(draft));
             }
             if let Some(prompt) = generate.prompt() {
-                lines.push(Line::from(""));
+                lines.extend(render_section_header("Manifest warnings"));
                 lines.extend(render_manifest_warnings(prompt));
             }
-            lines.push(Line::from(""));
+            // Recent logs
+            lines.extend(render_section_header("Logs"));
             lines.extend(render_recent_logs(&app.logs().entries, 6));
             lines.push(Line::from(""));
             lines.push(Line::from(
@@ -1242,21 +1343,22 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             ));
         }
         GeneratePhase::CheckingFreshness => {
-            lines.push(Line::from(""));
-            lines.push(Line::from("Checking repo freshness".bold()));
+            // Status
             lines.push(Line::from(
                 generate
                     .confirmation_summary
                     .as_deref()
-                    .map(|summary| format!("validation: {summary}"))
+                    .map(|s| format!("validation: {s}"))
                     .unwrap_or_else(|| "validation: running".to_string()),
             ));
-            lines.push(Line::from("freshness: verifying repo context...").fg(colors::WARN));
+            lines.push(Line::from("freshness: verifying repo context…").fg(colors::WARN));
+            // Details: draft
             if let Some(draft) = generate.draft.as_ref() {
-                lines.push(Line::from(""));
+                lines.extend(render_section_header("Draft"));
                 lines.extend(render_draft_section(draft));
             }
-            lines.push(Line::from(""));
+            // Recent logs
+            lines.extend(render_section_header("Logs"));
             lines.extend(render_recent_logs(&app.logs().entries, 6));
             lines.push(Line::from(""));
             lines.push(Line::from(
@@ -1264,13 +1366,12 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             ));
         }
         GeneratePhase::Confirming => {
-            lines.push(Line::from(""));
-            lines.push(Line::from("Execution preview".bold()));
+            // Status
             lines.push(Line::from(
                 generate
                     .confirmation_summary
                     .as_deref()
-                    .map(|summary| format!("validation: {summary}"))
+                    .map(|s| format!("validation: {s}"))
                     .unwrap_or_else(|| "validation: passed".to_string()),
             ));
             lines.push(match generate.freshness_result.as_ref() {
@@ -1280,11 +1381,13 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
                 }
                 None => Line::from("freshness: unavailable").fg(colors::WARN),
             });
+            // Details: execution plan
             if let Some(plan) = generate.execution_plan.as_ref() {
-                lines.push(Line::from(""));
+                lines.extend(render_section_header("Execution plan"));
                 lines.extend(render_execution_plan(plan));
             }
-            lines.push(Line::from(""));
+            // Recent logs
+            lines.extend(render_section_header("Logs"));
             lines.extend(render_recent_logs(&app.logs().entries, 6));
             lines.push(Line::from(""));
             lines.push(Line::from(
@@ -1292,41 +1395,43 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             ));
         }
         GeneratePhase::Executing => {
-            lines.push(Line::from(""));
-            lines.push(Line::from("Executing PR plan".bold()));
+            // Status
             if let Some(step) = generate.execution_step {
                 let total = generate.execution_total.unwrap_or(0);
                 lines.push(Line::from(format!("step: {}/{}", step + 1, total)).fg(colors::ACCENT));
+            } else {
+                lines.push(Line::from("Executing…".fg(colors::ACCENT)));
             }
-            lines.push(Line::from(
-                "The current step stays visible in the job registry.".fg(colors::MUTED),
-            ));
             lines.push(Line::from(
                 "Wait for the current command to finish.".fg(colors::MUTED),
             ));
-            lines.push(Line::from(""));
+            // Details: job registry + execution plan
+            lines.extend(render_section_header("Jobs"));
             lines.extend(render_job_records(&app.jobs().records));
             if let Some(plan) = generate.execution_plan.as_ref() {
-                lines.push(Line::from(""));
+                lines.extend(render_section_header("Execution plan"));
                 lines.extend(render_execution_plan(plan));
             }
-            lines.push(Line::from(""));
+            // Recent logs
+            lines.extend(render_section_header("Logs"));
             lines.extend(render_recent_logs(&app.logs().entries, 6));
         }
         GeneratePhase::Complete => {
-            lines.push(Line::from(""));
-            lines.push(Line::from("Execution complete".bold()));
+            // Status
+            lines.push(Line::from("Execution complete.".fg(colors::GOOD)));
             if let Some(completion) = generate.completion.as_ref() {
                 lines.push(Line::from(match completion.pr_url.as_ref() {
                     Some(url) => format!("PR URL: {url}"),
                     None => "PR URL: (not parsed)".to_string(),
                 }));
-                lines.push(Line::from(""));
+                // Details: execution plan
+                lines.extend(render_section_header("Execution plan"));
                 lines.extend(render_execution_plan(&completion.plan));
             } else {
                 lines.push(Line::from("completion details unavailable").fg(colors::BAD));
             }
-            lines.push(Line::from(""));
+            // Recent logs
+            lines.extend(render_section_header("Logs"));
             lines.extend(render_recent_logs(&app.logs().entries, 6));
             lines.push(Line::from(""));
             lines.push(Line::from(
@@ -1334,29 +1439,19 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             ));
         }
         GeneratePhase::Failed => {
-            lines.push(Line::from(""));
-            lines.push(Line::from("Draft workflow failed".bold()));
+            // Status
             lines.push(
                 Line::from(format!("status: {}", generate.review.summary)).fg(colors::ACCENT),
             );
             if let Some(error) = &generate.context_error {
-                lines.push(Line::from("Context failed".bold()));
+                lines.push(Line::from("Context collection failed:".bold()));
                 lines.push(Line::from(error.clone()).fg(colors::BAD));
             }
             if let Some(error) = &generate.generation_error {
-                lines.push(Line::from("Generation failed".bold()));
+                lines.push(Line::from("Generation failed:".bold()));
                 lines.push(Line::from(error.clone()).fg(colors::BAD));
             }
-            if let Some(draft) = generate.draft.as_ref() {
-                lines.push(Line::from(""));
-                lines.extend(render_draft_section(draft));
-            }
-            if let Some(prompt) = generate.prompt() {
-                lines.push(Line::from(""));
-                lines.extend(render_manifest_warnings(prompt));
-            }
             if let Some(summary) = generate.confirmation_summary.as_ref() {
-                lines.push(Line::from(""));
                 lines.push(Line::from(format!("validation: {summary}")).fg(colors::ACCENT));
             }
             if let Some(result) = generate.freshness_result.as_ref() {
@@ -1375,11 +1470,21 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             if let Some(error) = &generate.execution_error {
                 lines.push(Line::from(error.clone()).fg(colors::BAD));
             }
+            // Details
+            if let Some(draft) = generate.draft.as_ref() {
+                lines.extend(render_section_header("Draft"));
+                lines.extend(render_draft_section(draft));
+            }
+            if let Some(prompt) = generate.prompt() {
+                lines.extend(render_section_header("Manifest warnings"));
+                lines.extend(render_manifest_warnings(prompt));
+            }
             if let Some(plan) = generate.execution_plan.as_ref() {
-                lines.push(Line::from(""));
+                lines.extend(render_section_header("Execution plan"));
                 lines.extend(render_execution_plan(plan));
             }
-            lines.push(Line::from(""));
+            // Recent logs
+            lines.extend(render_section_header("Logs"));
             lines.extend(render_recent_logs(&app.logs().entries, 6));
             lines.push(Line::from(""));
             lines.push(Line::from(
@@ -1387,8 +1492,9 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             ));
         }
         _ => {
+            // SelectingRevset / EditingForm
             if let Some(draft) = generate.draft.as_ref() {
-                lines.push(Line::from(""));
+                lines.extend(render_section_header("Draft"));
                 lines.extend(render_draft_section(draft));
             }
             lines.push(Line::from(""));
@@ -1409,7 +1515,6 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
 
 fn render_draft_section(draft: &crate::generate::GeneratedDraft) -> Vec<Line<'static>> {
     let mut lines = vec![
-        Line::from("Generated draft".bold()),
         Line::from(format!("branch: {}", draft.branch_name).fg(colors::ACCENT)),
         Line::from(format!("title: {}", draft.title)),
         Line::from(format!("body chars: {}", draft.body.len())).fg(colors::MUTED),
@@ -1447,7 +1552,7 @@ fn render_draft_section(draft: &crate::generate::GeneratedDraft) -> Vec<Line<'st
 }
 
 fn render_execution_plan(plan: &ExecutionPlan) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from("Execution plan".bold())];
+    let mut lines = Vec::new();
 
     for (index, step) in plan.steps.iter().enumerate() {
         lines.push(Line::from(format!("{}. {}", index + 1, step.label)).fg(colors::ACCENT));
@@ -1498,7 +1603,7 @@ fn render_job_records(records: &[JobRecord]) -> Vec<Line<'static>> {
 }
 
 fn render_manifest_warnings(prompt: &PromptBuild) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from("Prompt manifest warnings".bold())];
+    let mut lines = Vec::new();
 
     if prompt.manifest.truncation_warnings.is_empty() {
         lines.push(Line::from("  (none)").fg(colors::MUTED));
@@ -1515,7 +1620,7 @@ fn render_recent_logs(
     entries: &std::collections::VecDeque<String>,
     limit: usize,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from("Recent logs".bold())];
+    let mut lines = Vec::new();
     let recent: Vec<_> = entries.iter().rev().take(limit).cloned().collect();
 
     if recent.is_empty() {
@@ -1531,7 +1636,7 @@ fn render_recent_logs(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_jj_default_description, truncate_chars, wrap_chars};
+    use super::{compact_diff_stat, is_jj_default_description, truncate_chars, wrap_chars};
 
     #[test]
     fn jj_default_description_recognises_placeholder() {
@@ -1563,5 +1668,58 @@ mod tests {
         // Multi-byte chars must split on char boundaries, not byte boundaries.
         assert_eq!(wrap_chars("héllo wörld", 5), vec!["héllo", " wörl", "d"]);
         assert_eq!(wrap_chars("🚀🚀🚀🚀", 2), vec!["🚀🚀", "🚀🚀"]);
+    }
+
+    #[test]
+    fn compact_diff_stat_typical_jj_output() {
+        assert_eq!(
+            compact_diff_stat("3 files changed, 42 insertions(+), 7 deletions(-)"),
+            "3 files · +42 / -7"
+        );
+    }
+
+    #[test]
+    fn compact_diff_stat_one_file() {
+        assert_eq!(
+            compact_diff_stat("1 file changed, 5 insertions(+), 0 deletions(-)"),
+            "1 file · +5 / -0"
+        );
+    }
+
+    #[test]
+    fn compact_diff_stat_insertions_only() {
+        assert_eq!(
+            compact_diff_stat("2 files changed, 10 insertions(+)"),
+            "2 files · +10 / -0"
+        );
+    }
+
+    #[test]
+    fn compact_diff_stat_zero_files() {
+        // jj may emit "0 files changed, ..." for empty diffs.
+        assert_eq!(
+            compact_diff_stat("0 files changed, 0 insertions(+), 0 deletions(-)"),
+            "0 files"
+        );
+    }
+
+    #[test]
+    fn compact_diff_stat_empty_input() {
+        assert_eq!(compact_diff_stat(""), "");
+    }
+
+    #[test]
+    fn compact_diff_stat_multiline_with_summary_last() {
+        // jj --stat prints per-file lines followed by the summary line.
+        let raw = "src/foo.rs | 10 ++++------\nsrc/bar.rs | 5 ++---\n2 files changed, 7 insertions(+), 8 deletions(-)";
+        assert_eq!(compact_diff_stat(raw), "2 files · +7 / -8");
+    }
+
+    #[test]
+    fn compact_diff_stat_fallback_on_unrecognised_format() {
+        // When the input doesn't contain "files changed" the first non-empty
+        // line is returned verbatim.
+        let raw = "some weird stat output";
+        assert_eq!(compact_diff_stat(raw), "some weird stat output");
     }
 }
