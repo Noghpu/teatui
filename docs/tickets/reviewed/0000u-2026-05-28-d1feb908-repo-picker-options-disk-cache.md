@@ -2,8 +2,8 @@
 id: 0000u-2026-05-28-d1feb908-repo-picker-options-disk-cache
 created_at: 2026-05-28T11:42:07+02:00
 created_by_model: gpt-5
-state: implemented
-state_updated_at: 2026-05-28T16:09:11+02:00
+state: reviewed
+state_updated_at: 2026-05-28T16:14:24+02:00
 ---
 # Load And Cache Repo Picker Options
 
@@ -150,3 +150,49 @@ Implemented the full repo picker options disk cache feature for the Generate PR 
 - The warning from stale cache or partial failure is stored in `RepoOptions.status_warning()` but not yet surfaced in the UI right pane or picker field. A future UI ticket should render it near the picker or in the status bar.
 - `tea api` path injection uses `{owner}` and `{repo}` placeholders per the ticket's description; actual replacement is done by the `tea` CLI based on current repo context, not by teatui.
 - Cache is stored in `dirs::cache_dir()/teatui/repo-options/<key>.json`; no migration needed since version field guards old formats.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: claude-opus-4-7
+- reviewed_at: 2026-05-28T16:14:24+02:00
+- state: reviewed
+
+## Review Summary
+
+Reviewed 0000u: load and cache repo picker options. Implementation is solid and meets the acceptance criteria. Applied minor cleanups for clarity.
+
+## What was reviewed
+
+- `src/repo_options.rs` (new, ~760 lines): JSON parsers, atomic disk cache, stale-while-revalidate spawn loader.
+- `src/tea.rs`: new argv builders for `labels list`, `milestones list`, `api /repos/{owner}/{repo}/collaborators`.
+- `src/event.rs`: new `BackgroundEvent::RepoOptions(Box<RepoOptionsResult>)`.
+- `src/app.rs`: `RepoOptions` field, `apply_repo_options`, `spawn_repo_options_load` wired into Generate PR entry, remote-transition trigger, and `r` refresh.
+- `src/lib.rs`: registers the new module.
+
+## Strengths
+
+- Cache is version-gated, atomically written (temp + rename), uses `dirs::cache_dir()/teatui/repo-options/<sanitized-key>.json`.
+- Stale-while-revalidate: usable cache (<7d) sent first; live refresh skipped when fresh (<15min) unless `force_refresh`.
+- Parsers tolerant of extra fields but reject missing required display values (name/title/login).
+- All command construction uses argv arrays through `ExternalCommand`/`capture`, no shell strings.
+- Loader never blocks the UI; failures degrade to `Unavailable` with a reason rather than panicking.
+- Good unit coverage: sanitization, cache freshness/usability boundaries, parser edge cases, selection retention behavior.
+
+## Fixes applied
+
+- Removed unused `OptionsLoadStatus::Loading` variant (dead code; loader transitions Idle -> Ready/Unavailable directly, as the implementation note acknowledged).
+- Inlined the trivial three-line `build_commands` helper at its only call site; dropped now-unused `Path` and `ExternalCommand` imports.
+- Verified `just verify` still passes: 153 unit tests + 4 integration tests, no clippy warnings.
+
+## Findings not fixed (out of scope or accepted deviation)
+
+- The ticket says "If a selected value disappears from refreshed options, keep it selected but mark it invalid or stale until the user changes it." The existing `PickerFieldState::ensure_valid_selection` silently drops invalid selections, and the new test `set_picker_options_clears_invalid_previously_selected_value` asserts that drop behavior. This is inherited from ticket 0000t and changing it would alter picker semantics globally; it deserves a follow-up ticket if the design intent is to preserve-but-flag.
+- `RepoOptions.status_warning()` is populated but not yet surfaced in the UI right pane / picker. The implementation note flags this as a deferred UI slice; consistent with the ticket's intent that the warning is "visible in the picker/right pane".
+- `apply_repo_options` logs counts even when called from cache, which is useful for diagnostics. No change recommended.
+
+## Verification
+
+- `just verify` after cleanups: all 153 unit + 4 integration tests pass; no clippy warnings.
