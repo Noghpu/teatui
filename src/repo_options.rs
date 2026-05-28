@@ -1,10 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::command::{ExternalCommand, capture};
+use crate::command::capture;
 use crate::config::Config;
 use crate::event::BackgroundEvent;
 use crate::generate::PickerOption;
@@ -251,8 +251,6 @@ pub enum OptionsLoadStatus {
     /// No load has been started.
     #[default]
     Idle,
-    /// Loading from cache or live source.
-    Loading,
     /// Options are ready (may be stale).
     Ready {
         /// True when the data came from live fetch (not cache-only).
@@ -322,18 +320,6 @@ pub struct RepoOptionsResult {
     pub from_cache: bool,
 }
 
-/// Build the tea commands to fetch labels, milestones, and collaborators.
-fn build_commands(
-    client: &TeaClient,
-    cwd: &Path,
-) -> (ExternalCommand, ExternalCommand, ExternalCommand) {
-    (
-        client.labels_list_command(cwd),
-        client.milestones_list_command(cwd),
-        client.collaborators_command(cwd),
-    )
-}
-
 /// Background loader: first sends cached data if available (and cache is usable),
 /// then performs live fetch if needed. Sends `BackgroundEvent::RepoOptions` once or twice.
 pub fn spawn_repo_options_load(
@@ -380,12 +366,10 @@ pub fn spawn_repo_options_load(
 
         // Live fetch.
         let tea = TeaClient::new(&config);
-        let (labels_cmd, milestones_cmd, collaborators_cmd) = build_commands(&tea, &cwd);
-
         let (labels_result, milestones_result, collaborators_result) = tokio::join!(
-            capture(labels_cmd),
-            capture(milestones_cmd),
-            capture(collaborators_cmd),
+            capture(tea.labels_list_command(&cwd)),
+            capture(tea.milestones_list_command(&cwd)),
+            capture(tea.collaborators_command(&cwd)),
         );
 
         let mut warnings = Vec::new();
