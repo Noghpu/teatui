@@ -227,6 +227,7 @@ impl FakeCommandTree {
         RepoState {
             workspace_root: Some(self.workspace.clone()),
             inside_workspace: true,
+            discovering: false,
             jj: ToolStatus::Available,
             git: ToolStatus::Available,
             tea: ToolStatus::Available,

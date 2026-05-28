@@ -367,7 +367,7 @@ impl App {
 
     fn open_selected_landing_entry(&mut self) {
         self.screen = match self.landing.selected_entry {
-            0 if self.repo.inside_workspace => Screen::Generate,
+            0 if self.repo.inside_workspace || self.repo.discovering => Screen::Generate,
             0 => {
                 self.log("Generate PR requires a jj workspace");
                 Screen::Landing

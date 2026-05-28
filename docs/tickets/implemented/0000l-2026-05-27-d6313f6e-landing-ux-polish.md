@@ -2,7 +2,8 @@
 id: 0000l-2026-05-27-d6313f6e-landing-ux-polish
 created_at: 2026-05-27T20:53:46+02:00
 created_by_model: claude-sonnet-4-6/normal
-state: open
+state: implemented
+state_updated_at: 2026-05-28T07:57:08+02:00
 ---
 # Landing UX Polish: Key Hint, Async Navigation, Status Bar Pruning
 
@@ -106,3 +107,47 @@ Proposed pruning:
 ## Risks
 
 - Adding `discovering` to `RepoState` may require updating any pattern matches or struct literals in tests or other call sites. `RepoState` is constructed in `repo.rs`; search for other `RepoState { ... }` usages and add the field.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: claude-sonnet-4-6
+- completed_at: 2026-05-28T07:57:08+02:00
+- state: implemented
+
+## Completed
+
+All three items from the ticket were implemented:
+
+1. **Key hint change**: Changed `key: "Enter/g"` to `key: "g"` for the Generate PR action in `render_landing_actions` in `src/ui.rs`.
+
+2. **Async navigation guard**: Added `pub discovering: bool` field to `RepoState` in `src/repo.rs`. Set to `true` in `RepoState::new()` and `false` in the struct literal returned by `discover()`. Updated the guard in `open_selected_landing_entry` in `src/app.rs` to `0 if self.repo.inside_workspace || self.repo.discovering`.
+
+3. **Status bar hint pruning**:
+   - Landing: removed `â†‘/k up`, `â†“/j down`, `Esc back`; kept `Enter open`, `q quit`.
+   - Generate normal mode: removed `â†‘/k up`, `â†“/j down`; all other hints kept.
+   - PullRequests/Issues: removed `â†‘/k up`, `â†“/j down`; kept `Enter select`, `c comment`, `Esc back`.
+
+## Deviations
+
+None. Implementation follows the plan exactly. The `discovering: false` field was also added to all other `RepoState` struct literals across the codebase (in `src/bin/smoke-live.rs`, `src/generate.rs`, `src/prompt.rs`, and `tests/windows_pr_generation_integration.rs`).
+
+## Verification
+
+`just verify` passes: 66 unit tests + 4 integration tests all pass.
+
+## Files Changed
+
+- `src/repo.rs` â€” added `discovering` field to `RepoState`, set `true` in `new()`, `false` in `discover()` return value
+- `src/app.rs` â€” updated navigation guard to `|| self.repo.discovering`
+- `src/ui.rs` â€” key hint and help bar changes
+- `src/bin/smoke-live.rs` â€” added `discovering: false` to two `RepoState` struct literals
+- `src/generate.rs` â€” added `discovering: false` to test `RepoState` struct literal
+- `src/prompt.rs` â€” added `discovering: false` to test `RepoState` struct literal
+- `tests/windows_pr_generation_integration.rs` â€” added `discovering: false` to test `RepoState` struct literal
+
+## Residual Risks
+
+None identified. The `apply_repo` handler already redirects back to Landing if discovery completes with `!inside_workspace`, so the optimistic entry is safe.
