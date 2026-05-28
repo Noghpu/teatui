@@ -2,8 +2,8 @@
 id: 0000n-2026-05-28-17ad59d6-generate-per-change-left-column
 created_at: 2026-05-28T10:00:37+02:00
 created_by_model: claude-opus-4-7/high
-state: implemented
-state_updated_at: 2026-05-28T10:17:30+02:00
+state: reviewed
+state_updated_at: 2026-05-28T10:21:38+02:00
 ---
 # Generate Screen: Per-Change Left Column (`trunk()..@`)
 
@@ -190,3 +190,41 @@ Implemented the per-change left column for the Generate screen. The three-preset
 - Diff-stat fetch is sequential (N round-trips); fine for small stacks.
 - `revset.label()` now returns `trunk()..<change_id>` â€” right column (separate ticket) should account for this when displaying human-readable revset info.
 - `sync_head_from_selected_revset` sets `form.head` to `trunk()..<change_id>`; semantically this is the scope, not just the tip. The base-as-change ticket will clean this up.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: claude-opus-4-7
+- reviewed_at: 2026-05-28T10:21:38+02:00
+- state: reviewed
+
+## Review summary
+
+The implementation matches the ticket and acceptance criteria. Discovery returns one `RevsetSummary` per change in `trunk()..@`, each with `label = "trunk()..<change_id>"`. `render_generate_menu` builds wrapped rows with a `â”€`-separator between (not after the last) and a `â–¶`-marker only on the first line of the selected row. Bookmarks are shown in bold; description first line is the fallback; abbreviated `change_id` is the second fallback; `revset.label()` is a final fallback the code paths can never actually hit (kept defensively). `wrap_chars` uses `chars()` collection and indexed slicing â€” char-boundary safe, no byte-slice panics on multibyte input.
+
+`just verify` passes (fmt, check, clippy clean, 71 unit tests + 4 integration tests).
+
+## Facts checked
+
+- `CANDIDATE_REVSETS` / `candidate_revsets` fully removed from `src/`; only the ticket markdown still mentions them.
+- `spawn_revset_discovery` now calls `per_change_revsets`. The discovery query is one `jj log -r 'trunk()..@' --no-graph -T <template>` plus one `jj diff -r 'trunk()..<change_id>' --stat` per change, sequential â€” matches the ticket's accepted risk.
+- Empty `trunk()..@` returns a single `no_changes_placeholder()` row with `label = "(no changes above trunk())"` and a non-empty warnings list, so downstream form validation surfaces a soft error rather than panicking.
+- Selection state in `GenerateState` is untouched; `sync_head_from_selected_revset` keeps writing `revset.label()` into `form.head`, which is now `trunk()..<change_id>`. The ticket explicitly accepts this UX-leak; the base-as-change ticket will clean it up.
+- `parse_revset_summary` is called per change with a single-entry log line, so `commit_count == 1` for every per-change row â€” the `commit_count > 1` warning in `revset_warnings` never fires for normal discovery output. No code change needed.
+- The pre-existing `replace_revsets` empty-vec branch (`"(no revsets)"`) is now unreachable from discovery since `per_change_revsets` always returns at least the placeholder. Left alone â€” out of scope for this ticket and harmless as a defensive guard if any future caller passes an empty vec.
+
+## Fixes applied during review
+
+- Added a `wrap_chars` unit test covering ASCII wrap, no-wrap, empty input, zero-width, and multi-byte input (accented chars, emoji). The implementation note's main risk was byte-slice panics on multibyte input; the prior tests covered `truncate_chars` only and left `wrap_chars` untested. Now 71 unit tests instead of 70.
+
+## Inferences / residual notes
+
+- Diff-stat fetch is sequential (N round-trips). Acceptable per ticket risk; can be parallelized via `tokio::join_all` later if it bites.
+- Manual visual smoke (multi-change stack, bookmark display, wrapping, separators) was not run â€” agent cannot drive the TTY. Logic is exercised by the unit tests covering parsing, label construction, and the new wrap tests; visual behavior depends on `ratatui` `Paragraph` + `Wrap { trim: false }` which is well-trodden.
+- `revset.label()` is now a jj-revset string even when shown in human-facing places (status line `selected revset: {label}`, right column `revset: {label}`). That is the documented temporary UX regression the right-column redesign ticket will resolve.
+
+## Files touched in this review
+
+- `C:/Users/dev/projects/teatui-rs/teatui/src/ui.rs` â€” added `wrap_chars` test cases.
