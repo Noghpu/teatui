@@ -1531,7 +1531,7 @@ fn render_recent_logs(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_jj_default_description, truncate_chars};
+    use super::{is_jj_default_description, truncate_chars, wrap_chars};
 
     #[test]
     fn jj_default_description_recognises_placeholder() {
@@ -1550,5 +1550,18 @@ mod tests {
         // Multi-byte: each emoji is multiple bytes; must not panic on byte index.
         assert_eq!(truncate_chars("héllo", 4), "héll");
         assert_eq!(truncate_chars("🚀🚀🚀", 2), "🚀🚀");
+    }
+
+    #[test]
+    fn wrap_chars_splits_on_char_boundaries() {
+        assert_eq!(wrap_chars("hello world", 5), vec!["hello", " worl", "d"]);
+        assert_eq!(wrap_chars("short", 10), vec!["short"]);
+        // Empty input still yields one line so callers can emit the marker row.
+        assert_eq!(wrap_chars("", 5), vec![""]);
+        // Zero width must not panic and produces a single empty line.
+        assert_eq!(wrap_chars("abc", 0), vec![""]);
+        // Multi-byte chars must split on char boundaries, not byte boundaries.
+        assert_eq!(wrap_chars("héllo wörld", 5), vec!["héllo", " wörl", "d"]);
+        assert_eq!(wrap_chars("🚀🚀🚀🚀", 2), vec!["🚀🚀", "🚀🚀"]);
     }
 }
