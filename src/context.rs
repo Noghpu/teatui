@@ -51,7 +51,7 @@ pub async fn collect(
     config: &Config,
     repo: RepoState,
     form: PrForm,
-    selected_revset: RevsetSummary,
+    _selected_revset: RevsetSummary,
 ) -> Result<ContextBundle, CommandError> {
     let client = JjClient::new(config);
     let collected_at = SystemTime::now();
@@ -60,7 +60,7 @@ pub async fn collect(
         .clone()
         .or_else(|| std::env::current_dir().ok());
     let cwd = workspace_root.clone().unwrap_or_else(|| PathBuf::from("."));
-    let label = selected_revset.label();
+    let label = form.head.display_value().trim();
 
     let status = capture(client.status_command(&cwd)).await?;
     let revset_log = capture(client.revset_log_command(&cwd, label)).await?;
@@ -68,6 +68,12 @@ pub async fn collect(
     let diff = capture(client.revset_diff_command(&cwd, label)).await?;
 
     let selected_descriptions = parse_selected_descriptions(&revset_log.stdout);
+    let selected_revset = crate::jj::revset_summary_from_output(
+        label,
+        &revset_log.stdout,
+        diff_stats.stdout.trim(),
+        &cwd,
+    );
 
     Ok(ContextBundle {
         repo_identity: RepoIdentity {

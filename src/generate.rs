@@ -919,19 +919,6 @@ pub fn validate_for_execution(form: &PrForm, _repo: &RepoState) -> Result<(), Ve
         errors.push("base and head must be different changes".into());
     }
 
-    errors.extend(validate_no_shell_metacharacters(
-        "labels",
-        form.labels.display_value(),
-    ));
-    errors.extend(validate_no_shell_metacharacters(
-        "assignees",
-        form.assignees.display_value(),
-    ));
-    errors.extend(validate_no_shell_metacharacters(
-        "milestone",
-        form.milestone.display_value(),
-    ));
-
     if errors.is_empty() {
         Ok(())
     } else {
@@ -1048,22 +1035,6 @@ fn push_required_error(errors: &mut Vec<String>, label: &str, value: &str) {
     if value.trim().is_empty() {
         errors.push(format!("{label} is required"));
     }
-}
-
-fn validate_no_shell_metacharacters(label: &str, value: &str) -> Vec<String> {
-    if value.trim().is_empty() {
-        return Vec::new();
-    }
-
-    if value.chars().any(is_shell_metacharacter) {
-        vec![format!("{label} contains shell metacharacters")]
-    } else {
-        Vec::new()
-    }
-}
-
-fn is_shell_metacharacter(ch: char) -> bool {
-    matches!(ch, ';' | '&' | '|' | '`' | '$' | '<' | '>' | '\n' | '\r')
 }
 
 #[cfg(test)]
@@ -1331,11 +1302,7 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("branch name: branch name should use lowercase words"))
         );
-        assert!(
-            errors
-                .iter()
-                .any(|error| error == "labels contains shell metacharacters")
-        );
+        assert!(!errors.iter().any(|error| error.contains("labels")));
     }
 
     #[test]

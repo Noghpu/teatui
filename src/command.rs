@@ -1,11 +1,8 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use tokio::process::Command;
-use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 use crate::event::{BackgroundEvent, ExecutionOutcome, JobResult, JobStatus};
@@ -14,7 +11,6 @@ use crate::tea::parse_pr_url;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);
-static JOB_WAITERS: OnceLock<Mutex<HashMap<u64, oneshot::Receiver<JobResult>>>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalCommand {
@@ -148,18 +144,13 @@ pub async fn capture(command: ExternalCommand) -> Result<CommandCapture, Command
     }
 }
 
-pub async fn spawn_job(
+async fn run_job(
     command: ExternalCommand,
     name: String,
-    tx: tokio::sync::mpsc::UnboundedSender<BackgroundEvent>,
-) -> u64 {
+    tx: &tokio::sync::mpsc::UnboundedSender<BackgroundEvent>,
+) -> JobResult {
     let id = NEXT_JOB_ID.fetch_add(1, Ordering::Relaxed);
     let display = command.redacted_display();
-    let (done_tx, done_rx) = oneshot::channel();
-    job_waiters()
-        .lock()
-        .expect("job waiters poisoned")
-        .insert(id, done_rx);
     let queued = JobResult {
         id,
         name: name.clone(),
@@ -172,55 +163,51 @@ pub async fn spawn_job(
     };
     let _ = tx.send(BackgroundEvent::Job(queued));
 
-    tokio::spawn(async move {
-        let started_at = Instant::now();
-        let running = JobResult {
-            id,
-            name: name.clone(),
-            command: display.clone(),
-            status: JobStatus::Running,
-            duration: None,
-            stdout: String::new(),
-            stderr: String::new(),
-            timed_out: false,
-        };
-        let _ = tx.send(BackgroundEvent::Job(running));
+    let started_at = Instant::now();
+    let running = JobResult {
+        id,
+        name: name.clone(),
+        command: display.clone(),
+        status: JobStatus::Running,
+        duration: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        timed_out: false,
+    };
+    let _ = tx.send(BackgroundEvent::Job(running));
 
-        let result = match capture(command).await {
-            Ok(output) => JobResult {
+    let result = match capture(command).await {
+        Ok(output) => JobResult {
+            id,
+            name,
+            command: display,
+            status: JobStatus::Succeeded,
+            duration: Some(started_at.elapsed()),
+            stdout: output.stdout,
+            stderr: output.stderr,
+            timed_out: false,
+        },
+        Err(error) => {
+            let timed_out = error.message.to_ascii_lowercase().contains("timed out");
+            JobResult {
                 id,
                 name,
                 command: display,
-                status: JobStatus::Succeeded,
+                status: if timed_out {
+                    JobStatus::TimedOut
+                } else {
+                    JobStatus::Failed
+                },
                 duration: Some(started_at.elapsed()),
-                stdout: output.stdout,
-                stderr: output.stderr,
-                timed_out: false,
-            },
-            Err(error) => {
-                let timed_out = error.message.to_ascii_lowercase().contains("timed out");
-                JobResult {
-                    id,
-                    name,
-                    command: display,
-                    status: if timed_out {
-                        JobStatus::TimedOut
-                    } else {
-                        JobStatus::Failed
-                    },
-                    duration: Some(started_at.elapsed()),
-                    stdout: error.stdout,
-                    stderr: error.stderr,
-                    timed_out,
-                }
+                stdout: error.stdout,
+                stderr: error.stderr,
+                timed_out,
             }
-        };
+        }
+    };
 
-        let _ = tx.send(BackgroundEvent::Job(result.clone()));
-        let _ = done_tx.send(result);
-    });
-
-    id
+    let _ = tx.send(BackgroundEvent::Job(result.clone()));
+    result
 }
 
 pub async fn run_plan_sequentially(
@@ -232,14 +219,7 @@ pub async fn run_plan_sequentially(
 
     for (index, step) in plan.steps.into_iter().enumerate() {
         let _ = tx.send(BackgroundEvent::ExecutionStep { index, total });
-        let job_id = spawn_job(step.command.clone(), step.label.clone(), tx.clone()).await;
-        let Some(job) = await_job(job_id).await else {
-            return ExecutionOutcome {
-                pr_url: None,
-                failed_step: Some(index),
-                message: Some(format!("{} failed: job result channel closed", step.label)),
-            };
-        };
+        let job = run_job(step.command.clone(), step.label.clone(), &tx).await;
 
         if job.status != JobStatus::Succeeded {
             let message = if job.stderr.trim().is_empty() {
@@ -271,18 +251,6 @@ pub async fn run_plan_sequentially(
         failed_step: None,
         message,
     }
-}
-
-fn job_waiters() -> &'static Mutex<HashMap<u64, oneshot::Receiver<JobResult>>> {
-    JOB_WAITERS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-async fn await_job(id: u64) -> Option<JobResult> {
-    let receiver = job_waiters()
-        .lock()
-        .expect("job waiters poisoned")
-        .remove(&id)?;
-    receiver.await.ok()
 }
 
 fn is_pr_create_command(command: &ExternalCommand) -> bool {

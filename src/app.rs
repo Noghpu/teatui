@@ -13,8 +13,8 @@ use crate::event::{
     JobStatus,
 };
 use crate::generate::{
-    ExecutionPlan, Focus, GeneratePhase, GenerateState, InputMode, RevsetSummary, StaleCheckResult,
-    validate_for_execution,
+    ExecutionPlan, Focus, GeneratePhase, GenerateState, InputMode, PrForm, RevsetSummary,
+    StaleCheckResult, validate_for_execution,
 };
 use crate::jj;
 use crate::llm::LlmClient;
@@ -113,6 +113,13 @@ pub struct ListState {
     pub selected_item: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GenerationRequest {
+    id: u64,
+    selected_revset: String,
+    form: PrForm,
+}
+
 pub struct App {
     config: crate::config::Config,
     bg_tx: UnboundedSender<BackgroundEvent>,
@@ -127,6 +134,8 @@ pub struct App {
     issues: ListState,
     logs: LogState,
     jobs: JobRegistry,
+    next_generation_id: u64,
+    active_generation: Option<GenerationRequest>,
     should_quit: bool,
 }
 
@@ -148,6 +157,8 @@ impl App {
             issues: ListState::default(),
             logs: LogState::default(),
             jobs: JobRegistry::default(),
+            next_generation_id: 1,
+            active_generation: None,
             should_quit: false,
         }
     }
@@ -518,7 +529,12 @@ impl App {
             .workspace_root
             .clone()
             .unwrap_or_else(|| self.cwd.clone());
-        let selected_revset = self.generate.selected_revset().label().to_string();
+        let selected_revset = self
+            .generate
+            .context
+            .as_ref()
+            .map(|context| context.repo_identity.selected_revset.clone())
+            .unwrap_or_else(|| self.generate.form.head.display_value().trim().to_string());
         jj::spawn_stale_context_check(
             &self.config,
             cwd,
@@ -556,14 +572,12 @@ impl App {
     fn start_context_collection(&mut self) {
         self.generate.begin_context_collection();
         let selected_revset = self.generate.selected_revset().clone();
+        let head = self.generate.form.head.display_value().trim().to_string();
         let form = self.generate.form.clone();
         let config = self.config.clone();
         let repo = self.repo.clone();
         let tx = self.bg_tx.clone();
-        self.log(format!(
-            "collecting context for revset {}",
-            selected_revset.label(),
-        ));
+        self.log(format!("collecting context for revset {head}"));
         tokio::spawn(async move {
             let result = context::collect(&config, repo, form, selected_revset).await;
             let context = match result {
@@ -583,7 +597,7 @@ impl App {
         };
 
         let prompt_bytes = prompt.manifest.byte_count;
-        let selected_revset = self.generate.selected_revset().label().to_string();
+        let selected_revset = prompt.manifest.selected_revset.clone();
         let Some(backend) = self.config.llm.active_backend().cloned() else {
             self.generate
                 .fail_generation("active LLM backend is unavailable");
@@ -602,6 +616,13 @@ impl App {
         };
 
         self.generate.begin_generation();
+        let request_id = self.next_generation_id;
+        self.next_generation_id += 1;
+        self.active_generation = Some(GenerationRequest {
+            id: request_id,
+            selected_revset: selected_revset.clone(),
+            form: self.generate.form.clone(),
+        });
         self.log(format!(
             "sending prompt to llm backend {} for {selected_revset} ({prompt_bytes} bytes)",
             backend.name
@@ -612,8 +633,8 @@ impl App {
         tokio::spawn(async move {
             let result = client.generate_draft(&prompt).await;
             let event = match result {
-                Ok(draft) => GenerationResult::Ready(draft),
-                Err(error) => GenerationResult::Failed(error),
+                Ok(draft) => GenerationResult::Ready { request_id, draft },
+                Err(error) => GenerationResult::Failed { request_id, error },
             };
             let _ = tx.send(BackgroundEvent::Generation(event));
         });
@@ -652,13 +673,19 @@ impl App {
 
     fn apply_generation(&mut self, result: GenerationResult) {
         match result {
-            GenerationResult::Ready(draft) => {
+            GenerationResult::Ready { request_id, draft } => {
+                if !self.accept_generation_result(request_id) {
+                    return;
+                }
                 self.log_raw_model_response(&draft.raw_model_response);
                 let branch = draft.branch_name.clone();
                 self.generate.complete_generation(draft);
                 self.log(format!("llm generation finished for {branch}"));
             }
-            GenerationResult::Failed(error) => {
+            GenerationResult::Failed { request_id, error } => {
+                if !self.accept_generation_result(request_id) {
+                    return;
+                }
                 if let Some(raw_response) = error.raw_response.as_ref() {
                     self.log_raw_model_response(raw_response);
                 }
@@ -669,14 +696,56 @@ impl App {
         }
     }
 
+    fn accept_generation_result(&mut self, request_id: u64) -> bool {
+        if self.screen != Screen::Generate || self.generate.phase != GeneratePhase::Generating {
+            self.active_generation = None;
+            self.log(format!(
+                "discarded generation result {request_id}: generation is no longer active"
+            ));
+            return false;
+        }
+
+        let Some(active) = self.active_generation.take() else {
+            self.log(format!(
+                "discarded generation result {request_id}: no request is active"
+            ));
+            return false;
+        };
+
+        if active.id != request_id {
+            self.active_generation = Some(active);
+            self.log(format!(
+                "discarded generation result {request_id}: newer request is active"
+            ));
+            return false;
+        }
+
+        let current_revset = self
+            .generate
+            .prompt()
+            .map(|prompt| prompt.manifest.selected_revset.as_str())
+            .unwrap_or_else(|| self.generate.form.head.display_value().trim());
+
+        if active.selected_revset != current_revset || active.form != self.generate.form {
+            self.generate
+                .fail_generation("generation result is stale; form or revset changed");
+            self.log(format!(
+                "discarded generation result {request_id}: form or revset changed"
+            ));
+            return false;
+        }
+
+        true
+    }
+
     fn apply_context(&mut self, context: ContextResult) {
         match context {
             ContextResult::Ready(bundle) => {
-                if bundle.repo_identity.selected_revset != self.generate.selected_revset().label() {
+                let current_head = self.generate.form.head.display_value().trim();
+                if bundle.repo_identity.selected_revset != current_head {
                     let stale = format!(
                         "discarded stale context for {}; selected revset is {}",
-                        bundle.repo_identity.selected_revset,
-                        self.generate.selected_revset().label()
+                        bundle.repo_identity.selected_revset, current_head
                     );
                     self.log(stale.clone());
                     self.generate.fail_context_collection(stale);
@@ -716,7 +785,11 @@ impl App {
                 let plan = ExecutionPlan::from_draft(
                     &self.generate.form,
                     &self.repo,
-                    self.generate.selected_revset(),
+                    self.generate
+                        .context
+                        .as_ref()
+                        .map(|context| &context.selected_revset)
+                        .unwrap_or_else(|| self.generate.selected_revset()),
                     &self.config,
                 );
                 self.generate.complete_confirmation(plan);
@@ -1111,6 +1184,84 @@ mod tests {
         assert_eq!(app.generate.phase, GeneratePhase::Failed);
         assert_eq!(app.focus, Focus::Form);
         assert!(app.logs.entries[0].contains("context collection blocked"));
+    }
+
+    #[test]
+    fn stale_generation_result_does_not_overwrite_edited_form() {
+        let mut app = test_app();
+        app.screen = Screen::Generate;
+        app.generate.phase = GeneratePhase::Generating;
+        app.active_generation = Some(GenerationRequest {
+            id: 1,
+            selected_revset: "@".into(),
+            form: app.generate.form.clone(),
+        });
+        app.generate.form.title = crate::generate::FieldState::new("User edit");
+
+        app.apply_generation(GenerationResult::Ready {
+            request_id: 1,
+            draft: crate::generate::GeneratedDraft {
+                branch_name: "feature/generated".into(),
+                title: "Generated title".into(),
+                body: "Generated body".into(),
+                review_notes: Vec::new(),
+                raw_model_response: "{}".into(),
+            },
+        });
+
+        assert_eq!(app.generate.phase, GeneratePhase::Failed);
+        assert!(app.generate.draft.is_none());
+        assert_eq!(app.generate.form.title.value, "User edit");
+    }
+
+    #[test]
+    fn confirmation_plan_uses_context_revset_for_existing_bookmarks() {
+        let mut app = test_app();
+        app.screen = Screen::Generate;
+        app.generate.form = crate::generate::PrForm::new("custom-head", "feature/existing", "main");
+        app.generate.form.title = crate::generate::FieldState::new("Create a PR");
+        app.generate.form.description = crate::generate::FieldState::new("Body");
+        app.generate.context = Some(crate::context::ContextBundle {
+            repo_identity: crate::context::RepoIdentity {
+                collected_at: std::time::SystemTime::now(),
+                workspace_root: Some(std::path::PathBuf::from("C:/repo")),
+                remote_url: None,
+                base_branch: "main".into(),
+                selected_revset: "custom-head".into(),
+            },
+            remote: None,
+            form: app.generate.form.clone(),
+            selected_revset: crate::generate::RevsetSummary::new(
+                "custom-head",
+                "description",
+                vec!["feature/existing".into()],
+                "1 file changed",
+                1,
+                vec!["abc123".into()],
+                vec!["custom-head".into()],
+                Vec::new(),
+                Vec::new(),
+            ),
+            selected_descriptions: Vec::new(),
+            status: crate::context::CommandCapture::new("jj status", String::new(), String::new()),
+            revset_log: crate::context::CommandCapture::new("jj log", String::new(), String::new()),
+            diff_stats: crate::context::CommandCapture::new(
+                "jj diff --stat",
+                String::new(),
+                String::new(),
+            ),
+            diff: crate::context::CommandCapture::new("jj diff", String::new(), String::new()),
+        });
+        app.generate.begin_confirmation_check();
+
+        app.apply_stale_check(StaleCheckResult::Fresh);
+
+        let plan = app
+            .generate
+            .execution_plan
+            .as_ref()
+            .expect("execution plan");
+        assert_eq!(plan.steps[0].command.args[2], "move");
     }
 
     #[test]
