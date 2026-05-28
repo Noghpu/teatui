@@ -1,5 +1,6 @@
 use std::time::SystemTime;
 
+use crate::bookmark_naming;
 use crate::config::Config;
 use crate::context::ContextBundle;
 use crate::jj::JjClient;
@@ -907,6 +908,17 @@ pub fn validate_for_execution(form: &PrForm, _repo: &RepoState) -> Result<(), Ve
         );
     }
 
+    // Validate base vs head: if base looks like a change_id it must not equal
+    // the head change_id (tip).
+    let base = form.base.display_value().trim();
+    let head = form.head.display_value().trim();
+    if bookmark_naming::is_change_id_like(base)
+        && bookmark_naming::is_change_id_like(head)
+        && base == head
+    {
+        errors.push("base and head must be different changes".into());
+    }
+
     errors.extend(validate_no_shell_metacharacters(
         "labels",
         form.labels.display_value(),
@@ -939,51 +951,93 @@ impl ExecutionPlan {
             .clone()
             .unwrap_or_else(|| std::path::PathBuf::from("."));
         let head = form.head.display_value().trim().to_string();
-        let branch_name = form.branch_name.display_value().trim().to_string();
-        let base = if form.base.display_value().trim().is_empty() {
+
+        // Determine the tip bookmark name.  If the user has not edited the
+        // branch_name field it may be empty (no existing bookmark on the
+        // change).  In that case auto-generate a deterministic name.
+        let branch_name_raw = form.branch_name.display_value().trim().to_string();
+        let tip_bookmark = if branch_name_raw.is_empty() {
+            bookmark_naming::tip_bookmark(form.title.display_value(), &head)
+        } else {
+            branch_name_raw.clone()
+        };
+
+        // Determine the base.  An empty base field falls back to the repo's
+        // configured base branch (typically `main` or `main@origin`).
+        let base_raw = if form.base.display_value().trim().is_empty() {
             repo.base_branch.name.trim().to_string()
         } else {
             form.base.display_value().trim().to_string()
         };
+
         let jj = JjClient::new(config);
         let tea = TeaClient::new(config);
-        let bookmark_command = if revset
+
+        // Step 1: create or move tip bookmark.
+        let tip_bookmark_cmd = if revset
             .bookmarks()
             .iter()
-            .any(|bookmark| bookmark == &branch_name)
+            .any(|bookmark| bookmark == &tip_bookmark)
         {
-            jj.bookmark_move_command(&cwd, &branch_name, &head)
+            jj.bookmark_move_command(&cwd, &tip_bookmark, &head)
         } else {
-            jj.bookmark_create_command(&cwd, &branch_name, &head)
+            jj.bookmark_create_command(&cwd, &tip_bookmark, &head)
         };
 
-        Self {
-            steps: vec![
-                ExecutionStep {
-                    label: "create or move bookmark".into(),
-                    command: bookmark_command,
+        let mut steps = vec![
+            ExecutionStep {
+                label: "create or move bookmark".into(),
+                command: tip_bookmark_cmd,
+            },
+            ExecutionStep {
+                label: "push bookmark to origin".into(),
+                command: jj.git_push_bookmark_command(&cwd, &tip_bookmark),
+            },
+        ];
+
+        // Steps 3-4: if the base looks like a change_id, generate and push a
+        // deterministic base bookmark.  Otherwise the base is already a remote
+        // ref (e.g. `main@origin`) and no extra steps are needed.
+        let pr_base_arg = if bookmark_naming::is_change_id_like(&base_raw) {
+            // Look for an existing bookmark on the base change in the revsets
+            // list supplied by the per-change left column.  If found, reuse it;
+            // otherwise auto-generate.
+            let base_bookmark_name = bookmark_naming::base_bookmark(&tip_bookmark);
+
+            let base_bookmark_cmd =
+                jj.bookmark_create_command(&cwd, &base_bookmark_name, &base_raw);
+
+            steps.push(ExecutionStep {
+                label: "create or move base bookmark".into(),
+                command: base_bookmark_cmd,
+            });
+            steps.push(ExecutionStep {
+                label: "push base bookmark to origin".into(),
+                command: jj.git_push_bookmark_command(&cwd, &base_bookmark_name),
+            });
+
+            base_bookmark_name
+        } else {
+            base_raw
+        };
+
+        steps.push(ExecutionStep {
+            label: "create gitea PR".into(),
+            command: tea.pr_create_command(
+                &cwd,
+                PrCreateArgs {
+                    title: form.title.display_value(),
+                    body: form.description.display_value(),
+                    base: &pr_base_arg,
+                    head: &tip_bookmark,
+                    labels: form.labels.display_value(),
+                    assignees: form.assignees.display_value(),
+                    milestone: form.milestone.display_value(),
                 },
-                ExecutionStep {
-                    label: "push bookmark to origin".into(),
-                    command: jj.git_push_bookmark_command(&cwd, &branch_name),
-                },
-                ExecutionStep {
-                    label: "create gitea PR".into(),
-                    command: tea.pr_create_command(
-                        &cwd,
-                        PrCreateArgs {
-                            title: form.title.display_value(),
-                            body: form.description.display_value(),
-                            base: &base,
-                            head: &branch_name,
-                            labels: form.labels.display_value(),
-                            assignees: form.assignees.display_value(),
-                            milestone: form.milestone.display_value(),
-                        },
-                    ),
-                },
-            ],
-        }
+            ),
+        });
+
+        Self { steps }
     }
 }
 
@@ -1383,5 +1437,113 @@ mod tests {
         let revset =
             revset("@").with_description_body("This is additional context for the change.");
         assert!(revset.is_meaningful_body());
+    }
+
+    #[test]
+    fn execution_plan_base_as_remote_ref_produces_three_steps() {
+        // Base is a remote ref (contains '@') — classic path, 3 steps.
+        let mut form = PrForm::new("abcdefgh", "feature/tip", "main@origin");
+        form.title = FieldState::new("My PR");
+        form.description = FieldState::new("Body");
+
+        let config = crate::config::Config::default();
+        let plan = ExecutionPlan::from_draft(&form, &repo_state(), &revset("abcdefgh"), &config);
+
+        assert_eq!(plan.steps.len(), 3);
+        assert_eq!(plan.steps[0].label, "create or move bookmark");
+        assert_eq!(plan.steps[1].label, "push bookmark to origin");
+        assert_eq!(plan.steps[2].label, "create gitea PR");
+        // PR create uses literal remote ref as base.
+        assert!(
+            plan.steps[2]
+                .command
+                .args
+                .contains(&"main@origin".to_string())
+        );
+        assert!(
+            plan.steps[2]
+                .command
+                .args
+                .contains(&"feature/tip".to_string())
+        );
+    }
+
+    #[test]
+    fn execution_plan_base_as_change_id_produces_five_steps() {
+        // Base is a change_id — needs bookmark create+push for base.
+        let tip_change = "abcdefgh";
+        let base_change = "xyzuvwrs";
+        let mut form = PrForm::new(tip_change, "feature/tip", base_change);
+        form.title = FieldState::new("My PR");
+        form.description = FieldState::new("Body");
+
+        let config = crate::config::Config::default();
+        let plan = ExecutionPlan::from_draft(&form, &repo_state(), &revset(tip_change), &config);
+
+        assert_eq!(plan.steps.len(), 5);
+        assert_eq!(plan.steps[0].label, "create or move bookmark");
+        assert_eq!(plan.steps[1].label, "push bookmark to origin");
+        assert_eq!(plan.steps[2].label, "create or move base bookmark");
+        assert_eq!(plan.steps[3].label, "push base bookmark to origin");
+        assert_eq!(plan.steps[4].label, "create gitea PR");
+
+        // Tip bookmark step: bookmark create at the tip change.
+        assert!(plan.steps[0].command.args.contains(&tip_change.to_string()));
+        // Base bookmark step: bookmark create at the base change.
+        assert!(
+            plan.steps[2]
+                .command
+                .args
+                .contains(&base_change.to_string())
+        );
+        // Base push step references the auto-generated base bookmark name.
+        let base_bm_name = &plan.steps[3].command.args;
+        assert!(base_bm_name.iter().any(|a| a.starts_with("pr-base/")));
+        // PR create uses the base bookmark name, not the raw change_id.
+        let pr_args = &plan.steps[4].command.args;
+        let base_idx = pr_args
+            .iter()
+            .position(|a| a == "--base")
+            .expect("--base flag");
+        let pr_base_arg = &pr_args[base_idx + 1];
+        assert!(
+            pr_base_arg.starts_with("pr-base/"),
+            "pr create base should be bookmark name, got: {pr_base_arg}"
+        );
+    }
+
+    #[test]
+    fn execution_plan_auto_tip_bookmark_from_title_when_branch_name_empty() {
+        // When branch_name is empty, tip bookmark is auto-generated from title.
+        let mut form = PrForm::new("abcdefgh", "", "main");
+        form.title = FieldState::new("Add login page");
+        form.description = FieldState::new("Body");
+
+        let config = crate::config::Config::default();
+        let plan = ExecutionPlan::from_draft(&form, &repo_state(), &revset("abcdefgh"), &config);
+
+        assert_eq!(plan.steps.len(), 3);
+        // Tip bookmark should be auto-generated from the title slug.
+        let create_args = &plan.steps[0].command.args;
+        assert!(
+            create_args.iter().any(|a| a == "pr/add-login-page"),
+            "auto-generated tip bookmark missing: {create_args:?}"
+        );
+    }
+
+    #[test]
+    fn validate_for_execution_rejects_base_equal_to_head_when_both_change_ids() {
+        let change_id = "abcdefgh";
+        let mut form = PrForm::new(change_id, "feature/tip", change_id);
+        form.title = FieldState::new("Title");
+        form.description = FieldState::new("Body");
+
+        let errors = validate_for_execution(&form, &repo_state()).expect_err("expected errors");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("base and head must be different")),
+            "expected base==head error, got: {errors:?}"
+        );
     }
 }
