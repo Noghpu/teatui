@@ -2,8 +2,8 @@
 id: 0000l-2026-05-27-d6313f6e-landing-ux-polish
 created_at: 2026-05-27T20:53:46+02:00
 created_by_model: claude-sonnet-4-6/normal
-state: implemented
-state_updated_at: 2026-05-28T07:57:08+02:00
+state: reviewed
+state_updated_at: 2026-05-28T08:02:27+02:00
 ---
 # Landing UX Polish: Key Hint, Async Navigation, Status Bar Pruning
 
@@ -151,3 +151,43 @@ None. Implementation follows the plan exactly. The `discovering: false` field wa
 ## Residual Risks
 
 None identified. The `apply_repo` handler already redirects back to Landing if discovery completes with `!inside_workspace`, so the optimistic entry is safe.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: claude-opus-4-7
+- reviewed_at: 2026-05-28T08:02:27+02:00
+- state: reviewed
+
+## Reviewer Metadata
+- model: claude-opus-4-7
+- reviewed_at: 2026-05-28
+
+## Summary
+
+Implementation is correct and minimal; matches plan exactly. All acceptance criteria met. `just verify` passes (66 unit tests + 4 integration tests, fmt clean, clippy clean with -D warnings). No code changes applied during review.
+
+## Findings
+
+- Verified `RepoState.discovering` is `true` in `RepoState::new()` (src/repo.rs:174) and `false` in the struct literal returned by `discover()` (src/repo.rs:262). Field is `pub` as required.
+- Verified guard in `open_selected_landing_entry` (src/app.rs:370) now reads `0 if self.repo.inside_workspace || self.repo.discovering => Screen::Generate`.
+- Verified `apply_repo` (src/app.rs:625) still redirects from Generate back to Landing when the resolved repo state has `!inside_workspace`, so optimistic entry remains safe.
+- Verified Generate PR landing key hint is `"g"` (src/ui.rs:101).
+- Verified `render_help` (src/ui.rs:650):
+  - Landing: only `Enter open` and `q quit` remain.
+  - Generate normal mode: arrow/vim-nav row gone; `h/l`, `Enter select/edit`, `i`, `g`, `c`, `p`, `r`, `Esc` all preserved.
+  - PullRequests/Issues: arrow row gone; `Enter select`, `c comment`, `Esc back` preserved.
+  - Editing, Confirm, Executing, Complete, Failed, Preview Generate sub-states untouched.
+- Verified all other `RepoState { ... }` struct literals (src/bin/smoke-live.rs, src/generate.rs, src/prompt.rs, tests/windows_pr_generation_integration.rs) were updated to include `discovering: false`. No leftover construction sites missed.
+
+## Notes / Observations
+
+- `src/ui.rs` shows up in the diff as a near-full-file rewrite (2746 lines touched). On inspection this is a line-ending normalization: parent commit stored ui.rs as CRLF while every other Rust source in the tree is LF. The implementation rewrote it as LF, bringing the file in line with repository convention. There is no `.gitattributes` enforcing either style, so this normalization is incidental but improves consistency. Not flagged as a defect; logged for orchestrator visibility.
+- No deviation from the plan. No simpler alternative identified â€” the optimistic-entry-plus-redirect pattern is the right shape given the existing `apply_repo` redirect.
+- No hidden dependencies or sequencing issues.
+
+## Verification
+
+- `just verify` (fmt + clippy + tests): pass.
