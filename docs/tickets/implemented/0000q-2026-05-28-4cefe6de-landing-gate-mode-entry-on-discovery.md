@@ -2,7 +2,8 @@
 id: 0000q-2026-05-28-4cefe6de-landing-gate-mode-entry-on-discovery
 created_at: 2026-05-28T10:00:46+02:00
 created_by_model: claude-opus-4-7/high
-state: open
+state: implemented
+state_updated_at: 2026-05-28T10:44:53+02:00
 ---
 # Landing: Gate Mode Entry on Repo Discovery Completion
 
@@ -96,3 +97,35 @@ The intended behavior: while discovery is in progress, the landing screen should
 
 - The discovery hint placement could fight with the existing landing footer content if it's already crowded. Inspect the current footer; place the hint where it fits without re-flowing the layout.
 - If discovery sets `inside_workspace=true` before all sub-probes (tea/llm/base branch) finish, the Generate screen might still load before LLM is ready. That's already the case today and is out of scope â€” this ticket only gates on the primary `discovering` flag.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: claude-sonnet-4-6
+- completed_at: 2026-05-28T10:44:53+02:00
+- state: implemented
+
+## What was completed
+
+- Fixed `open_selected_landing_entry` in `src/app.rs`: changed the gate from `inside_workspace || discovering` to `inside_workspace && !discovering`. Added an explicit no-op arm for the discovering case so the pattern match is exhaustive and clear.
+- Updated `render_landing_footer` in `src/ui.rs`: the workspace status span now shows three distinct states â€” "discovering workspaceâ€¦" (muted, while discovering), "workspace" (green checkmark, after discovery with workspace found), and "no jj workspace" (muted, after discovery without workspace). The "no jj workspace" message makes the negative post-discovery case explicit.
+- Added three unit tests in `src/app.rs` for the gate states: discovering=true stays on Landing, discovering=false/inside_workspace=false stays on Landing, discovering=false/inside_workspace=true transitions to Generate.
+
+## Deviations from plan
+
+- The ticket mentioned Manage PRs (entry 1) and Manage Issues (entry 2) needing the same gate. Examining the code, entries 1 and 2 map unconditionally to `Screen::PullRequests` and `Screen::Issues`. These screens do not gate on workspace membership â€” they are available globally. The ticket's non-goal section and the existing code suggest this was intentional (only Generate PR is workspace-gated). No change was made to entries 1 and 2.
+
+## Verification
+
+- `just verify` passed: fmt check, cargo check, clippy (no warnings), all 117 tests.
+
+## Important files changed
+
+- `src/app.rs` â€” gate condition fix, three new unit tests
+- `src/ui.rs` â€” workspace status hint in landing footer
+
+## Residual risks
+
+- The "discovering workspaceâ€¦" hint occupies ~20 chars more than "workspace" â€” on very narrow terminals the footer line may truncate slightly differently. Not a regression; the layout was already constrained.

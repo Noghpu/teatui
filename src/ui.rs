@@ -203,12 +203,18 @@ fn render_landing_footer(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     spans.push(separator());
-    let (ws_sym, ws_style) = if repo.inside_workspace {
-        ("✓", Style::new().fg(colors::GOOD))
+    let (ws_sym, ws_label, ws_style) = if repo.discovering {
+        (
+            "·",
+            "discovering workspace…",
+            Style::new().fg(colors::MUTED),
+        )
+    } else if repo.inside_workspace {
+        ("✓", "workspace", Style::new().fg(colors::GOOD))
     } else {
-        ("·", Style::new().fg(colors::MUTED))
+        ("·", "no jj workspace", Style::new().fg(colors::MUTED))
     };
-    spans.push(Span::styled(format!("{ws_sym} workspace"), ws_style));
+    spans.push(Span::styled(format!("{ws_sym} {ws_label}"), ws_style));
 
     frame.render_widget(
         Paragraph::new(Line::from(spans)).alignment(Alignment::Center),

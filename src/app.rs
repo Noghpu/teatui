@@ -374,7 +374,8 @@ impl App {
 
     fn open_selected_landing_entry(&mut self) {
         self.screen = match self.landing.selected_entry {
-            0 if self.repo.inside_workspace || self.repo.discovering => Screen::Generate,
+            0 if self.repo.inside_workspace && !self.repo.discovering => Screen::Generate,
+            0 if self.repo.discovering => Screen::Landing,
             0 => {
                 self.log("Generate PR requires a jj workspace");
                 Screen::Landing
@@ -1120,5 +1121,44 @@ mod tests {
         }
         assert_eq!(app.logs.entries.len(), LOG_CAP);
         assert_eq!(app.logs.entries.front().unwrap(), "entry 50");
+    }
+
+    /// Gate: discovering=true, inside_workspace=false — Enter on Generate PR stays on Landing.
+    #[test]
+    fn landing_entry_stays_on_landing_while_discovering() {
+        let mut app = test_app();
+        app.repo.discovering = true;
+        app.repo.inside_workspace = false;
+        app.landing.selected_entry = 0;
+
+        app.open_selected_landing_entry();
+
+        assert_eq!(app.screen, Screen::Landing);
+    }
+
+    /// Gate: discovering=false, inside_workspace=false — Enter on Generate PR stays on Landing.
+    #[test]
+    fn landing_entry_stays_on_landing_when_not_in_workspace() {
+        let mut app = test_app();
+        app.repo.discovering = false;
+        app.repo.inside_workspace = false;
+        app.landing.selected_entry = 0;
+
+        app.open_selected_landing_entry();
+
+        assert_eq!(app.screen, Screen::Landing);
+    }
+
+    /// Gate: discovering=false, inside_workspace=true — Enter on Generate PR transitions to Generate.
+    #[test]
+    fn landing_entry_transitions_to_generate_when_workspace_ready() {
+        let mut app = test_app();
+        app.repo.discovering = false;
+        app.repo.inside_workspace = true;
+        app.landing.selected_entry = 0;
+
+        app.open_selected_landing_entry();
+
+        assert_eq!(app.screen, Screen::Generate);
     }
 }
