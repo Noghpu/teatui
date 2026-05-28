@@ -2,7 +2,8 @@
 id: 0000u-2026-05-28-d1feb908-repo-picker-options-disk-cache
 created_at: 2026-05-28T11:42:07+02:00
 created_by_model: gpt-5
-state: open
+state: implemented
+state_updated_at: 2026-05-28T16:09:11+02:00
 ---
 # Load And Cache Repo Picker Options
 
@@ -89,3 +90,63 @@ All command execution must continue to use argv arrays through the existing comm
 - `tea` JSON shapes may vary by version. Parser tests should use representative fields but tolerate extra fields.
 - The collaborators endpoint may require permissions on some Gitea instances. Treat failures as disabled assignee options and keep labels/milestones usable.
 - Cache invalidation must avoid silently accepting very old stale metadata as fresh.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: claude-sonnet-4-6
+- completed_at: 2026-05-28T16:09:11+02:00
+- state: implemented
+
+## What was completed
+
+Implemented the full repo picker options disk cache feature for the Generate PR form.
+
+### New module: `src/repo_options.rs`
+- `sanitize_key_component` and `repo_cache_key` for stable per-repo cache file naming
+- JSON parsers: `parse_labels_json`, `parse_milestones_json`, `parse_collaborators_json` - tolerant of extra fields, strict on missing display values
+- `RepoOptionsCache` with `is_fresh` (15 min TTL) and `is_usable` (7 day max stale age)
+- `write_cache` uses atomic rename (write temp, rename to final)
+- `read_cache` discards entries with mismatched version numbers
+- `OptionsLoadStatus` enum: Idle, Loading, Ready, Unavailable
+- `RepoOptions` with label/milestone/assignee picker option conversion methods
+- `spawn_repo_options_load`: stale-while-revalidate background loader that sends cached options first (if usable), then live fetch; force_refresh=true bypasses freshness TTL
+
+### `src/tea.rs`
+- Added `labels_list_command` (`tea labels list --output json --limit 100`)
+- Added `milestones_list_command` (`tea milestones list --state open --output json --limit 100`)
+- Added `collaborators_command` (`tea api /repos/{owner}/{repo}/collaborators`)
+- Added unit tests for all three command builders
+
+### `src/event.rs`
+- Added `BackgroundEvent::RepoOptions(Box<RepoOptionsResult>)` variant
+
+### `src/app.rs`
+- Added `repo_options: RepoOptions` field to `App`
+- Added `apply_repo_options` handler - updates picker options on generate form, logs result, calls `validate_form`
+- Updated `handle_background` to dispatch `RepoOptions` event
+- Updated `refresh` (triggered by `r` key) to call `spawn_repo_options_load` with `force_refresh=true`
+- Added `spawn_repo_options_load` helper that only spawns when remote is available
+- `apply_repo` now triggers initial load when remote transitions from None to Some
+- `open_selected_landing_entry` triggers stale-while-revalidate load on Generate PR entry
+
+## Deviations from plan
+- No UI warning display in the picker/right pane beyond log messages was implemented; the warning text is stored in `RepoOptions.status_warning()` for a future UI slice to render. The ticket noted the warning is visible in the picker/right pane; this is deferred as there is no existing right-pane warning rendering infrastructure.
+- `OptionsLoadStatus::Loading` variant is defined but the loader transitions directly from Idle to Ready/Unavailable without emitting a Loading event; sufficient for non-blocking behavior since the form remains usable throughout.
+
+## Verification
+- `just verify` passed: 153 unit tests + 4 integration tests, no clippy warnings
+
+## Important files changed
+- `src/repo_options.rs` (new)
+- `src/tea.rs`
+- `src/event.rs`
+- `src/app.rs`
+- `src/lib.rs`
+
+## Residual risks / follow-up
+- The warning from stale cache or partial failure is stored in `RepoOptions.status_warning()` but not yet surfaced in the UI right pane or picker field. A future UI ticket should render it near the picker or in the status bar.
+- `tea api` path injection uses `{owner}` and `{repo}` placeholders per the ticket's description; actual replacement is done by the `tea` CLI based on current repo context, not by teatui.
+- Cache is stored in `dirs::cache_dir()/teatui/repo-options/<key>.json`; no migration needed since version field guards old formats.

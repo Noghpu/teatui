@@ -34,6 +34,39 @@ impl TeaClient {
         ExternalCommand::new(self.program.clone(), ["login", "list"], cwd)
     }
 
+    pub fn labels_list_command(&self, cwd: impl Into<PathBuf>) -> ExternalCommand {
+        ExternalCommand::new(
+            self.program.clone(),
+            ["labels", "list", "--output", "json", "--limit", "100"],
+            cwd,
+        )
+    }
+
+    pub fn milestones_list_command(&self, cwd: impl Into<PathBuf>) -> ExternalCommand {
+        ExternalCommand::new(
+            self.program.clone(),
+            [
+                "milestones",
+                "list",
+                "--state",
+                "open",
+                "--output",
+                "json",
+                "--limit",
+                "100",
+            ],
+            cwd,
+        )
+    }
+
+    pub fn collaborators_command(&self, cwd: impl Into<PathBuf>) -> ExternalCommand {
+        ExternalCommand::new(
+            self.program.clone(),
+            ["api", "/repos/{owner}/{repo}/collaborators"],
+            cwd,
+        )
+    }
+
     pub fn pr_create_command(
         &self,
         cwd: impl Into<PathBuf>,
@@ -177,6 +210,57 @@ mod tests {
                 "v1",
             ]
         );
+    }
+
+    #[test]
+    fn builds_labels_list_command_argv() {
+        let config = Config::default();
+        let client = TeaClient::new(&config);
+        let command = client.labels_list_command("C:/repo");
+
+        assert_eq!(command.program, "tea");
+        assert_eq!(
+            command.args,
+            vec!["labels", "list", "--output", "json", "--limit", "100"]
+        );
+        assert_eq!(command.cwd, PathBuf::from("C:/repo"));
+    }
+
+    #[test]
+    fn builds_milestones_list_command_argv() {
+        let config = Config::default();
+        let client = TeaClient::new(&config);
+        let command = client.milestones_list_command("C:/repo");
+
+        assert_eq!(command.program, "tea");
+        assert_eq!(
+            command.args,
+            vec![
+                "milestones",
+                "list",
+                "--state",
+                "open",
+                "--output",
+                "json",
+                "--limit",
+                "100",
+            ]
+        );
+        assert_eq!(command.cwd, PathBuf::from("C:/repo"));
+    }
+
+    #[test]
+    fn builds_collaborators_command_argv() {
+        let config = Config::default();
+        let client = TeaClient::new(&config);
+        let command = client.collaborators_command("C:/repo");
+
+        assert_eq!(command.program, "tea");
+        assert_eq!(
+            command.args,
+            vec!["api", "/repos/{owner}/{repo}/collaborators"]
+        );
+        assert_eq!(command.cwd, PathBuf::from("C:/repo"));
     }
 
     #[test]

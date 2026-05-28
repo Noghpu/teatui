@@ -10,6 +10,7 @@ use crate::context::ContextResult;
 use crate::generate::{GeneratedDraft, RevsetSummary, StaleCheckResult};
 use crate::llm::LlmError;
 use crate::repo::RepoState;
+use crate::repo_options::RepoOptionsResult;
 
 pub enum AppEvent {
     Tick,
@@ -27,6 +28,7 @@ pub enum BackgroundEvent {
     Job(JobResult),
     ExecutionStep { index: usize, total: usize },
     ExecutionDone(ExecutionOutcome),
+    RepoOptions(Box<RepoOptionsResult>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

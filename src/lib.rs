@@ -12,6 +12,7 @@ pub mod llm;
 pub mod logging;
 pub mod prompt;
 pub mod repo;
+pub mod repo_options;
 pub mod tea;
 pub mod tui;
 pub mod ui;
