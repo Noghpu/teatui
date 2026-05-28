@@ -2,8 +2,8 @@
 id: 0000m-2026-05-27-70bb2caf-generate-screen-polish
 created_at: 2026-05-27T20:56:42+02:00
 created_by_model: claude-sonnet-4-6/normal
-state: implemented
-state_updated_at: 2026-05-28T08:09:16+02:00
+state: reviewed
+state_updated_at: 2026-05-28T08:13:55+02:00
 ---
 # Generate Screen Polish: Left Col Changes, Center Width, Right Col Cleanup
 
@@ -187,3 +187,48 @@ None significant. Used `reset_editor_viewport()` as a method on `FieldState` rat
 
 - The TextArea viewport reset recreates the editor, which moves cursor to end. If the user was in the middle of editing and resizes, cursor position is lost (acceptable per ticket).
 - The primary identifier truncation uses byte-based indexing (`&primary[..primary_max]`). If the description contains multi-byte UTF-8 characters and `primary_max` falls in the middle of one, this could panic. A future improvement would use `char`-based truncation.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: claude-opus-4-7
+- reviewed_at: 2026-05-28T08:13:55+02:00
+- state: reviewed
+
+## Verdict
+
+Implementation matches the ticket's acceptance criteria. Applied one correctness fix and added unit tests; no plan-level concerns.
+
+## What I verified
+
+- Left col: `render_menu` Generate branch now uses `revset_display_label(revset, area)` and title is `"Changes"`. Raw revset labels (`@`, `@-`, ...) no longer appear as the primary identifier; they're shown as muted secondary tag only when the primary is a bookmark or change_id.
+- `is_jj_default_description` correctly falls through to bookmark/change_id when the description is empty or matches `(no description set)` (case-insensitive, trimmed).
+- Center col: `render_generate_fields` now takes `area: Rect`; separator string is `"â”€".repeat(area.width.saturating_sub(6))` wrapped with two leading and trailing spaces.
+- Right col: `Line::from(format!("focused field: {}", ...))` removed from `render_generate_preview`.
+- TextArea resize: `AppEvent::Resize` dispatches to `App::handle_resize`, which calls `FieldState::reset_editor_viewport` on every form field via `PrForm::editors_mut`. Reset rebuilds the editor from `self.buffer` (which is kept in sync on each keystroke), so no in-flight edits are lost; cursor jumps to end (acceptable per ticket residual risk).
+- `just verify` passes (fmt, check, clippy `-D warnings`, 68 unit tests, 4 integration tests).
+
+## Fixes applied during review
+
+1. UTF-8 truncation panic risk. `revset_display_label` did `primary[..primary_max]` byte slicing on a `String` that may hold a description with multibyte chars. If `primary_max` landed inside a UTF-8 sequence, this would panic. Replaced with a new `truncate_chars(s, max_chars)` helper using `char_indices().nth(...)`, and switched the secondary-tag budget from byte length to `chars().count()` so wide-glyph bookmarks don't undercut the budget either.
+2. Added a `#[cfg(test)] mod tests` in `src/ui.rs` covering `is_jj_default_description` (placeholder + case folding) and `truncate_chars` (ASCII, no-op when shorter, zero budget, multi-byte e.g. `hÃ©llo`, multi-codepoint emoji). These lock in the UTF-8 invariant the byte-slice version silently violated.
+
+## Things I considered and intentionally did not change
+
+- `selected_field_name()` on `GenerateState` is no longer called from `src/`, but it's still a `pub` method on a public type and clippy stays green; leaving it avoids API churn in this slice.
+- `handle_resize` always resets editors regardless of `Screen`. Since `reset_editor_viewport` rebuilds from `buffer` (live-synced on each keystroke), it is idempotent and safe outside the Generate screen. Scoping by screen would be cosmetic.
+- The secondary tag uses `revset.label().to_string()` when the primary is a bookmark or change_id. Ticket's "Design Decisions" mention this as muted secondary. The current rendering applies a single `list_item` style to the whole line (no inline muted styling). Adding mixed-style spans would require restructuring `list_item` and is out of scope for this polish ticket; the textual layout already satisfies the acceptance criteria.
+
+## Risks left
+
+- Truncation now counts unicode scalars, not display width. Wide CJK / emoji characters occupy 2 cells but count as 1 char, so very wide descriptions could still overflow the 24-cell budget visually; ratatui will clip at the border. Acceptable for this polish slice.
+- Resizing while editing snaps the cursor to end of buffer. Documented in the ticket.
+
+## Verification
+
+`just verify` â€” pass.
+- fmt check, check, clippy -D warnings â€” clean.
+- 68 unit tests pass (including 2 new in `ui::tests`).
+- 4 integration tests pass.
