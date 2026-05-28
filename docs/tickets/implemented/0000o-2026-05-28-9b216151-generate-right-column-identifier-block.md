@@ -2,7 +2,8 @@
 id: 0000o-2026-05-28-9b216151-generate-right-column-identifier-block
 created_at: 2026-05-28T10:00:45+02:00
 created_by_model: claude-opus-4-7/high
-state: open
+state: implemented
+state_updated_at: 2026-05-28T10:28:43+02:00
 ---
 # Generate Screen: Right Column Redesign with Identifier Block
 
@@ -118,3 +119,46 @@ The user has constrained: no author, no timestamp, no parent change. Diff stat m
 - Changing the jj log template can affect parsing if descriptions contain the chosen delimiter. Use a record-separator character (`\u{001E}`) or move to a second `jj show -T description` query per change.
 - This ticket should land *after* the per-change left-column ticket. The identifier block assumes `RevsetSummary` represents a single change. If sequenced first, the identifier block would be misleading for the legacy aggregated revsets. Recommend the orchestrator picks the per-change ticket first.
 - Width: the identifier block adds 5â€“7 lines at the top. The right column is `Fill(1)` (`src/ui.rs:37`), so it has plenty of width but vertical space at small terminal sizes can become tight. Wrapping is already applied by the outer `Paragraph`.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: claude-sonnet-4-6
+- completed_at: 2026-05-28T10:28:43+02:00
+- state: implemented
+
+## What was completed
+
+- Added `description_body: String` to `RevsetSummary` in `src/generate.rs` with `with_description_body()` builder, `description_body()` accessor, and `is_meaningful_body()` helper that returns false for empty/whitespace/placeholder bodies.
+- Extended `LOG_TEMPLATE` in `src/jj.rs` to emit the full description using `description.lines().join("\x1F")` with a `\x1E` record-separator terminator per line.
+- Updated `parse_log_entry` to strip the `\x1E` terminator, split the description field on `\x1F`, and populate `description_body` on `ParsedLogEntry`.
+- Updated `parse_revset_summary` to propagate `description_body` via `with_description_body()`.
+- Updated `per_change_revsets` to re-encode the description with `\x1F` separators when reconstructing the log line for `parse_revset_summary`.
+- Added `compact_diff_stat(raw: &str) -> String` in `src/ui.rs` that parses `N files changed, X insertions(+), Y deletions(-)` into `N files Â· +X / -Y` with graceful fallback.
+- Added `render_section_header(title: &str)` and `render_change_identifier(revset: &RevsetSummary)` helpers.
+- Rewrote `render_generate_preview` to: (1) emit the identifier block (change_id, bold bookmarks, description subject, indented body if meaningful, compact diff stat, scope revset) followed by the base branch as a muted footer, then (2) a bold section header for the phase title, then (3) phase-specific Status / Details / Logs sub-sections.
+- Removed inner `"Execution plan"`, `"Generated draft"`, `"Prompt manifest warnings"`, and `"Recent logs"` bold headers from the four sub-render functions since callers now emit them via `render_section_header`.
+- Added unit tests: 5 for `is_meaningful_body`, 3 for new log entry parsing formats, 1 updated test for `per_change_revsets_parse_produces_correct_labels`, 7 for `compact_diff_stat`.
+
+## Deviations from plan
+
+- `LOG_TEMPLATE` uses `description.lines().join("\x1F")` instead of the unit-separator approach mentioned as an alternative using a separate `jj show -T description` query. The join approach keeps the single-query shape and avoids a second jj invocation per change.
+- The identifier block uses the first item from `change_ids()` rather than a dedicated `change_id()` accessor; the per-change ticket already ensures only one change_id per revset.
+- `render_section_header` renders a blank line + bold title (no horizontal rule), exactly as designed.
+
+## Verification
+
+`just verify` passed: 85 unit tests + 4 integration tests, zero warnings.
+
+## Important files changed
+
+- `src/generate.rs` â€” `RevsetSummary` new field + accessor + `is_meaningful_body()` + tests
+- `src/jj.rs` â€” `LOG_TEMPLATE` + `ParsedLogEntry.description_body` + updated parser + updated tests
+- `src/ui.rs` â€” `compact_diff_stat` + `parse_stat_count` + `render_section_header` + `render_change_identifier` + rewritten `render_generate_preview` + updated sub-render functions + tests
+
+## Residual risks / follow-up
+
+- The jj template `description.lines().join("\x1F")` is not tested against real jj output; verify at runtime that jj's `.lines()` method exists and behaves as expected. If jj rejects the template, fallback is to revert to `description.first_line()` and accept no body display until a two-query approach is added.
+- If descriptions contain literal `\x1F` characters (unlikely but possible), the body parser would misinterpret them. An additional sanitization pass could be added if needed.

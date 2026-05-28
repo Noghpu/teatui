@@ -367,6 +367,7 @@ pub enum StaleCheckResult {
 pub struct RevsetSummary {
     label: String,
     description: String,
+    description_body: String,
     bookmarks: Vec<String>,
     stats: String,
     commit_count: usize,
@@ -392,6 +393,7 @@ impl RevsetSummary {
         Self {
             label: label.into(),
             description: description.into(),
+            description_body: String::new(),
             bookmarks,
             stats: stats.into(),
             commit_count,
@@ -402,12 +404,31 @@ impl RevsetSummary {
         }
     }
 
+    pub fn with_description_body(mut self, body: impl Into<String>) -> Self {
+        self.description_body = body.into();
+        self
+    }
+
     pub fn label(&self) -> &str {
         &self.label
     }
 
     pub fn description(&self) -> &str {
         &self.description
+    }
+
+    pub fn description_body(&self) -> &str {
+        &self.description_body
+    }
+
+    /// Returns true if the body contains non-whitespace content that is not a
+    /// jj placeholder like "(no description set)".
+    pub fn is_meaningful_body(&self) -> bool {
+        let body = self.description_body.trim();
+        if body.is_empty() {
+            return false;
+        }
+        !body.eq_ignore_ascii_case("(no description set)")
     }
 
     pub fn bookmarks(&self) -> &[String] {
@@ -1331,5 +1352,36 @@ mod tests {
                 "@"
             ]
         );
+    }
+
+    #[test]
+    fn is_meaningful_body_empty_is_false() {
+        let revset = revset("@");
+        assert!(!revset.is_meaningful_body());
+    }
+
+    #[test]
+    fn is_meaningful_body_whitespace_only_is_false() {
+        let revset = revset("@").with_description_body("   \n  ");
+        assert!(!revset.is_meaningful_body());
+    }
+
+    #[test]
+    fn is_meaningful_body_placeholder_is_false() {
+        let revset = revset("@").with_description_body("(no description set)");
+        assert!(!revset.is_meaningful_body());
+    }
+
+    #[test]
+    fn is_meaningful_body_placeholder_case_insensitive_is_false() {
+        let revset = revset("@").with_description_body("(No Description Set)");
+        assert!(!revset.is_meaningful_body());
+    }
+
+    #[test]
+    fn is_meaningful_body_real_content_is_true() {
+        let revset =
+            revset("@").with_description_body("This is additional context for the change.");
+        assert!(revset.is_meaningful_body());
     }
 }

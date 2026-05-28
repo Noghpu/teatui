@@ -10,7 +10,12 @@ use crate::generate::StaleCheckResult;
 
 const TRUNK_RANGE_REVSET: &str = "trunk()..@";
 
-const LOG_TEMPLATE: &str = "commit_id.short() ++ \"|\" ++ change_id.short() ++ \"|\" ++ bookmarks.map(|b| b.name()).join(\",\") ++ \"|\" ++ description.first_line() ++ \"\\n\"";
+// The template emits one record per line. Fields are pipe-separated; the
+// description field uses the full multi-line description with its newlines
+// replaced by the ASCII unit-separator (\x1F) so the whole record fits on one
+// line. A literal \x1E (record separator) is appended as an end-of-record
+// marker so the parser can reliably detect the boundary after splitting on \n.
+const LOG_TEMPLATE: &str = "commit_id.short() ++ \"|\" ++ change_id.short() ++ \"|\" ++ bookmarks.map(|b| b.name()).join(\",\") ++ \"|\" ++ description.lines().join(\"\\x1F\") ++ \"\\x1E\\n\"";
 
 #[derive(Debug, Clone)]
 pub struct JjClient {
@@ -128,12 +133,23 @@ impl JjClient {
                 Err(_) => "0 files changed, 0 insertions(+), 0 deletions(-)".to_string(),
             };
 
+            // Reconstruct a log line that includes the full description encoded
+            // with \x1F separators so parse_revset_summary can recover the body.
+            let desc_encoded = if entry.description_body.is_empty() {
+                entry.description.clone()
+            } else {
+                format!(
+                    "{}\x1F{}",
+                    entry.description,
+                    entry.description_body.replace('\n', "\x1F")
+                )
+            };
             let log_line = format!(
-                "{}|{}|{}|{}",
+                "{}|{}|{}|{}\x1E",
                 entry.commit_id,
                 entry.change_id,
                 entry.bookmarks.join(","),
-                entry.description
+                desc_encoded
             );
             let summary = parse_revset_summary(&revset_label, &log_line, diff_output.trim(), cwd);
             summaries.push(summary);
@@ -205,6 +221,7 @@ struct ParsedLogEntry {
     change_id: String,
     bookmarks: Vec<String>,
     description: String,
+    description_body: String,
 }
 
 fn parse_revset_summary(
@@ -243,6 +260,10 @@ fn parse_revset_summary(
         .first()
         .map(|entry| entry.description.clone())
         .unwrap_or_else(|| "No commits matched".into());
+    let description_body = entries
+        .first()
+        .map(|entry| entry.description_body.clone())
+        .unwrap_or_default();
 
     RevsetSummary::new(
         label,
@@ -255,6 +276,7 @@ fn parse_revset_summary(
         recent_log,
         warnings,
     )
+    .with_description_body(description_body)
 }
 
 fn no_changes_placeholder() -> RevsetSummary {
@@ -328,6 +350,8 @@ fn parse_log_entries(output: &str) -> Vec<ParsedLogEntry> {
 }
 
 fn parse_log_entry(line: &str) -> Option<ParsedLogEntry> {
+    // Strip the trailing record-separator (\x1E) if present (new template format).
+    let line = line.trim_end_matches('\x1E').trim_end();
     let mut parts = line.splitn(4, '|');
     let commit_id = parts.next()?.trim();
     let change_id = parts.next()?.trim();
@@ -337,13 +361,28 @@ fn parse_log_entry(line: &str) -> Option<ParsedLogEntry> {
         .filter(|bookmark| !bookmark.trim().is_empty())
         .map(|bookmark| bookmark.trim().to_string())
         .collect::<Vec<_>>();
-    let description = parts.next()?.trim();
+    // The description field uses \x1F as line separator (new template) or is a
+    // plain first-line string (legacy). Split on \x1F; the first segment is the
+    // subject (first_line) and the rest form the body.
+    let raw_desc = parts.next()?;
+    let desc_parts: Vec<&str> = raw_desc.split('\x1F').collect();
+    let first_line = desc_parts[0].trim();
+    let body_lines = &desc_parts[1..];
+    // Remove trailing empty/whitespace lines from body.
+    let body = body_lines
+        .iter()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_string();
 
     Some(ParsedLogEntry {
         commit_id: commit_id.to_string(),
         change_id: change_id.to_string(),
         bookmarks,
-        description: description.to_string(),
+        description: first_line.to_string(),
+        description_body: body,
     })
 }
 
@@ -352,13 +391,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_log_entry_line() {
+    fn parses_log_entry_line_legacy_format() {
+        // Legacy format: no \x1E terminator, plain first-line description.
         let line = "abc123|def456|bookmark-a,bookmark-b|Fix the parser";
         let entry = parse_log_entry(line).expect("entry");
         assert_eq!(entry.commit_id, "abc123");
         assert_eq!(entry.change_id, "def456");
         assert_eq!(entry.bookmarks, vec!["bookmark-a", "bookmark-b"]);
         assert_eq!(entry.description, "Fix the parser");
+        assert_eq!(entry.description_body, "");
+    }
+
+    #[test]
+    fn parses_log_entry_line_new_format_with_body() {
+        // New template format: description lines joined with \x1F, record ends with \x1E.
+        let line =
+            "abc123|def456|feature/foo|Fix the parser\x1FThis is the body.\x1FMore details.\x1E";
+        let entry = parse_log_entry(line).expect("entry");
+        assert_eq!(entry.commit_id, "abc123");
+        assert_eq!(entry.change_id, "def456");
+        assert_eq!(entry.bookmarks, vec!["feature/foo"]);
+        assert_eq!(entry.description, "Fix the parser");
+        assert_eq!(entry.description_body, "This is the body.\nMore details.");
+    }
+
+    #[test]
+    fn parses_log_entry_line_new_format_no_body() {
+        // New format, single-line description (no body after the first \x1F segment).
+        let line = "abc123|def456||Fix the parser\x1E";
+        let entry = parse_log_entry(line).expect("entry");
+        assert_eq!(entry.description, "Fix the parser");
+        assert_eq!(entry.description_body, "");
     }
 
     #[test]
@@ -373,22 +436,24 @@ mod tests {
     #[test]
     fn per_change_revsets_parse_produces_correct_labels() {
         // Simulate what per_change_revsets produces by calling parse_revset_summary directly
-        // for each entry in a multi-entry log.
-        let log_output =
-            "abc123|def456|feature/foo|First change\nxyz789|uvw000||Second change no bookmark";
+        // for each entry in a multi-entry log (new template format with \x1E terminators).
+        let log_output = "abc123|def456|feature/foo|First change\x1FBody line one\x1E\nxyz789|uvw000||Second change no bookmark\x1E";
         let entries = parse_log_entries(log_output);
         assert_eq!(entries.len(), 2);
 
         let entry0 = &entries[0];
+        assert_eq!(entry0.description, "First change");
+        assert_eq!(entry0.description_body, "Body line one");
         let label0 = format!("trunk()..{}", entry0.change_id);
         let summary0 = parse_revset_summary(
             &label0,
             &format!(
-                "{}|{}|{}|{}",
+                "{}|{}|{}|{}\x1F{}\x1E",
                 entry0.commit_id,
                 entry0.change_id,
                 entry0.bookmarks.join(","),
-                entry0.description
+                entry0.description,
+                entry0.description_body
             ),
             "1 file changed, 2 insertions(+)",
             std::path::Path::new("C:/repo"),
@@ -396,6 +461,7 @@ mod tests {
         assert_eq!(summary0.label(), "trunk()..def456");
         assert_eq!(summary0.bookmarks(), &["feature/foo"]);
         assert_eq!(summary0.description(), "First change");
+        assert_eq!(summary0.description_body(), "Body line one");
         assert_eq!(summary0.commit_count(), 1);
 
         let entry1 = &entries[1];
@@ -403,7 +469,7 @@ mod tests {
         let summary1 = parse_revset_summary(
             &label1,
             &format!(
-                "{}|{}|{}|{}",
+                "{}|{}|{}|{}\x1E",
                 entry1.commit_id,
                 entry1.change_id,
                 entry1.bookmarks.join(","),
@@ -415,6 +481,7 @@ mod tests {
         assert_eq!(summary1.label(), "trunk()..uvw000");
         assert!(summary1.bookmarks().is_empty());
         assert_eq!(summary1.description(), "Second change no bookmark");
+        assert_eq!(summary1.description_body(), "");
     }
 
     #[test]
