@@ -2,7 +2,8 @@
 id: 0000n-2026-05-28-17ad59d6-generate-per-change-left-column
 created_at: 2026-05-28T10:00:37+02:00
 created_by_model: claude-opus-4-7/high
-state: open
+state: implemented
+state_updated_at: 2026-05-28T10:17:30+02:00
 ---
 # Generate Screen: Per-Change Left Column (`trunk()..@`)
 
@@ -138,3 +139,54 @@ The PR-scope range is `trunk()..<change_id>`. The "head" form field continues to
 - Diff-stat fetch per change is N round-trips to `jj`. For repos with many changes above trunk this could be slow. Acceptable for the first cut; revisit if it bites. (Could be parallelized with `futures::future::join_all` if needed.)
 - Wrapping inside a `Paragraph` interacts with selection styling. If selection styling visually bleeds into the wrapped continuation line, render the row label as multiple `Line`s with explicit per-line style instead of letting `Wrap` do it.
 - The `RevsetSummary.label` field doubles as both human label and jj scope string. Setting it to `trunk()..<change_id>` means callers that print `revset.label()` for human consumption (e.g. status line, right column) will see the scope string. The right-column ticket should account for this; for now, accept the slight UX regression there since the right column is being redesigned anyway.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: claude-sonnet-4-6
+- completed_at: 2026-05-28T10:17:30+02:00
+- state: implemented
+
+## What was completed
+
+Implemented the per-change left column for the Generate screen. The three-preset "Changes" list driven by `CANDIDATE_REVSETS` is replaced by a per-change list of every change in `trunk()..@`.
+
+### Changes
+
+**`src/jj.rs`**:
+- Removed `CANDIDATE_REVSETS` constant and `candidate_revsets` / `candidate_revset_summary` methods.
+- Added `TRUNK_RANGE_REVSET = "trunk()..@"` constant.
+- Added `JjClient::per_change_revsets(cwd)`: enumerates changes in `trunk()..@` via one `jj log` call, then fetches per-change diff stats for `trunk()..<change_id>` for each entry, returning one `RevsetSummary` per change with `label = "trunk()..<change_id>"`.
+- Added `no_changes_placeholder()` helper for the empty `trunk()..@` case.
+- Updated `spawn_revset_discovery` to call `per_change_revsets` instead of `candidate_revsets`.
+
+**`src/ui.rs`**:
+- Removed `revset_display_label` (replaced by new rendering logic).
+- Rewrote `render_menu` Generate branch to call `render_generate_menu`.
+- Added `render_generate_menu`: renders a `Paragraph` with per-row `Line` slices; inserts `â”€`-separator between rows (not after last); delegates to `build_revset_row_lines` per entry.
+- Added `build_revset_row_lines`: priority-based primary identifier (bookmark bold > description first line > change_id); secondary muted description line when primary is a bookmark; char-safe wrap via `wrap_chars`; marker `â–¶` only on first line of selected row.
+- Added `wrap_chars`: char-boundary-safe line wrapping (no byte-slice panics on multibyte input).
+
+### Deviations from plan
+
+- Used `Paragraph` with manual `Vec<Line>` construction (as recommended). Did not use `textwrap` crate since char-based wrapping was simple and sufficient.
+- Diff stats are fetched sequentially (not concurrently via `join_all`) â€” acceptable per ticket risk note; can be parallelized later if needed.
+
+## Verification
+
+- `just verify` passes: fmt, check, clippy (no warnings), 70 tests.
+- New tests added: `per_change_revsets_parse_produces_correct_labels`, `no_changes_placeholder_is_stable`, `failed_revset_summary_keeps_label`.
+- Visual smoke test: not possible in this CI context, but logic is unit-tested.
+
+## Important files changed
+
+- `src/jj.rs`
+- `src/ui.rs`
+
+## Residual risks / follow-up
+
+- Diff-stat fetch is sequential (N round-trips); fine for small stacks.
+- `revset.label()` now returns `trunk()..<change_id>` â€” right column (separate ticket) should account for this when displaying human-readable revset info.
+- `sync_head_from_selected_revset` sets `form.head` to `trunk()..<change_id>`; semantically this is the scope, not just the tip. The base-as-change ticket will clean this up.

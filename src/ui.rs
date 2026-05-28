@@ -233,48 +233,188 @@ fn llm_status_indicator(status: &LlmStatus) -> (&'static str, Style) {
 }
 
 fn render_menu(frame: &mut Frame, app: &App, area: Rect) {
-    let (items, title): (Vec<ListItem>, &'static str) = match app.screen() {
-        Screen::Landing => (
-            selectable_list(
-                &["Generate PR", "Manage PRs", "Manage Issues"],
-                app.landing().selected_entry,
-            ),
-            "Modes",
-        ),
-        Screen::Generate => (
-            app.generate()
-                .revsets
-                .iter()
-                .enumerate()
-                .map(|(index, revset)| {
-                    let label = revset_display_label(revset, area);
-                    list_item(&label, index == app.generate().selected_revset)
-                })
-                .collect(),
-            "Changes",
-        ),
-        Screen::PullRequests => (
-            selectable_list(
-                &["Open items", "Filter", "Comment"],
-                app.pull_requests().selected_item,
-            ),
-            "PRs",
-        ),
-        Screen::Issues => (
-            selectable_list(
-                &["Open items", "Filter", "Comment"],
-                app.issues().selected_item,
-            ),
-            "Issues",
-        ),
+    match app.screen() {
+        Screen::Generate => {
+            render_generate_menu(frame, app, area);
+        }
+        _ => {
+            let (items, title): (Vec<ListItem>, &'static str) = match app.screen() {
+                Screen::Landing => (
+                    selectable_list(
+                        &["Generate PR", "Manage PRs", "Manage Issues"],
+                        app.landing().selected_entry,
+                    ),
+                    "Modes",
+                ),
+                Screen::PullRequests => (
+                    selectable_list(
+                        &["Open items", "Filter", "Comment"],
+                        app.pull_requests().selected_item,
+                    ),
+                    "PRs",
+                ),
+                Screen::Issues => (
+                    selectable_list(
+                        &["Open items", "Filter", "Comment"],
+                        app.issues().selected_item,
+                    ),
+                    "Issues",
+                ),
+                Screen::Generate => unreachable!(),
+            };
+
+            let list = List::new(items).block(themed_block(
+                focused_title(title, app.focus() == Focus::Menu),
+                app.focus() == Focus::Menu,
+            ));
+
+            frame.render_widget(list, area);
+        }
+    }
+}
+
+fn render_generate_menu(frame: &mut Frame, app: &App, area: Rect) {
+    let block = themed_block(
+        focused_title("Changes", app.focus() == Focus::Menu),
+        app.focus() == Focus::Menu,
+    );
+    let inner = block.inner(area);
+    // inner_width accounts for the horizontal padding of 1 on each side applied by themed_block
+    let inner_width = inner.width.saturating_sub(2) as usize;
+
+    let revsets = &app.generate().revsets;
+    let selected_idx = app.generate().selected_revset;
+    let last_idx = revsets.len().saturating_sub(1);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    for (index, revset) in revsets.iter().enumerate() {
+        let is_selected = index == selected_idx;
+        let row_lines = build_revset_row_lines(revset, is_selected, inner_width);
+        lines.extend(row_lines);
+
+        // Separator between rows (not after the last)
+        if index < last_idx {
+            let sep = "─".repeat(inner_width);
+            lines.push(Line::from(sep).fg(colors::BORDER));
+        }
+    }
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
+}
+
+/// Build the display lines for one revset row in the per-change left column.
+///
+/// Priority for the primary identifier:
+/// 1. First bookmark name (bold, ACCENT if selected)
+/// 2. Description first line (if not a jj placeholder)
+/// 3. Abbreviated change_id
+///
+/// Secondary line: if primary is a bookmark and description is meaningful,
+/// show the description first line in muted style.
+///
+/// Text is wrapped to `inner_width` chars using char-based logic (no byte slicing).
+fn build_revset_row_lines(
+    revset: &RevsetSummary,
+    is_selected: bool,
+    inner_width: usize,
+) -> Vec<Line<'static>> {
+    let first_bookmark = revset.bookmarks().first().map(|s| s.as_str()).unwrap_or("");
+    let first_change_id = revset
+        .change_ids()
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    let desc = revset.description();
+
+    let marker = if is_selected { "▶" } else { " " };
+    let marker_width = 2; // "▶ " or "  " — one char + one space
+
+    let available = inner_width.saturating_sub(marker_width);
+
+    let (primary, secondary): (String, Option<String>) = if !first_bookmark.is_empty() {
+        let sec = if !is_jj_default_description(desc) && !desc.is_empty() {
+            Some(desc.to_string())
+        } else {
+            None
+        };
+        (first_bookmark.to_string(), sec)
+    } else if !is_jj_default_description(desc) && !desc.is_empty() {
+        (desc.to_string(), None)
+    } else if !first_change_id.is_empty() {
+        (first_change_id.to_string(), None)
+    } else {
+        (revset.label().to_string(), None)
     };
 
-    let list = List::new(items).block(themed_block(
-        focused_title(title, app.focus() == Focus::Menu),
-        app.focus() == Focus::Menu,
-    ));
+    let primary_is_bookmark = !first_bookmark.is_empty();
 
-    frame.render_widget(list, area);
+    // Wrap primary text into lines of `available` chars
+    let primary_wrapped = wrap_chars(&primary, available);
+
+    let mut result: Vec<Line<'static>> = Vec::new();
+
+    for (i, wrapped_line) in primary_wrapped.iter().enumerate() {
+        if i == 0 {
+            // First line: marker + content
+            if is_selected {
+                let text = format!("{marker} {wrapped_line}");
+                result.push(Line::from(text.bold().fg(colors::ACCENT)));
+            } else if primary_is_bookmark {
+                // Bookmark always bold even when not selected
+                let spans = vec![
+                    Span::styled(format!("{marker} "), Style::new().fg(colors::MUTED)),
+                    Span::styled(wrapped_line.clone(), Style::new().bold().fg(colors::TEXT)),
+                ];
+                result.push(Line::from(spans));
+            } else {
+                result.push(Line::from(format!("{marker} {wrapped_line}")).fg(colors::MUTED));
+            }
+        } else {
+            // Continuation lines: indented by marker_width spaces
+            let indent = " ".repeat(marker_width);
+            if is_selected {
+                result.push(
+                    Line::from(format!("{indent}{wrapped_line}"))
+                        .style(Style::new().fg(colors::ACCENT)),
+                );
+            } else {
+                result.push(Line::from(format!("{indent}{wrapped_line}")).fg(colors::MUTED));
+            }
+        }
+    }
+
+    // Optional secondary line (muted description when primary is a bookmark)
+    if let Some(sec) = secondary {
+        let indent = " ".repeat(marker_width);
+        let truncated = truncate_chars(&sec, available);
+        result.push(Line::from(format!("{indent}{truncated}")).fg(colors::MUTED));
+    }
+
+    result
+}
+
+/// Wrap `text` into lines of at most `max_chars` characters each.
+/// Uses char-boundary-safe splitting. Never panics on multibyte chars.
+fn wrap_chars(text: &str, max_chars: usize) -> Vec<String> {
+    if max_chars == 0 {
+        return vec![String::new()];
+    }
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut start = 0;
+    while start < chars.len() {
+        let end = (start + max_chars).min(chars.len());
+        lines.push(chars[start..end].iter().collect());
+        start = end;
+    }
+    lines
 }
 
 fn selectable_list(labels: &[&str], selected: usize) -> Vec<ListItem<'static>> {
@@ -300,42 +440,6 @@ fn list_item(text: &str, selected: bool) -> ListItem<'static> {
 fn is_jj_default_description(desc: &str) -> bool {
     let trimmed = desc.trim();
     trimmed.is_empty() || trimmed.eq_ignore_ascii_case("(no description set)")
-}
-
-fn revset_display_label(revset: &RevsetSummary, area: Rect) -> String {
-    let inner_width = area.width.saturating_sub(4) as usize;
-
-    let first_bookmark = revset.bookmarks().first().map(|s| s.as_str()).unwrap_or("");
-    let first_change_id = revset
-        .change_ids()
-        .first()
-        .map(|s| s.as_str())
-        .unwrap_or("");
-    let desc = revset.description();
-
-    let (primary, secondary_tag): (String, String) = if !is_jj_default_description(desc) {
-        let tag = if !first_bookmark.is_empty() {
-            format!("[{}]", first_bookmark)
-        } else {
-            String::new()
-        };
-        (desc.to_string(), tag)
-    } else if !first_bookmark.is_empty() {
-        (first_bookmark.to_string(), revset.label().to_string())
-    } else {
-        (first_change_id.to_string(), revset.label().to_string())
-    };
-
-    let tag_chars = secondary_tag.chars().count();
-    let tag_budget = if tag_chars == 0 { 0 } else { tag_chars + 1 };
-    let primary_max = inner_width.saturating_sub(tag_budget);
-    let truncated_primary = truncate_chars(&primary, primary_max);
-
-    if secondary_tag.is_empty() {
-        truncated_primary
-    } else {
-        format!("{} {}", truncated_primary, secondary_tag)
-    }
 }
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {
