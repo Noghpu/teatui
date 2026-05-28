@@ -100,6 +100,7 @@ pub async fn capture(command: ExternalCommand) -> Result<CommandCapture, Command
         .kill_on_drop(true)
         .args(&command.args)
         .current_dir(&command.cwd)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
