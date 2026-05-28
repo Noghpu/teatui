@@ -187,15 +187,14 @@ fn default_config_candidate(
 ) -> Option<std::path::PathBuf> {
     #[cfg(windows)]
     {
-        if let Some(xdg) = xdg_config_home {
-            let xdg_str = xdg.to_string_lossy();
-            if !xdg_str.trim().is_empty() {
-                return Some(
-                    std::path::PathBuf::from(xdg.as_os_str())
-                        .join("teatui")
-                        .join("config.toml"),
-                );
-            }
+        if let Some(xdg) = xdg_config_home
+            && !xdg.to_string_lossy().trim().is_empty()
+        {
+            return Some(
+                std::path::PathBuf::from(xdg)
+                    .join("teatui")
+                    .join("config.toml"),
+            );
         }
     }
     #[cfg(not(windows))]
