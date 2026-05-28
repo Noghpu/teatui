@@ -998,17 +998,20 @@ impl ExecutionPlan {
         // Steps 3-4: if the base looks like a change_id, generate and push a
         // deterministic base bookmark.  Otherwise the base is already a remote
         // ref (e.g. `main@origin`) and no extra steps are needed.
+        //
+        // Note: this always uses `jj bookmark create` — if a bookmark already
+        // exists on the base change jj will report an error.  Reusing an
+        // existing bookmark requires a per-change revsets list (see
+        // bookmark_naming module docs); deferred until the per-change left
+        // column ticket lands.
         let pr_base_arg = if bookmark_naming::is_change_id_like(&base_raw) {
-            // Look for an existing bookmark on the base change in the revsets
-            // list supplied by the per-change left column.  If found, reuse it;
-            // otherwise auto-generate.
             let base_bookmark_name = bookmark_naming::base_bookmark(&tip_bookmark);
 
             let base_bookmark_cmd =
                 jj.bookmark_create_command(&cwd, &base_bookmark_name, &base_raw);
 
             steps.push(ExecutionStep {
-                label: "create or move base bookmark".into(),
+                label: "create base bookmark".into(),
                 command: base_bookmark_cmd,
             });
             steps.push(ExecutionStep {
@@ -1483,7 +1486,7 @@ mod tests {
         assert_eq!(plan.steps.len(), 5);
         assert_eq!(plan.steps[0].label, "create or move bookmark");
         assert_eq!(plan.steps[1].label, "push bookmark to origin");
-        assert_eq!(plan.steps[2].label, "create or move base bookmark");
+        assert_eq!(plan.steps[2].label, "create base bookmark");
         assert_eq!(plan.steps[3].label, "push base bookmark to origin");
         assert_eq!(plan.steps[4].label, "create gitea PR");
 
