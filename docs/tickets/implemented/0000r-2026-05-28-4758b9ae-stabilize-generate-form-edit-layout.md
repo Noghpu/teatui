@@ -2,7 +2,8 @@
 id: 0000r-2026-05-28-4758b9ae-stabilize-generate-form-edit-layout
 created_at: 2026-05-28T11:40:33+02:00
 created_by_model: gpt-5
-state: open
+state: implemented
+state_updated_at: 2026-05-28T11:53:22+02:00
 ---
 # Stabilize Generate PR Form Editing Layout
 
@@ -67,3 +68,32 @@ The first pass should fix rendering for the current text-backed fields without i
 ## Risks
 - `ratatui_textarea::TextArea` may not fit naturally into an inline single-row layout; if so, isolate the workaround so the later picker/text-input split can remove it cleanly.
 - Small terminal heights can still require scrolling; avoid solving all scrolling here beyond clamping and non-overlap, because pane overflow is covered by the next ticket.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: gpt-5.4-mini
+- completed_at: 2026-05-28T11:53:22+02:00
+- state: implemented
+
+Completed:
+- Added `FieldKind` and `FieldId::kind()` so the form can distinguish single-line fields from the multiline description explicitly.
+- Removed the separate Generate edit-mode stack and render the form through one row/separator path in both normal and edit modes, which keeps separators visible and the layout stable.
+- Switched Enter/Ctrl-S handling to the field-kind helper.
+
+Deviation:
+- None beyond the narrow renderer refactor needed to keep edit mode in the same form shape.
+
+Verification:
+- `just verify`
+- Passed formatting, check, clippy, unit tests, and the integration test suite.
+
+Files changed:
+- `src/generate.rs`
+- `src/ui.rs`
+- `src/app.rs`
+
+Residual risk:
+- Very small terminal heights can still clip content; the next overflow/scrolling slice is still the right place to solve that.
