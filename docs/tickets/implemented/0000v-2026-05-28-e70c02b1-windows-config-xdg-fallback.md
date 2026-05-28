@@ -2,7 +2,8 @@
 id: 0000v-2026-05-28-e70c02b1-windows-config-xdg-fallback
 created_at: 2026-05-28T16:08:28+02:00
 created_by_model: gpt-5/medium
-state: open
+state: implemented
+state_updated_at: 2026-05-28T16:23:57+02:00
 ---
 # Windows Config Should Prefer XDG Config Home
 
@@ -70,3 +71,35 @@ Run `cargo test config::tests` for focused config coverage. Run `just verify` fo
 
 ## Risks
 Environment-variable tests can become flaky if they mutate process-global state while tests run in parallel. Prefer pure helper tests that pass synthetic XDG and platform config inputs, or serialize any environment-mutating tests carefully.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: claude-sonnet-4-6
+- completed_at: 2026-05-28T16:23:57+02:00
+- state: implemented
+
+## What was completed
+- Added `default_config_candidate` helper in `src/config.rs` that accepts an optional XDG_CONFIG_HOME OsString and an optional platform config PathBuf, returning the appropriate `teatui/config.toml` path.
+- On Windows (`#[cfg(windows)]`), the helper checks XDG_CONFIG_HOME first; if set and non-blank/whitespace, uses `$XDG_CONFIG_HOME/teatui/config.toml`. Otherwise falls back to the platform config dir (AppData/Roaming).
+- On non-Windows, the XDG parameter is ignored (dirs already handles XDG on those platforms).
+- Updated `Config::load` to route default path selection through the helper, calling `std::env::var_os("XDG_CONFIG_HOME")` and `dirs::config_dir()` and passing both to the helper.
+- Added 4 focused unit tests under `#[cfg(windows)]` in `config::tests` covering: XDG set uses XDG path, XDG empty falls back to platform, XDG missing falls back to platform, neither set returns None.
+- Updated `docs/design.md` Configuration section to describe Windows now first checks `XDG_CONFIG_HOME` before falling back to Roaming AppData.
+
+## Deviations from plan
+None. Implementation matches the plan exactly. Used `let Some(...) && condition` syntax to satisfy clippy's `collapsible_if` lint.
+
+## Verification
+Ran `cargo test config::tests` â€” 8 tests pass (4 new + 4 existing).
+Ran `just verify` â€” all 157 tests pass, fmt, clippy, and check all green.
+
+## Important files changed
+- `src/config.rs` â€” new `default_config_candidate` helper and updated `Config::load`
+- `docs/design.md` â€” Configuration section updated
+
+## Residual risks / follow-up
+- Tests are pure helper tests (no environment mutation), so no parallel-test flakiness risk.
+- If XDG_CONFIG_HOME contains a path with non-UTF-8 characters on Windows, `to_string_lossy` will replace them with the replacement character for the whitespace check, but the actual PathBuf construction uses `as_os_str()` directly so the path itself is preserved correctly.
