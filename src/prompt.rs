@@ -442,6 +442,7 @@ mod tests {
         let repo = RepoState {
             workspace_root: Some(PathBuf::from("C:/repo")),
             inside_workspace: true,
+            discovering: false,
             jj: ToolStatus::Available,
             git: ToolStatus::Available,
             tea: ToolStatus::Available,

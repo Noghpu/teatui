@@ -269,6 +269,7 @@ fn smoke_repo_state(
     RepoState {
         workspace_root: Some(workspace),
         inside_workspace: true,
+        discovering: false,
         jj: ToolStatus::Available,
         git: ToolStatus::Available,
         tea: ToolStatus::Available,
@@ -304,6 +305,7 @@ fn build_prompt(workspace: Option<&PathBuf>) -> prompt::PromptBuild {
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into())),
         ),
         inside_workspace: true,
+        discovering: false,
         jj: ToolStatus::Available,
         git: ToolStatus::Available,
         tea: ToolStatus::Available,

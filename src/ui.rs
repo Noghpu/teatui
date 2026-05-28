@@ -95,9 +95,21 @@ fn render_landing_actions(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let actions = [
-        ActionItem { icon: "◆", label: "Generate PR", key: "Enter/g" },
-        ActionItem { icon: "◆", label: "Manage PRs", key: "p" },
-        ActionItem { icon: "◆", label: "Manage Issues", key: "i" },
+        ActionItem {
+            icon: "◆",
+            label: "Generate PR",
+            key: "g",
+        },
+        ActionItem {
+            icon: "◆",
+            label: "Manage PRs",
+            key: "p",
+        },
+        ActionItem {
+            icon: "◆",
+            label: "Manage Issues",
+            key: "i",
+        },
     ];
 
     let mut lines: Vec<Line> = Vec::new();
@@ -183,7 +195,10 @@ fn render_landing_footer(frame: &mut Frame, app: &App, area: Rect) {
             style,
         ));
     } else {
-        spans.push(Span::styled("· LLM: (none)", Style::new().fg(colors::MUTED)));
+        spans.push(Span::styled(
+            "· LLM: (none)",
+            Style::new().fg(colors::MUTED),
+        ));
     }
 
     spans.push(separator());
@@ -394,13 +409,17 @@ fn render_work(frame: &mut Frame, app: &App, area: Rect) {
         Screen::PullRequests => vec![
             Line::from("Manage PRs".bold()),
             Line::from(""),
-            Line::from("List open PRs, preview details, and add a simple comment.".fg(colors::MUTED)),
+            Line::from(
+                "List open PRs, preview details, and add a simple comment.".fg(colors::MUTED),
+            ),
             Line::from("This mode stays intentionally small.".fg(colors::MUTED)),
         ],
         Screen::Issues => vec![
             Line::from("Manage Issues".bold()),
             Line::from(""),
-            Line::from("List open issues, preview details, and add a simple comment.".fg(colors::MUTED)),
+            Line::from(
+                "List open issues, preview details, and add a simple comment.".fg(colors::MUTED),
+            ),
             Line::from("This mode stays intentionally small.".fg(colors::MUTED)),
         ],
     };
@@ -435,9 +454,7 @@ fn render_generate_fields(app: &App) -> Vec<Line<'static>> {
                 total,
             );
             if index < last {
-                lines.push(
-                    Line::from("  ──────────────────────────────  ").fg(colors::BORDER),
-                );
+                lines.push(Line::from("  ──────────────────────────────  ").fg(colors::BORDER));
             }
             lines
         })
@@ -603,9 +620,7 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     ];
 
     if app.screen() == Screen::Generate {
-        raw_segments.push(
-            format!(" phase:{} ", app.generate().phase.label()).fg(colors::MUTED),
-        );
+        raw_segments.push(format!(" phase:{} ", app.generate().phase.label()).fg(colors::MUTED));
         let job_segment = app
             .jobs()
             .active_status()
@@ -635,14 +650,8 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
 fn render_help(frame: &mut Frame, app: &App, area: Rect) {
     let help = match app.screen() {
         Screen::Landing => Line::from(vec![
-            " ↑/k ".bold().fg(colors::ACCENT),
-            "up ".fg(colors::MUTED),
-            " ↓/j ".bold().fg(colors::ACCENT),
-            "down ".fg(colors::MUTED),
             " Enter ".bold().fg(colors::ACCENT),
             "open ".fg(colors::MUTED),
-            " Esc ".bold().fg(colors::ACCENT),
-            "back ".fg(colors::MUTED),
             " q ".bold().fg(colors::ACCENT),
             "quit ".fg(colors::MUTED),
         ]),
@@ -700,10 +709,6 @@ fn render_help(frame: &mut Frame, app: &App, area: Rect) {
             "back ".fg(colors::MUTED),
         ]),
         Screen::Generate => Line::from(vec![
-            " ↑/k ".bold().fg(colors::ACCENT),
-            "up ".fg(colors::MUTED),
-            " ↓/j ".bold().fg(colors::ACCENT),
-            "down ".fg(colors::MUTED),
             " h/l ".bold().fg(colors::ACCENT),
             "move focus ".fg(colors::MUTED),
             " Enter ".bold().fg(colors::ACCENT),
@@ -722,10 +727,6 @@ fn render_help(frame: &mut Frame, app: &App, area: Rect) {
             "back ".fg(colors::MUTED),
         ]),
         Screen::PullRequests | Screen::Issues => Line::from(vec![
-            " ↑/k ".bold().fg(colors::ACCENT),
-            "up ".fg(colors::MUTED),
-            " ↓/j ".bold().fg(colors::ACCENT),
-            "down ".fg(colors::MUTED),
             " Enter ".bold().fg(colors::ACCENT),
             "select ".fg(colors::MUTED),
             " c ".bold().fg(colors::ACCENT),
@@ -920,7 +921,9 @@ fn render_prompt_manifest(prompt: &PromptBuild) -> Vec<Line<'static>> {
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from("Press p to view the full prompt text.".fg(colors::MUTED)));
+    lines.push(Line::from(
+        "Press p to view the full prompt text.".fg(colors::MUTED),
+    ));
     lines
 }
 
@@ -932,7 +935,9 @@ fn render_prompt_text(prompt: &PromptBuild) -> Vec<Line<'static>> {
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from("Press p to return to the manifest.".fg(colors::MUTED)));
+    lines.push(Line::from(
+        "Press p to return to the manifest.".fg(colors::MUTED),
+    ));
     lines
 }
 
@@ -1036,9 +1041,12 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             lines.push(Line::from(""));
             lines.push(Line::from("Generating draft".bold()));
             lines.push(Line::from(
-                "The retained draft stays visible while a fresh response is requested.".fg(colors::MUTED),
+                "The retained draft stays visible while a fresh response is requested."
+                    .fg(colors::MUTED),
             ));
-            lines.push(Line::from("Waiting for a validated JSON draft.".fg(colors::MUTED)));
+            lines.push(Line::from(
+                "Waiting for a validated JSON draft.".fg(colors::MUTED),
+            ));
             if let Some(draft) = generate.draft.as_ref() {
                 lines.push(Line::from(""));
                 lines.extend(render_draft_section(draft));
@@ -1062,7 +1070,9 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
         GeneratePhase::DraftReady => {
             lines.push(Line::from(""));
             lines.push(Line::from("Draft review".bold()));
-            lines.push(Line::from(format!("status: {}", generate.review.summary)).fg(colors::ACCENT));
+            lines.push(
+                Line::from(format!("status: {}", generate.review.summary)).fg(colors::ACCENT),
+            );
             lines.push(Line::from(
                 "The generated draft is editable in the center pane.".fg(colors::MUTED),
             ));
@@ -1082,7 +1092,8 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
                     .fg(colors::WARN),
             ));
             lines.push(Line::from(
-                "Press c to validate the execution plan and check repo freshness.".fg(colors::MUTED),
+                "Press c to validate the execution plan and check repo freshness."
+                    .fg(colors::MUTED),
             ));
         }
         GeneratePhase::CheckingFreshness => {
@@ -1103,7 +1114,9 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             lines.push(Line::from(""));
             lines.extend(render_recent_logs(&app.logs().entries, 6));
             lines.push(Line::from(""));
-            lines.push(Line::from("Wait for the freshness check to finish.".fg(colors::MUTED)));
+            lines.push(Line::from(
+                "Wait for the freshness check to finish.".fg(colors::MUTED),
+            ));
         }
         GeneratePhase::Confirming => {
             lines.push(Line::from(""));
@@ -1129,7 +1142,9 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             lines.push(Line::from(""));
             lines.extend(render_recent_logs(&app.logs().entries, 6));
             lines.push(Line::from(""));
-            lines.push(Line::from("Press Enter to start execution.".fg(colors::WARN)));
+            lines.push(Line::from(
+                "Press Enter to start execution.".fg(colors::WARN),
+            ));
         }
         GeneratePhase::Executing => {
             lines.push(Line::from(""));
@@ -1141,7 +1156,9 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             lines.push(Line::from(
                 "The current step stays visible in the job registry.".fg(colors::MUTED),
             ));
-            lines.push(Line::from("Wait for the current command to finish.".fg(colors::MUTED)));
+            lines.push(Line::from(
+                "Wait for the current command to finish.".fg(colors::MUTED),
+            ));
             lines.push(Line::from(""));
             lines.extend(render_job_records(&app.jobs().records));
             if let Some(plan) = generate.execution_plan.as_ref() {
@@ -1167,12 +1184,16 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             lines.push(Line::from(""));
             lines.extend(render_recent_logs(&app.logs().entries, 6));
             lines.push(Line::from(""));
-            lines.push(Line::from("Press Esc to return to the draft review.".fg(colors::MUTED)));
+            lines.push(Line::from(
+                "Press Esc to return to the draft review.".fg(colors::MUTED),
+            ));
         }
         GeneratePhase::Failed => {
             lines.push(Line::from(""));
             lines.push(Line::from("Draft workflow failed".bold()));
-            lines.push(Line::from(format!("status: {}", generate.review.summary)).fg(colors::ACCENT));
+            lines.push(
+                Line::from(format!("status: {}", generate.review.summary)).fg(colors::ACCENT),
+            );
             if let Some(error) = &generate.context_error {
                 lines.push(Line::from("Context failed".bold()));
                 lines.push(Line::from(error.clone()).fg(colors::BAD));
@@ -1202,7 +1223,9 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
                 });
             }
             if let Some(step) = generate.execution_failed_step {
-                lines.push(Line::from(format!("execution failed at step {}", step + 1)).fg(colors::BAD));
+                lines.push(
+                    Line::from(format!("execution failed at step {}", step + 1)).fg(colors::BAD),
+                );
             }
             if let Some(error) = &generate.execution_error {
                 lines.push(Line::from(error.clone()).fg(colors::BAD));
@@ -1321,7 +1344,8 @@ fn render_job_records(records: &[JobRecord]) -> Vec<Line<'static>> {
         if !record.stdout.trim().is_empty()
             && !matches!(record.status, crate::event::JobStatus::Succeeded)
         {
-            lines.push(Line::from(format!("   stdout: {}", record.stdout.trim())).fg(colors::MUTED));
+            lines
+                .push(Line::from(format!("   stdout: {}", record.stdout.trim())).fg(colors::MUTED));
         }
     }
 

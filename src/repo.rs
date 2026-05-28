@@ -154,6 +154,7 @@ pub struct BaseBranchInfo {
 pub struct RepoState {
     pub workspace_root: Option<PathBuf>,
     pub inside_workspace: bool,
+    pub discovering: bool,
     pub jj: ToolStatus,
     pub git: ToolStatus,
     pub tea: ToolStatus,
@@ -170,6 +171,7 @@ impl RepoState {
         Self {
             workspace_root: None,
             inside_workspace: false,
+            discovering: true,
             jj: ToolStatus::Unknown,
             git: ToolStatus::Unknown,
             tea: ToolStatus::Unknown,
@@ -257,6 +259,7 @@ pub async fn discover(config: Config, cwd: &Path) -> RepoState {
     RepoState {
         workspace_root,
         inside_workspace,
+        discovering: false,
         jj,
         git,
         tea,

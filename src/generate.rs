@@ -997,6 +997,7 @@ mod tests {
         RepoState {
             workspace_root: Some(PathBuf::from("C:/repo")),
             inside_workspace: true,
+            discovering: false,
             jj: crate::repo::ToolStatus::Available,
             git: crate::repo::ToolStatus::Available,
             tea: crate::repo::ToolStatus::Available,
