@@ -1072,8 +1072,8 @@ mod tests {
         )));
 
         assert_eq!(app.input_mode, InputMode::Normal);
-        assert_eq!(app.generate.form.title.value, "x");
-        assert!(!app.generate.form.title.value.contains('\n'));
+        assert_eq!(app.generate.form.title.display_value(), "x");
+        assert!(!app.generate.form.title.display_value().contains('\n'));
     }
 
     #[test]
@@ -1109,7 +1109,7 @@ mod tests {
         )));
 
         assert_eq!(app.input_mode, InputMode::Normal);
-        assert_eq!(app.generate.form.description.value, "x\ny");
+        assert_eq!(app.generate.form.description.display_value(), "x\ny");
     }
 
     #[test]
@@ -1230,7 +1230,7 @@ mod tests {
 
         assert_eq!(app.generate.phase, GeneratePhase::Failed);
         assert!(app.generate.draft.is_none());
-        assert_eq!(app.generate.form.title.value, "User edit");
+        assert_eq!(app.generate.form.title.display_value(), "User edit");
     }
 
     #[test]

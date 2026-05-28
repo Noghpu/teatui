@@ -1,4 +1,4 @@
-use std::time::SystemTime;
+use std::{collections::BTreeSet, time::SystemTime};
 
 use crate::bookmark_naming;
 use crate::config::Config;
@@ -123,18 +123,33 @@ pub enum PromptView {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldKind {
-    SingleLine,
-    Multiline,
+    Text { multiline: bool },
+    Picker {
+        multi_select: bool,
+        optional: bool,
+    },
 }
 
 impl FieldKind {
     pub fn is_multiline(self) -> bool {
-        matches!(self, Self::Multiline)
+        matches!(self, Self::Text { multiline: true })
+    }
+
+    pub fn is_picker(self) -> bool {
+        matches!(self, Self::Picker { .. })
+    }
+
+    pub fn is_multi_select(self) -> bool {
+        matches!(self, Self::Picker { multi_select: true, .. })
+    }
+
+    pub fn is_optional(self) -> bool {
+        matches!(self, Self::Picker { optional: true, .. })
     }
 }
 
-#[derive(Clone, Default)]
-pub struct FieldState {
+#[derive(Debug, Clone)]
+pub struct TextFieldState {
     initial: String,
     pub value: String,
     pub buffer: String,
@@ -143,7 +158,7 @@ pub struct FieldState {
     pub errors: Vec<String>,
 }
 
-impl FieldState {
+impl TextFieldState {
     pub fn new(value: impl Into<String>) -> Self {
         let value = value.into();
         Self {
@@ -219,29 +234,502 @@ impl FieldState {
     }
 }
 
-impl std::fmt::Debug for FieldState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FieldState")
-            .field("initial", &self.initial)
-            .field("value", &self.value)
-            .field("buffer", &self.buffer)
-            .field("dirty", &self.dirty)
-            .field("errors", &self.errors)
-            .finish()
+impl PartialEq for TextFieldState {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl Eq for TextFieldState {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerOption {
+    pub label: String,
+    pub value: String,
+    pub enabled: bool,
+}
+
+impl PickerOption {
+    pub fn new(label: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            value: value.into(),
+            enabled: true,
+        }
+    }
+
+    pub fn disabled(label: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            value: value.into(),
+            enabled: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerOptionView {
+    pub label: String,
+    pub value: String,
+    pub enabled: bool,
+    pub selected: bool,
+    pub highlighted: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PickerFieldState {
+    initial: Vec<String>,
+    committed: Vec<String>,
+    draft: Vec<String>,
+    pub value: String,
+    pub buffer: String,
+    pub dirty: bool,
+    pub errors: Vec<String>,
+    pub options: Vec<PickerOption>,
+    pub filter: String,
+    pub highlighted: usize,
+    pub multi_select: bool,
+    pub optional: bool,
+    pub editing: bool,
+}
+
+impl PickerFieldState {
+    pub fn new(value: impl Into<String>, multi_select: bool, optional: bool) -> Self {
+        let value = value.into();
+        let committed = parse_picker_values(&value, multi_select);
+        Self {
+            initial: committed.clone(),
+            committed: committed.clone(),
+            draft: committed.clone(),
+            value: value.clone(),
+            buffer: value,
+            dirty: false,
+            errors: Vec::new(),
+            options: Vec::new(),
+            filter: String::new(),
+            highlighted: 0,
+            multi_select,
+            optional,
+            editing: false,
+        }
+    }
+
+    pub fn display_value(&self) -> &str {
+        if self.editing {
+            &self.buffer
+        } else {
+            &self.value
+        }
+    }
+
+    pub fn begin_edit(&mut self) {
+        self.editing = true;
+        self.draft = self.committed.clone();
+        self.filter.clear();
+        self.highlighted = self
+            .visible_options()
+            .iter()
+            .position(|option| option.selected && option.enabled)
+            .or_else(|| self.visible_options().iter().position(|option| option.enabled))
+            .unwrap_or(0);
+        self.sync_buffer();
+    }
+
+    pub fn commit(&mut self) {
+        self.committed = self.draft.clone();
+        self.value = join_picker_values(&self.committed);
+        self.buffer = self.value.clone();
+        self.dirty = self.committed != self.initial;
+        self.editing = false;
+    }
+
+    pub fn cancel(&mut self) {
+        self.draft = self.committed.clone();
+        self.buffer = self.value.clone();
+        self.filter.clear();
+        self.highlighted = 0;
+        self.dirty = self.committed != self.initial;
+        self.editing = false;
+    }
+
+    pub fn reset_editor_viewport(&mut self) {}
+
+    pub fn input(&mut self, key: crossterm::event::KeyEvent) {
+        if !self.editing {
+            return;
+        }
+
+        match key.code {
+            crossterm::event::KeyCode::Char(ch)
+                if key.modifiers.is_empty() && ch != ' ' && !ch.is_control() =>
+            {
+                self.filter.push(ch);
+                self.highlighted = self.highlighted.min(self.visible_options().len().saturating_sub(1));
+                self.sync_buffer();
+            }
+            crossterm::event::KeyCode::Backspace => {
+                self.filter.pop();
+                self.highlighted = self.highlighted.min(self.visible_options().len().saturating_sub(1));
+                self.sync_buffer();
+            }
+            crossterm::event::KeyCode::Up => self.move_highlight(-1),
+            crossterm::event::KeyCode::Down => self.move_highlight(1),
+            crossterm::event::KeyCode::Char(' ') => {
+                if self.multi_select {
+                    self.toggle_highlighted();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn set_options(&mut self, options: Vec<PickerOption>) {
+        self.options = options;
+        self.ensure_valid_selection();
+        self.sync_buffer();
+    }
+
+    pub fn visible_options(&self) -> Vec<PickerOptionView> {
+        let filter = self.filter.trim().to_lowercase();
+        self.options
+            .iter()
+            .filter(|option| {
+                filter.is_empty()
+                    || option.label.to_lowercase().contains(&filter)
+                    || option.value.to_lowercase().contains(&filter)
+            })
+            .enumerate()
+            .map(|(index, option)| {
+                let selected = self.draft.iter().any(|value| value == &option.value);
+                PickerOptionView {
+                    label: option.label.clone(),
+                    value: option.value.clone(),
+                    enabled: option.enabled,
+                    selected,
+                    highlighted: index == self.highlighted,
+                }
+            })
+            .collect()
+    }
+
+    pub fn selected_values(&self) -> &[String] {
+        &self.committed
+    }
+
+    pub fn is_valid_selection(&self) -> bool {
+        if self.committed.is_empty() {
+            return self.optional;
+        }
+
+        self.committed.iter().all(|value| {
+            self.options
+                .iter()
+                .any(|option| option.enabled && option.value == *value)
+        })
+    }
+
+    pub fn invalid_selection_error(&self, label: &str) -> Vec<String> {
+        if self.options.is_empty() {
+            if self.optional {
+                Vec::new()
+            } else {
+                vec![format!("{label} has no available options")]
+            }
+        } else if self.is_valid_selection() {
+            Vec::new()
+        } else {
+            vec![format!("{label} selection is unavailable")]
+        }
+    }
+
+    fn move_highlight(&mut self, direction: isize) {
+        let visible = self.visible_option_indices();
+        if visible.is_empty() {
+            self.highlighted = 0;
+            self.sync_buffer();
+            return;
+        }
+
+        let current = visible
+            .get(self.highlighted.min(visible.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(visible[0]);
+        let position = visible.iter().position(|index| *index == current).unwrap_or(0);
+        let next = if direction < 0 {
+            position.saturating_sub(1)
+        } else {
+            (position + 1).min(visible.len().saturating_sub(1))
+        };
+        self.highlighted = next;
+        self.sync_buffer();
+    }
+
+    fn toggle_highlighted(&mut self) {
+        let Some(index) = self.visible_option_indices().get(self.highlighted).copied() else {
+            return;
+        };
+        let Some(option) = self.options.get(index) else {
+            return;
+        };
+        if !option.enabled {
+            return;
+        }
+
+        if self.multi_select {
+            if let Some(pos) = self.draft.iter().position(|value| value == &option.value) {
+                self.draft.remove(pos);
+            } else {
+                self.draft.push(option.value.clone());
+            }
+        } else {
+            self.draft.clear();
+            self.draft.push(option.value.clone());
+        }
+
+        self.sync_buffer();
+    }
+
+    fn ensure_valid_selection(&mut self) {
+        if self.options.is_empty() {
+            if !self.optional {
+                self.committed.clear();
+                self.draft.clear();
+                self.value.clear();
+                self.buffer.clear();
+            }
+            self.highlighted = 0;
+            return;
+        }
+
+        let enabled_values = self
+            .options
+            .iter()
+            .filter(|option| option.enabled)
+            .map(|option| option.value.clone())
+            .collect::<Vec<_>>();
+        self.committed
+            .retain(|value| enabled_values.iter().any(|candidate| candidate == value));
+        self.draft = self.committed.clone();
+        if self.committed.is_empty() && !self.optional {
+            if let Some(value) = enabled_values.first() {
+                self.committed.push(value.clone());
+                self.draft = self.committed.clone();
+            }
+        }
+        self.value = join_picker_values(&self.committed);
+        self.buffer = self.value.clone();
+        self.dirty = self.committed != self.initial;
+        self.highlighted = 0;
+    }
+
+    fn visible_option_indices(&self) -> Vec<usize> {
+        let filter = self.filter.trim().to_lowercase();
+        self.options
+            .iter()
+            .enumerate()
+            .filter(|(_, option)| {
+                filter.is_empty()
+                    || option.label.to_lowercase().contains(&filter)
+                    || option.value.to_lowercase().contains(&filter)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn sync_buffer(&mut self) {
+        self.buffer = join_picker_values(&self.draft);
+    }
+}
+
+impl PartialEq for PickerFieldState {
+    fn eq(&self, other: &Self) -> bool {
+        self.committed == other.committed
+            && self.multi_select == other.multi_select
+            && self.optional == other.optional
+    }
+}
+
+impl Eq for PickerFieldState {}
+
+#[derive(Debug, Clone)]
+pub enum FieldState {
+    Text(TextFieldState),
+    Picker(PickerFieldState),
+}
+
+impl FieldState {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self::Text(TextFieldState::new(value))
+    }
+
+    pub fn picker(value: impl Into<String>, multi_select: bool, optional: bool) -> Self {
+        Self::Picker(PickerFieldState::new(value, multi_select, optional))
+    }
+
+    pub fn display_value(&self) -> &str {
+        match self {
+            Self::Text(field) => field.display_value(),
+            Self::Picker(field) => field.display_value(),
+        }
+    }
+
+    pub fn begin_edit(&mut self) {
+        match self {
+            Self::Text(field) => field.begin_edit(),
+            Self::Picker(field) => field.begin_edit(),
+        }
+    }
+
+    pub fn commit(&mut self) {
+        match self {
+            Self::Text(field) => field.commit(),
+            Self::Picker(field) => field.commit(),
+        }
+    }
+
+    pub fn cancel(&mut self) {
+        match self {
+            Self::Text(field) => field.cancel(),
+            Self::Picker(field) => field.cancel(),
+        }
+    }
+
+    pub fn reset_editor_viewport(&mut self) {
+        match self {
+            Self::Text(field) => field.reset_editor_viewport(),
+            Self::Picker(field) => field.reset_editor_viewport(),
+        }
+    }
+
+    pub fn input(&mut self, key: crossterm::event::KeyEvent) {
+        match self {
+            Self::Text(field) => field.input(key),
+            Self::Picker(field) => field.input(key),
+        }
+    }
+
+    pub fn set_picker_options(&mut self, options: Vec<PickerOption>) {
+        if let Self::Picker(field) = self {
+            field.set_options(options);
+        }
+    }
+
+    pub fn picker_options(&self) -> &[PickerOption] {
+        match self {
+            Self::Text(_) => &[],
+            Self::Picker(field) => &field.options,
+        }
+    }
+
+    pub fn picker_visible_options(&self) -> Vec<PickerOptionView> {
+        match self {
+            Self::Text(_) => Vec::new(),
+            Self::Picker(field) => field.visible_options(),
+        }
+    }
+
+    pub fn picker_filter(&self) -> Option<&str> {
+        match self {
+            Self::Text(_) => None,
+            Self::Picker(field) => Some(&field.filter),
+        }
+    }
+
+    pub fn picker_is_editing(&self) -> bool {
+        matches!(self, Self::Picker(field) if field.editing)
+    }
+
+    pub fn picker_selected_values(&self) -> &[String] {
+        match self {
+            Self::Text(_) => &[],
+            Self::Picker(field) => field.selected_values(),
+        }
+    }
+
+    pub fn is_picker(&self) -> bool {
+        matches!(self, Self::Picker(_))
+    }
+
+    pub fn is_multiline(&self) -> bool {
+        matches!(self, Self::Text(field) if field.buffer.lines().count() > 1)
+    }
+
+    pub fn dirty(&self) -> bool {
+        match self {
+            Self::Text(field) => field.dirty,
+            Self::Picker(field) => field.dirty,
+        }
+    }
+
+    pub fn errors(&self) -> &[String] {
+        match self {
+            Self::Text(field) => &field.errors,
+            Self::Picker(field) => &field.errors,
+        }
+    }
+
+    pub fn errors_mut(&mut self) -> &mut Vec<String> {
+        match self {
+            Self::Text(field) => &mut field.errors,
+            Self::Picker(field) => &mut field.errors,
+        }
+    }
+
+    pub fn set_errors(&mut self, errors: Vec<String>) {
+        *self.errors_mut() = errors;
+    }
+
+    pub fn set_value(&mut self, value: impl Into<String>) {
+        let value = value.into();
+        match self {
+            Self::Text(field) => {
+                field.value = value.clone();
+                field.buffer = value.clone();
+                field.initial = value;
+                field.dirty = false;
+                field.editor = textarea_from_text(&field.value);
+            }
+            Self::Picker(field) => {
+                let committed = parse_picker_values(&value, field.multi_select);
+                field.initial = committed.clone();
+                field.committed = committed.clone();
+                field.draft = committed;
+                field.value = value.clone();
+                field.buffer = value;
+                field.dirty = false;
+            }
+        }
+    }
+
+    pub fn set_picker_selection(&mut self, values: Vec<String>) {
+        if let Self::Picker(field) = self {
+            field.initial = values.clone();
+            field.committed = values.clone();
+            field.draft = values.clone();
+            field.value = join_picker_values(&values);
+            field.buffer = field.value.clone();
+            field.dirty = false;
+        }
     }
 }
 
 impl PartialEq for FieldState {
     fn eq(&self, other: &Self) -> bool {
-        self.initial == other.initial
-            && self.value == other.value
-            && self.buffer == other.buffer
-            && self.dirty == other.dirty
-            && self.errors == other.errors
+        match (self, other) {
+            (Self::Text(left), Self::Text(right)) => left == right,
+            (Self::Picker(left), Self::Picker(right)) => left == right,
+            _ => false,
+        }
     }
 }
 
 impl Eq for FieldState {}
+
+impl Default for FieldState {
+    fn default() -> Self {
+        Self::new("")
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrForm {
@@ -262,14 +750,14 @@ impl PrForm {
         base: impl Into<String>,
     ) -> Self {
         Self {
-            head: FieldState::new(head),
+            head: FieldState::picker(head, false, false),
             branch_name: FieldState::new(branch_name),
-            base: FieldState::new(base),
+            base: FieldState::picker(base, false, false),
             title: FieldState::default(),
             description: FieldState::default(),
-            labels: FieldState::default(),
-            assignees: FieldState::default(),
-            milestone: FieldState::default(),
+            labels: FieldState::picker("", true, true),
+            assignees: FieldState::picker("", true, true),
+            milestone: FieldState::picker("", false, true),
         }
     }
 }
@@ -293,6 +781,26 @@ fn textarea_to_text(textarea: &TextArea<'static>) -> String {
         .map(|line| line.to_string())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn parse_picker_values(value: &str, multi_select: bool) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for value in value.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+        if seen.insert(value.to_string()) {
+            values.push(value.to_string());
+        }
+        if !multi_select {
+            break;
+        }
+    }
+
+    values
+}
+
+fn join_picker_values(values: &[String]) -> String {
+    values.join(", ")
 }
 
 impl Default for PrForm {
@@ -340,14 +848,24 @@ impl FieldId {
 
     pub fn kind(self) -> FieldKind {
         match self {
-            Self::Description => FieldKind::Multiline,
-            Self::Head
-            | Self::BranchName
-            | Self::Base
-            | Self::Title
-            | Self::Labels
-            | Self::Assignees
-            | Self::Milestone => FieldKind::SingleLine,
+            Self::Description => FieldKind::Text { multiline: true },
+            Self::BranchName | Self::Title => FieldKind::Text { multiline: false },
+            Self::Head => FieldKind::Picker {
+                multi_select: false,
+                optional: false,
+            },
+            Self::Base => FieldKind::Picker {
+                multi_select: false,
+                optional: false,
+            },
+            Self::Labels | Self::Assignees => FieldKind::Picker {
+                multi_select: true,
+                optional: true,
+            },
+            Self::Milestone => FieldKind::Picker {
+                multi_select: false,
+                optional: true,
+            },
         }
     }
 }
@@ -569,6 +1087,7 @@ impl GenerateState {
             .and_then(|revset| revset.bookmarks().first().cloned())
             .unwrap_or_default();
 
+        let form = PrForm::new(default_head.clone(), default_branch, "main@origin");
         let mut state = Self {
             phase: GeneratePhase::SelectingRevset,
             selected_revset: 0,
@@ -577,7 +1096,7 @@ impl GenerateState {
             form_scroll: ScrollState::default(),
             preview_scroll: ScrollState::default(),
             revsets,
-            form: PrForm::new(default_head, default_branch, "main@origin"),
+            form,
             context: None,
             context_started_at: None,
             context_error: None,
@@ -595,6 +1114,10 @@ impl GenerateState {
             prompt_view: PromptView::default(),
             prompt_cache: None,
         };
+        state.refresh_picker_options();
+        if !default_head.is_empty() {
+            state.form.head.set_value(default_head);
+        }
         state.validate_form();
         state
     }
@@ -694,37 +1217,42 @@ impl GenerateState {
             .iter()
             .position(|revset| revset.label() == previous_label)
             .unwrap_or(0);
+        self.refresh_picker_options();
         self.sync_head_from_selected_revset();
         self.validate_form();
     }
 
     pub fn sync_head_from_selected_revset(&mut self) {
         let selected = self.selected_revset().label().to_string();
-        if !self.form.head.dirty {
-            self.form.head = FieldState::new(selected);
+        if !self.form.head.dirty() {
+            self.form.head.set_value(selected);
         }
-        if !self.form.branch_name.dirty {
+        if !self.form.branch_name.dirty() {
             let branch_name = self
                 .selected_revset()
                 .bookmarks()
                 .first()
                 .cloned()
                 .unwrap_or_default();
-            self.form.branch_name = FieldState::new(branch_name);
+            self.form.branch_name.set_value(branch_name);
         }
         self.validate_form();
     }
 
     pub fn validate_form(&mut self) {
-        self.form.head.errors = required_field_errors("head", self.form.head.display_value());
-        self.form.branch_name.errors =
+        let head_errors = self.form_picker_errors(&self.form.head, "head");
+        let base_errors = self.form_picker_errors(&self.form.base, "base");
+        let branch_errors =
             validate_optional_branch_name(self.form.branch_name.display_value());
-        self.form.base.errors = required_field_errors("base", self.form.base.display_value());
-        self.form.title.errors.clear();
-        self.form.description.errors.clear();
-        self.form.labels.errors.clear();
-        self.form.assignees.errors.clear();
-        self.form.milestone.errors.clear();
+
+        self.form.head.set_errors(head_errors);
+        self.form.branch_name.set_errors(branch_errors);
+        self.form.base.set_errors(base_errors);
+        self.form.title.set_errors(Vec::new());
+        self.form.description.set_errors(Vec::new());
+        self.form.labels.set_errors(Vec::new());
+        self.form.assignees.set_errors(Vec::new());
+        self.form.milestone.set_errors(Vec::new());
         self.refresh_prompt_cache();
     }
 
@@ -738,7 +1266,7 @@ impl GenerateState {
     pub fn blocking_errors(&self) -> Vec<String> {
         [&self.form.head, &self.form.branch_name, &self.form.base]
             .into_iter()
-            .flat_map(|field| field.errors.iter().cloned())
+            .flat_map(|field| field.errors().iter().cloned())
             .collect()
     }
 
@@ -909,17 +1437,64 @@ impl GenerateState {
     }
 
     fn sync_form_from_draft(&mut self, draft: &GeneratedDraft) {
-        if !self.form.branch_name.dirty {
-            self.form.branch_name = FieldState::new(draft.branch_name.clone());
+        if !self.form.branch_name.dirty() {
+            self.form.branch_name.set_value(draft.branch_name.clone());
         }
-        if !self.form.title.dirty {
-            self.form.title = FieldState::new(draft.title.clone());
+        if !self.form.title.dirty() {
+            self.form.title.set_value(draft.title.clone());
         }
-        if !self.form.description.dirty {
-            self.form.description = FieldState::new(draft.body.clone());
+        if !self.form.description.dirty() {
+            self.form.description.set_value(draft.body.clone());
         }
         self.validate_form();
     }
+
+    fn refresh_picker_options(&mut self) {
+        self.form
+            .head
+            .set_picker_options(self.head_picker_options());
+        self.form
+            .base
+            .set_picker_options(self.base_picker_options());
+        self.form.labels.set_picker_options(Vec::new());
+        self.form.assignees.set_picker_options(Vec::new());
+        self.form.milestone.set_picker_options(Vec::new());
+    }
+
+    fn head_picker_options(&self) -> Vec<PickerOption> {
+        let mut options = Vec::new();
+        for revset in &self.revsets {
+            options.push(PickerOption::new(revset.label(), revset.label()));
+        }
+        options
+    }
+
+    fn base_picker_options(&self) -> Vec<PickerOption> {
+        let mut options = Vec::new();
+        let mut seen = BTreeSet::new();
+
+        for revset in &self.revsets {
+            for change_id in revset.change_ids() {
+                if seen.insert(change_id.clone()) {
+                    options.push(PickerOption::new(change_id.clone(), change_id.clone()));
+                }
+            }
+        }
+
+        if seen.insert("main@origin".into()) {
+            options.push(PickerOption::new("main@origin", "main@origin"));
+        }
+
+        options
+    }
+
+    fn form_picker_errors(&self, field: &FieldState, label: &str) -> Vec<String> {
+        match field {
+            FieldState::Picker(picker) => picker.invalid_selection_error(label),
+            FieldState::Text(_) => Vec::new(),
+        }
+    }
+
 }
 
 pub fn validate_branch_name(value: &str) -> Vec<String> {
@@ -961,14 +1536,6 @@ fn validate_optional_branch_name(value: &str) -> Vec<String> {
         Vec::new()
     } else {
         validate_branch_name(value)
-    }
-}
-
-fn required_field_errors(label: &str, value: &str) -> Vec<String> {
-    if value.trim().is_empty() {
-        vec![format!("{label} is required")]
-    } else {
-        Vec::new()
     }
 }
 
