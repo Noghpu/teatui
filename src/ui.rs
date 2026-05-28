@@ -16,6 +16,8 @@ use crate::generate::{
 use crate::prompt::PromptBuild;
 use crate::repo::{LlmStatus, TeaAuth, ToolStatus};
 
+const DESCRIPTION_FIELD_DISPLAY_LINES: usize = 6;
+
 pub fn render(frame: &mut Frame, app: &App) {
     let [main_area, status_area, help_area] = Layout::vertical([
         Constraint::Fill(1),
@@ -1147,11 +1149,22 @@ fn render_generate_field(
     }
 
     if is_multiline {
-        if value.trim().is_empty() {
+        let field_lines = bounded_multiline_field_lines(&value, DESCRIPTION_FIELD_DISPLAY_LINES);
+        if field_lines.is_empty() {
             lines.push(Line::from("    (empty)").fg(colors::MUTED));
         } else {
-            for line in value.lines() {
+            for line in field_lines {
                 lines.push(Line::from(format!("    {line}")));
+            }
+            let total_lines = value.lines().count();
+            if total_lines > DESCRIPTION_FIELD_DISPLAY_LINES {
+                lines.push(
+                    Line::from(format!(
+                        "    ... {} more lines",
+                        total_lines - DESCRIPTION_FIELD_DISPLAY_LINES
+                    ))
+                    .fg(colors::MUTED),
+                );
             }
         }
     }
@@ -1161,6 +1174,13 @@ fn render_generate_field(
     }
 
     lines
+}
+
+fn bounded_multiline_field_lines(value: &str, max_lines: usize) -> Vec<&str> {
+    if value.trim().is_empty() || max_lines == 0 {
+        return Vec::new();
+    }
+    value.lines().take(max_lines).collect()
 }
 
 fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
@@ -1550,7 +1570,10 @@ fn render_recent_logs(
 
 #[cfg(test)]
 mod tests {
-    use super::{compact_diff_stat, is_jj_default_description, truncate_chars, wrap_chars};
+    use super::{
+        bounded_multiline_field_lines, compact_diff_stat, is_jj_default_description,
+        truncate_chars, wrap_chars,
+    };
 
     #[test]
     fn jj_default_description_recognises_placeholder() {
@@ -1635,5 +1658,17 @@ mod tests {
         // line is returned verbatim.
         let raw = "some weird stat output";
         assert_eq!(compact_diff_stat(raw), "some weird stat output");
+    }
+
+    #[test]
+    fn bounded_multiline_field_lines_clamps_description_preview() {
+        let lines = bounded_multiline_field_lines("a\nb\nc\nd", 2);
+
+        assert_eq!(lines, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn bounded_multiline_field_lines_hides_empty_description() {
+        assert!(bounded_multiline_field_lines(" \n ", 6).is_empty());
     }
 }

@@ -2,8 +2,8 @@
 id: 0000r-2026-05-28-4758b9ae-stabilize-generate-form-edit-layout
 created_at: 2026-05-28T11:40:33+02:00
 created_by_model: gpt-5
-state: implemented
-state_updated_at: 2026-05-28T11:53:22+02:00
+state: reviewed
+state_updated_at: 2026-05-28T11:55:59+02:00
 ---
 # Stabilize Generate PR Form Editing Layout
 
@@ -97,3 +97,25 @@ Files changed:
 
 Residual risk:
 - Very small terminal heights can still clip content; the next overflow/scrolling slice is still the right place to solve that.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: gpt-5.5-medium
+- reviewed_at: 2026-05-28T11:55:59+02:00
+- state: reviewed
+
+Facts:
+- Reviewed ticket 0000r-2026-05-28-4758b9ae-stabilize-generate-form-edit-layout against docs/design.md, src/generate.rs, src/app.rs, and src/ui.rs.
+- The implementation adds FieldKind, uses it for Enter/Ctrl-S edit behavior, removes the separate Generate edit-mode renderer, and keeps separators in the shared field list.
+- Added a review fix in src/ui.rs to bound description field display to six lines with overflow indication, plus focused helper tests.
+- Ran `just verify`; formatting, check, clippy, unit tests, and Windows integration tests passed.
+
+Inferences:
+- The shared row path now satisfies the ticket's stable separator/row-shape requirements for current text-backed fields.
+- Bounded description rendering reduces small-pane layout risk while leaving full scrolling/overflow behavior for the later planned ticket.
+
+Residual risk:
+- Manual TUI resize checks were not run in an interactive terminal during this review.
