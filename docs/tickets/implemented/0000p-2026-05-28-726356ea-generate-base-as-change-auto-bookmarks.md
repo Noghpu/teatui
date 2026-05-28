@@ -2,7 +2,8 @@
 id: 0000p-2026-05-28-726356ea-generate-base-as-change-auto-bookmarks
 created_at: 2026-05-28T10:00:46+02:00
 created_by_model: claude-opus-4-7/high
-state: open
+state: implemented
+state_updated_at: 2026-05-28T10:38:48+02:00
 ---
 # Generate Screen: Base-as-Change with Auto Bookmark Generation
 
@@ -134,3 +135,55 @@ We want: if the user picks change X as the tip and change Y as the base (both in
 - The change_id heuristic could mis-classify exotic remote refs. Pick the heuristic conservatively: requires `^[a-z]{8,}$` with no separator characters. Document the rule near the helper.
 - Pushing a fresh base bookmark to origin creates a new remote ref that lingers after the PR is merged. This is acceptable â€” users can prune them later. Mention in the Implementation Note for the operator.
 - Depends on Ticket A (per-change left column) for the `revsets` list to contain individual changes that can be matched against the `form.base` change_id. Without A, base-as-change has no in-app way to discover ancestor change_ids.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: claude-sonnet-4-6
+- completed_at: 2026-05-28T10:38:48+02:00
+- state: implemented
+
+## Completed
+
+Implemented base-as-change with auto bookmark generation for the Generate screen PR form.
+
+### What was done
+
+1. **`src/bookmark_naming.rs` (new)** â€” New module with:
+   - `slugify(input)` â€” lowercase ASCII slug, max 32 chars, dash-boundary truncation
+   - `tip_bookmark(title, change_id)` â€” `pr/<slug>` or `pr/<change_id>` fallback
+   - `base_bookmark(tip_bm)` â€” `pr-base/<suffix>` derived from tip bookmark
+   - `is_change_id_like(s)` â€” heuristic: `^[a-z]{8,}$`, no separator chars
+   - Full unit test coverage
+
+2. **`src/generate.rs`** â€” Updated:
+   - `ExecutionPlan::from_draft`: when `form.base` is change_id-like, emits 5 steps (tip bookmark create/push + base bookmark create/push + PR create); otherwise 3 steps (original behavior). Auto-generates tip bookmark name from title when `branch_name` field is empty.
+   - `validate_for_execution`: rejects when both base and head are change_id-like and equal.
+   - New tests: `execution_plan_base_as_remote_ref_produces_three_steps`, `execution_plan_base_as_change_id_produces_five_steps`, `execution_plan_auto_tip_bookmark_from_title_when_branch_name_empty`, `validate_for_execution_rejects_base_equal_to_head_when_both_change_ids`.
+
+3. **`src/lib.rs`** â€” Registered `pub mod bookmark_naming`.
+
+4. **`src/ui.rs`** â€” Updated base field status display in `CollectingContext` phase to read "base: <value> (branch ref or change_id)".
+
+### Deviations from plan
+
+- The ticket mentioned looking up existing bookmarks on the base change from the `revsets` list. The `revsets` list contains `RevsetSummary` items keyed by the revset label (`trunk()..<change_id>`), not by change_id directly. Matching requires iterating and checking `change_ids()`. Since the auto-generated `base_bookmark` name is deterministic and always correct, and using `bookmark create` when a bookmark may already exist would fail, the implementation uses `bookmark_create_command` for the base (not create-or-move). This is acceptable because: (a) jj's `bookmark create` will error if the bookmark already exists pointing to the same commit (user would see this); (b) the more precise existing-bookmark lookup would require traversing the full revsets list at plan-build time and is better deferred to a follow-up ticket after the per-change left column (Ticket A) is integrated. Noted as a residual risk.
+
+### Verification
+
+`just verify` passes: 114 tests, fmt, check, clippy, integration tests all green.
+
+### Important files changed
+
+- `src/bookmark_naming.rs` (new)
+- `src/generate.rs`
+- `src/lib.rs`
+- `src/ui.rs`
+
+### Residual risks / follow-up
+
+- The base bookmark step always uses `bookmark create` even if the bookmark already exists (no existing-bookmark lookup). If a user has an existing bookmark on the base change, the step will fail and the user will see a jj error. A follow-up can add the create-or-move logic once Ticket A's per-change revset list is available in `ExecutionPlan::from_draft`.
+- Auto-generated base bookmarks (`pr-base/...`) persist on origin after PR merge. Users should prune them manually after closing PRs.
+- The `is_change_id_like` heuristic requires all-lowercase ASCII letters with no digits. Real jj change IDs are 12 lowercase letters matching `[a-z]+`. This is conservative and correct for jj.

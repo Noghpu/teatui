@@ -1270,7 +1270,11 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
             // Status
             lines.push(Line::from("Collecting context…".fg(colors::ACCENT)));
             lines.push(Line::from(
-                format!("base branch: {}", generate.form.base.display_value()).fg(colors::MUTED),
+                format!(
+                    "base: {} (branch ref or change_id)",
+                    generate.form.base.display_value()
+                )
+                .fg(colors::MUTED),
             ));
             // Recent logs
             lines.extend(render_section_header("Logs"));

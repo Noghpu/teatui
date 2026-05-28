@@ -1,5 +1,6 @@
 pub mod action;
 pub mod app;
+pub mod bookmark_naming;
 pub mod colors;
 pub mod command;
 pub mod config;
