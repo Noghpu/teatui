@@ -19,6 +19,7 @@ use crate::generate::{
 use crate::jj;
 use crate::llm::LlmClient;
 use crate::repo::{self, RepoState};
+use crate::repo_options::{self, RepoOptions, RepoOptionsResult};
 use crate::tui::Tui;
 use crate::ui;
 
@@ -137,6 +138,7 @@ pub struct App {
     jobs: JobRegistry,
     next_generation_id: u64,
     active_generation: Option<GenerationRequest>,
+    repo_options: RepoOptions,
     should_quit: bool,
 }
 
@@ -160,6 +162,7 @@ impl App {
             jobs: JobRegistry::default(),
             next_generation_id: 1,
             active_generation: None,
+            repo_options: RepoOptions::default(),
             should_quit: false,
         }
     }
@@ -298,6 +301,7 @@ impl App {
                 self.apply_execution_step(index, total)
             }
             BackgroundEvent::ExecutionDone(outcome) => self.apply_execution_done(outcome),
+            BackgroundEvent::RepoOptions(result) => self.apply_repo_options(*result),
         }
     }
 
@@ -405,6 +409,8 @@ impl App {
         self.input_mode = InputMode::Normal;
         if self.screen == Screen::Generate {
             self.generate.phase = GeneratePhase::SelectingRevset;
+            // Trigger repo options load (stale-while-revalidate) on Generate PR entry.
+            self.spawn_repo_options_load(false);
         }
     }
 
@@ -656,9 +662,25 @@ impl App {
     pub fn refresh(&self) {
         repo::spawn_discovery(self.config.clone(), self.cwd.clone(), self.bg_tx.clone());
         jj::spawn_revset_discovery(&self.config, self.cwd.clone(), self.bg_tx.clone());
+        self.spawn_repo_options_load(true);
+    }
+
+    fn spawn_repo_options_load(&self, force_refresh: bool) {
+        let Some(remote) = self.repo.remote.clone() else {
+            return;
+        };
+        repo_options::spawn_repo_options_load(
+            self.config.clone(),
+            self.cwd.clone(),
+            remote,
+            force_refresh,
+            self.bg_tx.clone(),
+        );
     }
 
     fn apply_repo(&mut self, repo: RepoState) {
+        let was_no_remote = self.repo.remote.is_none();
+        let has_remote_now = repo.remote.is_some();
         let inside_workspace = repo.inside_workspace;
         self.repo = repo;
 
@@ -668,6 +690,50 @@ impl App {
             self.focus = Focus::Menu;
             self.input_mode = InputMode::Normal;
         }
+
+        // If a remote just became available, start the initial repo options load.
+        if was_no_remote && has_remote_now {
+            self.spawn_repo_options_load(false);
+        }
+    }
+
+    fn apply_repo_options(&mut self, result: RepoOptionsResult) {
+        if let Some(warning) = result.options.status_warning()
+            && !result.from_cache
+        {
+            self.log(format!("repo picker options: {warning}"));
+        }
+
+        let source = if result.from_cache {
+            "cache"
+        } else {
+            "live fetch"
+        };
+        let label_count = result.options.labels.len();
+        let milestone_count = result.options.milestones.len();
+        let assignee_count = result.options.assignees.len();
+        self.log(format!(
+            "repo picker options loaded from {source}: {label_count} labels, {milestone_count} milestones, {assignee_count} assignees"
+        ));
+
+        // Update picker options on the generate form without overwriting valid user selections.
+        self.generate
+            .form
+            .labels
+            .set_picker_options(result.options.label_picker_options());
+        self.generate
+            .form
+            .assignees
+            .set_picker_options(result.options.assignee_picker_options());
+        self.generate
+            .form
+            .milestone
+            .set_picker_options(result.options.milestone_picker_options());
+
+        // Validate form now that picker options have changed.
+        self.generate.validate_form();
+
+        self.repo_options = result.options;
     }
 
     fn apply_revsets(&mut self, revsets: Vec<RevsetSummary>) {
@@ -973,6 +1039,10 @@ impl App {
 
     pub fn jobs(&self) -> &JobRegistry {
         &self.jobs
+    }
+
+    pub fn repo_options(&self) -> &RepoOptions {
+        &self.repo_options
     }
 }
 
