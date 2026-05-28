@@ -449,7 +449,7 @@ fn is_jj_default_description(desc: &str) -> bool {
 ///
 /// Returns e.g. `3 files · +42 / -7`.  Falls back to the first non-empty line
 /// of `raw` when parsing fails.
-pub fn compact_diff_stat(raw: &str) -> String {
+fn compact_diff_stat(raw: &str) -> String {
     // jj --stat produces the summary line followed by per-file lines.
     // The last line of the block is the totals line (or it may be the only line).
     let summary_line = raw
@@ -509,23 +509,16 @@ fn render_change_identifier(revset: &RevsetSummary) -> Vec<Line<'static>> {
     lines.push(Line::from(change_id.fg(colors::ACCENT)));
 
     // Bookmarks (bold), omit line if empty
-    if !revset.bookmarks().is_empty() {
-        let bookmark_spans: Vec<ratatui::text::Span<'static>> = revset
-            .bookmarks()
-            .iter()
-            .enumerate()
-            .flat_map(|(i, b)| {
-                let mut spans = vec![ratatui::text::Span::styled(
-                    b.clone(),
-                    ratatui::style::Style::new().bold(),
-                )];
-                if i + 1 < revset.bookmarks().len() {
-                    spans.push(ratatui::text::Span::raw(", "));
-                }
-                spans
-            })
-            .collect();
-        lines.push(Line::from(bookmark_spans));
+    let bookmarks = revset.bookmarks();
+    if !bookmarks.is_empty() {
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(bookmarks.len() * 2);
+        for (i, b) in bookmarks.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw(", "));
+            }
+            spans.push(Span::styled(b.clone(), Style::new().bold()));
+        }
+        lines.push(Line::from(spans));
     }
 
     // Description subject line
@@ -804,14 +797,17 @@ fn render_generate_editor(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn generate_work_title(phase: GeneratePhase) -> &'static str {
-    if phase == GeneratePhase::Confirming {
-        "Execution Preview"
-    } else if phase == GeneratePhase::CheckingFreshness {
-        "Verifying Repo Context"
-    } else if phase == GeneratePhase::DraftReady {
-        "Draft Review"
-    } else {
-        "PR Form"
+    match phase {
+        GeneratePhase::CollectingContext => "Collecting Context",
+        GeneratePhase::ContextReady => "Context Ready",
+        GeneratePhase::Generating => "Generating Draft",
+        GeneratePhase::DraftReady => "Draft Review",
+        GeneratePhase::CheckingFreshness => "Verifying Repo Context",
+        GeneratePhase::Confirming => "Execution Preview",
+        GeneratePhase::Executing => "Executing",
+        GeneratePhase::Complete => "Execution Complete",
+        GeneratePhase::Failed => "Workflow Failed",
+        GeneratePhase::SelectingRevset | GeneratePhase::EditingForm => "PR Form",
     }
 }
 
@@ -1262,7 +1258,7 @@ fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
 
     // Base branch as a muted footer line of the identifier block.
     lines.push(Line::from(
-        format!("base: {}", app.repo().base_branch.name,).fg(colors::MUTED),
+        format!("base: {}", app.repo().base_branch.name).fg(colors::MUTED),
     ));
 
     // Phase-specific section.

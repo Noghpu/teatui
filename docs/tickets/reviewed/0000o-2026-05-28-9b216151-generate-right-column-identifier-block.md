@@ -2,8 +2,8 @@
 id: 0000o-2026-05-28-9b216151-generate-right-column-identifier-block
 created_at: 2026-05-28T10:00:45+02:00
 created_by_model: claude-opus-4-7/high
-state: implemented
-state_updated_at: 2026-05-28T10:28:43+02:00
+state: reviewed
+state_updated_at: 2026-05-28T10:32:14+02:00
 ---
 # Generate Screen: Right Column Redesign with Identifier Block
 
@@ -162,3 +162,33 @@ Metadata:
 
 - The jj template `description.lines().join("\x1F")` is not tested against real jj output; verify at runtime that jj's `.lines()` method exists and behaves as expected. If jj rejects the template, fallback is to revert to `description.first_line()` and accept no body display until a two-query approach is added.
 - If descriptions contain literal `\x1F` characters (unlikely but possible), the body parser would misinterpret them. An additional sanitization pass could be added if needed.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: claude-opus-4-7
+- reviewed_at: 2026-05-28T10:32:14+02:00
+- state: reviewed
+
+## Review summary
+
+Implementation matched the ticket plan closely: `RevsetSummary.description_body` was added with the planned `with_description_body()` builder, `is_meaningful_body()` helper (with the placeholder-case-insensitive check), and `description_body()` accessor. The jj `LOG_TEMPLATE` was extended with `\x1F` line separators and a `\x1E` record terminator; `parse_log_entry` strips the terminator and splits the description into subject + body. `compact_diff_stat` parses the standard jj `--stat` summary line into `N files Â· +X / -Y` with a graceful fallback. `render_change_identifier` emits the change_id (accent), bold bookmarks, subject, indented body, compact stat (muted), and the scope revset (muted). `render_section_header` emits a blank line + bold title. Inner headers were removed from `render_draft_section`, `render_execution_plan`, `render_manifest_warnings`, and `render_recent_logs` so the outer section header owns the title. Tests cover `is_meaningful_body` (5 cases), `compact_diff_stat` (7 cases), and the legacy + new log-entry parser formats. `just verify` reports 85 unit + 4 integration tests passing with zero warnings.
+
+## Fixes applied during review
+
+- `generate_work_title` previously returned `"PR Form"` for every phase that wasn't `Confirming`, `CheckingFreshness`, or `DraftReady`. With the new rewrite, the value is now consumed as the bold section header for *every* phase, so phases like `CollectingContext`, `Generating`, `Executing`, `Complete`, and `Failed` were rendering with a misleading `"PR Form"` header. Expanded `generate_work_title` into a full `match` covering every `GeneratePhase` variant with the appropriate per-phase title (`Collecting Context`, `Generating Draft`, `Executing`, `Execution Complete`, `Workflow Failed`, etc.). This satisfies the ticket requirement that the phase title comes from `generate_work_title(phase)` and keeps continuity with the block title.
+- Simplified the bookmark span construction in `render_change_identifier`: removed the fully qualified `ratatui::text::Span`/`ratatui::style::Style` paths (both are already imported at the top of the module) and replaced the `enumerate`/`flat_map` indirection with a straight loop that prepends a `", "` separator after the first bookmark. Capacity is pre-reserved for the worst case to avoid repeated reallocations.
+- Made `compact_diff_stat` private (`fn` instead of `pub fn`) since it is only consumed within `ui.rs`.
+- Removed a stray trailing comma inside `format!("base: {}", app.repo().base_branch.name,)`.
+
+## Verification
+
+- `just verify` passed after the changes: 85 unit tests + 4 integration tests, zero warnings, formatting/clippy clean.
+- Spot-checked the new jj template by running `jj --no-pager log --limit 1 -T 'description.lines().join("\x1F") ++ "\x1E\n"'` which confirmed the template is accepted by jj 0.41.0 and produces the expected single-line record.
+
+## Residual notes
+
+- The implementation note flagged that real jj output had not been validated for `description.lines().join("\x1F")`; this review confirmed the template works on jj 0.41.0.
+- The `is_meaningful_body` placeholder check and `is_jj_default_description` (in `src/ui.rs`) duplicate the `"(no description set)"` literal. Acceptable churn-wise â€” they live in different modules and the duplication is small.
