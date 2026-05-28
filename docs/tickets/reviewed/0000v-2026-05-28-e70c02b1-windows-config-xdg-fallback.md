@@ -2,8 +2,8 @@
 id: 0000v-2026-05-28-e70c02b1-windows-config-xdg-fallback
 created_at: 2026-05-28T16:08:28+02:00
 created_by_model: gpt-5/medium
-state: implemented
-state_updated_at: 2026-05-28T16:23:57+02:00
+state: reviewed
+state_updated_at: 2026-05-28T16:26:07+02:00
 ---
 # Windows Config Should Prefer XDG Config Home
 
@@ -103,3 +103,43 @@ Ran `just verify` â€” all 157 tests pass, fmt, clippy, and check all green.
 ## Residual risks / follow-up
 - Tests are pure helper tests (no environment mutation), so no parallel-test flakiness risk.
 - If XDG_CONFIG_HOME contains a path with non-UTF-8 characters on Windows, `to_string_lossy` will replace them with the replacement character for the whitespace check, but the actual PathBuf construction uses `as_os_str()` directly so the path itself is preserved correctly.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: claude-opus-4-7
+- reviewed_at: 2026-05-28T16:26:07+02:00
+- state: reviewed
+
+## Review summary
+
+Implementation cleanly meets the ticket's goal and acceptance criteria. On Windows, `default_config_candidate` short-circuits to `$XDG_CONFIG_HOME/teatui/config.toml` when XDG is set and non-blank; otherwise it falls back to `dirs::config_dir()/teatui/config.toml`. Explicit `--config` and `TEATUI_*` precedence in `Config::load` is preserved (XDG/AppData default file, then explicit path, then env). The 4 new Windows-only helper tests use synthetic XDG / platform PathBuf inputs and do not mutate process env, avoiding parallel-test flakiness.
+
+## Correctness vs ticket
+
+- Acceptance criterion "Windows XDG path used when set non-blank": helper covered by `windows_xdg_set_uses_xdg_path`.
+- Acceptance criterion "fallback to dirs when unset or blank": covered by `windows_xdg_empty_falls_back_to_platform` and `windows_xdg_missing_falls_back_to_platform`.
+- Acceptance criterion "XDG set but file missing does not also check AppData": satisfied â€” the helper returns at most one candidate path and `Config::load` only adds that one file source.
+- Acceptance criterion "explicit `--config` and `TEATUI_*` keep precedence": preserved â€” explicit path source is added after the default, and env source last.
+- `docs/design.md` updated to describe the new Windows lookup order.
+
+## Improvements applied during review
+
+- Simplified the Windows branch in `default_config_candidate`: collapsed the nested `if let` + `if !empty` into a let-chain (matches the codebase convention already used in `Config::load` below) and replaced `PathBuf::from(xdg.as_os_str())` with `PathBuf::from(xdg)` since `From<OsString> for PathBuf` is the canonical conversion (avoids an unnecessary borrow). No semantic change.
+
+## Non-issues considered
+
+- Non-UTF-8 XDG values: `to_string_lossy()` replaces with U+FFFD which is not whitespace, so the trim check correctly treats such values as non-blank, and the path itself is reconstructed from the original `OsString` so bytes are preserved.
+- Test gating: the helper tests are `#[cfg(windows)]`-only. On non-Windows the helper's XDG parameter is discarded via `let _ = xdg_config_home;`, so non-Windows behavior is a trivial passthrough that does not require dedicated tests beyond what already exists.
+- `Config::load` env-mutation test was intentionally skipped to avoid global-env races. The pure-helper coverage is the right call.
+
+## Verification
+
+- `cargo test config::tests` â€” 8 tests pass (4 new helper + 4 existing).
+- `just verify` â€” fmt, clippy `-D warnings`, check, and full test suite (157 unit + 4 windows PR generation integration) all green.
+
+## Residual risks
+
+None beyond what the implementation note already covers. No follow-up needed.
