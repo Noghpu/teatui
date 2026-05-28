@@ -1269,9 +1269,10 @@ fn render_generate_field(
     let field = generate.form.field(field_id);
     let label = field_id.label();
     let value = field.display_value().to_string();
-    let error_count = field.errors.len();
+    let error_count = field.errors().len();
     let marker = if selected { "▶" } else { " " };
     let is_multiline = field_id.kind().is_multiline();
+    let is_picker = field_id.kind().is_picker();
     let index_suffix = if focused {
         let n = generate.selected_field + 1;
         format!("  ({n}/{})", total_fields)
@@ -1316,9 +1317,52 @@ fn render_generate_field(
                 );
             }
         }
+    } else if is_picker {
+        let selected_values = field.picker_selected_values();
+        lines.push(Line::from(format!(
+            "    selected: {}",
+            if selected_values.is_empty() {
+                "(none)".into()
+            } else {
+                selected_values.join(", ")
+            }
+        )));
+
+        if field.picker_is_editing() {
+            let filter = field.picker_filter().unwrap_or("").trim();
+            lines.push(Line::from(format!(
+                "    filter: {}",
+                if filter.is_empty() { "(none)" } else { filter }
+            ))
+            .fg(colors::MUTED));
+
+            let visible_options = field.picker_visible_options();
+            if visible_options.is_empty() {
+                lines.push(Line::from("    (no options available)").fg(colors::MUTED));
+            } else {
+                for option in visible_options.into_iter().take(5) {
+                    let prefix = if option.highlighted { "▶" } else { " " };
+                    let selection = if option.selected { "[x]" } else { "[ ]" };
+                    let mut line = format!("    {prefix} {selection} {}", option.label);
+                    if !option.enabled {
+                        line.push_str(" (disabled)");
+                    }
+                    let styled = if option.highlighted {
+                        Line::from(line).fg(colors::ACCENT)
+                    } else if option.enabled {
+                        Line::from(line)
+                    } else {
+                        Line::from(line).fg(colors::MUTED)
+                    };
+                    lines.push(styled);
+                }
+            }
+        } else if field.picker_options().is_empty() {
+            lines.push(Line::from("    (no options loaded)").fg(colors::MUTED));
+        }
     }
 
-    for error in &field.errors {
+    for error in field.errors() {
         lines.push(Line::from(format!("    - {error}")).fg(colors::BAD));
     }
 
