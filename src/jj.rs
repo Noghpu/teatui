@@ -8,7 +8,7 @@ use crate::event::BackgroundEvent;
 use crate::generate::RevsetSummary;
 use crate::generate::StaleCheckResult;
 
-const CANDIDATE_REVSETS: &[&str] = &["@", "@-", "heads(trunk()..)"];
+const TRUNK_RANGE_REVSET: &str = "trunk()..@";
 
 const LOG_TEMPLATE: &str = "commit_id.short() ++ \"|\" ++ change_id.short() ++ \"|\" ++ bookmarks.map(|b| b.name()).join(\",\") ++ \"|\" ++ description.first_line() ++ \"\\n\"";
 
@@ -102,31 +102,50 @@ impl JjClient {
         )
     }
 
-    pub async fn candidate_revsets(&self, cwd: &Path) -> Vec<RevsetSummary> {
-        let mut summaries = Vec::with_capacity(CANDIDATE_REVSETS.len());
-        for revset in CANDIDATE_REVSETS {
-            summaries.push(self.candidate_revset_summary(cwd, revset).await);
+    pub async fn per_change_revsets(&self, cwd: &Path) -> Vec<RevsetSummary> {
+        let log_result = capture(self.revset_log_command(cwd, TRUNK_RANGE_REVSET)).await;
+
+        let entries = match log_result {
+            Err(err) => {
+                return vec![failed_revset_summary(
+                    TRUNK_RANGE_REVSET,
+                    format!("failed to enumerate changes: {}", err.message),
+                )];
+            }
+            Ok(log) => parse_log_entries(log.stdout.trim()),
+        };
+
+        if entries.is_empty() {
+            return vec![no_changes_placeholder()];
+        }
+
+        let mut summaries = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            let revset_label = format!("trunk()..{}", entry.change_id);
+            let diff_result = capture(self.revset_diff_stats_command(cwd, &revset_label)).await;
+            let diff_output = match diff_result {
+                Ok(diff) => diff.stdout,
+                Err(_) => "0 files changed, 0 insertions(+), 0 deletions(-)".to_string(),
+            };
+
+            let log_line = format!(
+                "{}|{}|{}|{}",
+                entry.commit_id,
+                entry.change_id,
+                entry.bookmarks.join(","),
+                entry.description
+            );
+            let summary = parse_revset_summary(&revset_label, &log_line, diff_output.trim(), cwd);
+            summaries.push(summary);
         }
         summaries
-    }
-
-    async fn candidate_revset_summary(&self, cwd: &Path, revset: &str) -> RevsetSummary {
-        let log_result = capture(self.revset_log_command(cwd, revset)).await;
-        let diff_result = capture(self.revset_diff_stats_command(cwd, revset)).await;
-
-        match (log_result, diff_result) {
-            (Ok(log), Ok(diff)) => {
-                parse_revset_summary(revset, log.stdout.trim(), diff.stdout.trim(), cwd)
-            }
-            (Err(err), _) | (_, Err(err)) => failed_revset_summary(revset, err.message),
-        }
     }
 }
 
 pub fn spawn_revset_discovery(config: &Config, cwd: PathBuf, tx: UnboundedSender<BackgroundEvent>) {
     let client = JjClient::new(config);
     tokio::spawn(async move {
-        let summaries = client.candidate_revsets(&cwd).await;
+        let summaries = client.per_change_revsets(&cwd).await;
         let _ = tx.send(BackgroundEvent::Revsets(summaries));
     });
 }
@@ -238,6 +257,20 @@ fn parse_revset_summary(
     )
 }
 
+fn no_changes_placeholder() -> RevsetSummary {
+    RevsetSummary::new(
+        "(no changes above trunk())",
+        "no changes above trunk()",
+        Vec::new(),
+        "0 files changed, 0 insertions(+), 0 deletions(-)",
+        0,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        vec!["no changes above trunk()".into()],
+    )
+}
+
 fn failed_revset_summary(label: &str, message: String) -> RevsetSummary {
     RevsetSummary::new(
         label,
@@ -329,12 +362,67 @@ mod tests {
     }
 
     #[test]
-    fn failed_revset_summary_keeps_candidate_label() {
-        let summary = failed_revset_summary("@-", "revset error".into());
+    fn failed_revset_summary_keeps_label() {
+        let summary = failed_revset_summary("trunk()..abc123", "revset error".into());
 
-        assert_eq!(summary.label(), "@-");
+        assert_eq!(summary.label(), "trunk()..abc123");
         assert_eq!(summary.commit_count(), 0);
-        assert!(summary.warnings()[0].contains("failed to load revset @-"));
+        assert!(summary.warnings()[0].contains("failed to load revset trunk()..abc123"));
+    }
+
+    #[test]
+    fn per_change_revsets_parse_produces_correct_labels() {
+        // Simulate what per_change_revsets produces by calling parse_revset_summary directly
+        // for each entry in a multi-entry log.
+        let log_output =
+            "abc123|def456|feature/foo|First change\nxyz789|uvw000||Second change no bookmark";
+        let entries = parse_log_entries(log_output);
+        assert_eq!(entries.len(), 2);
+
+        let entry0 = &entries[0];
+        let label0 = format!("trunk()..{}", entry0.change_id);
+        let summary0 = parse_revset_summary(
+            &label0,
+            &format!(
+                "{}|{}|{}|{}",
+                entry0.commit_id,
+                entry0.change_id,
+                entry0.bookmarks.join(","),
+                entry0.description
+            ),
+            "1 file changed, 2 insertions(+)",
+            std::path::Path::new("C:/repo"),
+        );
+        assert_eq!(summary0.label(), "trunk()..def456");
+        assert_eq!(summary0.bookmarks(), &["feature/foo"]);
+        assert_eq!(summary0.description(), "First change");
+        assert_eq!(summary0.commit_count(), 1);
+
+        let entry1 = &entries[1];
+        let label1 = format!("trunk()..{}", entry1.change_id);
+        let summary1 = parse_revset_summary(
+            &label1,
+            &format!(
+                "{}|{}|{}|{}",
+                entry1.commit_id,
+                entry1.change_id,
+                entry1.bookmarks.join(","),
+                entry1.description
+            ),
+            "2 files changed, 5 insertions(+)",
+            std::path::Path::new("C:/repo"),
+        );
+        assert_eq!(summary1.label(), "trunk()..uvw000");
+        assert!(summary1.bookmarks().is_empty());
+        assert_eq!(summary1.description(), "Second change no bookmark");
+    }
+
+    #[test]
+    fn no_changes_placeholder_is_stable() {
+        let placeholder = no_changes_placeholder();
+        assert_eq!(placeholder.label(), "(no changes above trunk())");
+        assert_eq!(placeholder.commit_count(), 0);
+        assert!(!placeholder.warnings().is_empty());
     }
 
     #[test]
