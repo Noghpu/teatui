@@ -31,8 +31,14 @@ pub enum BackgroundEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GenerationResult {
-    Ready(GeneratedDraft),
-    Failed(LlmError),
+    Ready {
+        request_id: u64,
+        draft: GeneratedDraft,
+    },
+    Failed {
+        request_id: u64,
+        error: LlmError,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

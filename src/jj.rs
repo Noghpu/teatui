@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use futures::{StreamExt, stream};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::command::{ExternalCommand, capture};
@@ -124,37 +125,33 @@ impl JjClient {
             return vec![no_changes_placeholder()];
         }
 
-        let mut summaries = Vec::with_capacity(entries.len());
-        for entry in &entries {
-            let revset_label = format!("trunk()..{}", entry.change_id);
-            let diff_result = capture(self.revset_diff_stats_command(cwd, &revset_label)).await;
-            let diff_output = match diff_result {
-                Ok(diff) => diff.stdout,
-                Err(_) => "0 files changed, 0 insertions(+), 0 deletions(-)".to_string(),
-            };
+        let cwd = cwd.to_path_buf();
+        let mut summaries = stream::iter(entries.into_iter().enumerate().map(|(index, entry)| {
+            let client = self.clone();
+            let cwd = cwd.clone();
+            async move {
+                let summary = client.summary_for_entry(&cwd, entry).await;
+                (index, summary)
+            }
+        }))
+        .buffer_unordered(4)
+        .collect::<Vec<_>>()
+        .await;
 
-            // Reconstruct a log line that includes the full description encoded
-            // with \x1F separators so parse_revset_summary can recover the body.
-            let desc_encoded = if entry.description_body.is_empty() {
-                entry.description.clone()
-            } else {
-                format!(
-                    "{}\x1F{}",
-                    entry.description,
-                    entry.description_body.replace('\n', "\x1F")
-                )
-            };
-            let log_line = format!(
-                "{}|{}|{}|{}\x1E",
-                entry.commit_id,
-                entry.change_id,
-                entry.bookmarks.join(","),
-                desc_encoded
-            );
-            let summary = parse_revset_summary(&revset_label, &log_line, diff_output.trim(), cwd);
-            summaries.push(summary);
-        }
-        summaries
+        summaries.sort_by_key(|(index, _)| *index);
+        summaries.into_iter().map(|(_, summary)| summary).collect()
+    }
+
+    async fn summary_for_entry(&self, cwd: &Path, entry: ParsedLogEntry) -> RevsetSummary {
+        let revset_label = format!("trunk()..{}", entry.change_id);
+        let diff_result = capture(self.revset_diff_stats_command(cwd, &revset_label)).await;
+        let diff_output = match diff_result {
+            Ok(diff) => diff.stdout,
+            Err(_) => "0 files changed, 0 insertions(+), 0 deletions(-)".to_string(),
+        };
+
+        let log_line = log_line_from_entry(&entry);
+        revset_summary_from_output(&revset_label, &log_line, diff_output.trim(), cwd)
     }
 }
 
@@ -277,6 +274,34 @@ fn parse_revset_summary(
         warnings,
     )
     .with_description_body(description_body)
+}
+
+pub(crate) fn revset_summary_from_output(
+    label: &str,
+    log_output: &str,
+    diff_output: &str,
+    cwd: &Path,
+) -> RevsetSummary {
+    parse_revset_summary(label, log_output, diff_output, cwd)
+}
+
+fn log_line_from_entry(entry: &ParsedLogEntry) -> String {
+    let desc_encoded = if entry.description_body.is_empty() {
+        entry.description.clone()
+    } else {
+        format!(
+            "{}\x1F{}",
+            entry.description,
+            entry.description_body.replace('\n', "\x1F")
+        )
+    };
+    format!(
+        "{}|{}|{}|{}\x1E",
+        entry.commit_id,
+        entry.change_id,
+        entry.bookmarks.join(","),
+        desc_encoded
+    )
 }
 
 fn no_changes_placeholder() -> RevsetSummary {
