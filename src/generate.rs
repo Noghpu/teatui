@@ -36,6 +36,50 @@ pub enum Focus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScrollState {
+    pub offset: usize,
+}
+
+impl ScrollState {
+    pub fn clamp(&mut self, content_height: usize, viewport_height: usize) {
+        let max_offset = content_height.saturating_sub(viewport_height);
+        self.offset = self.offset.min(max_offset);
+    }
+
+    pub fn scroll_up(&mut self) {
+        self.offset = self.offset.saturating_sub(1);
+    }
+
+    pub fn scroll_down(&mut self) {
+        self.offset = self.offset.saturating_add(1);
+    }
+
+    pub fn ensure_visible(
+        &mut self,
+        start: usize,
+        end: usize,
+        content_height: usize,
+        viewport_height: usize,
+    ) {
+        if viewport_height == 0 || content_height == 0 {
+            self.offset = 0;
+            return;
+        }
+
+        let end = end.max(start + 1);
+        let viewport_end = self.offset.saturating_add(viewport_height);
+
+        if start < self.offset {
+            self.offset = start;
+        } else if end > viewport_end {
+            self.offset = end.saturating_sub(viewport_height);
+        }
+
+        self.clamp(content_height, viewport_height);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[allow(dead_code)]
 pub enum GeneratePhase {
     #[default]
@@ -491,6 +535,9 @@ pub struct GenerateState {
     pub phase: GeneratePhase,
     pub selected_revset: usize,
     pub selected_field: usize,
+    pub menu_scroll: ScrollState,
+    pub form_scroll: ScrollState,
+    pub preview_scroll: ScrollState,
     pub revsets: Vec<RevsetSummary>,
     pub form: PrForm,
     pub context: Option<ContextBundle>,
@@ -526,6 +573,9 @@ impl GenerateState {
             phase: GeneratePhase::SelectingRevset,
             selected_revset: 0,
             selected_field: 0,
+            menu_scroll: ScrollState::default(),
+            form_scroll: ScrollState::default(),
+            preview_scroll: ScrollState::default(),
             revsets,
             form: PrForm::new(default_head, default_branch, "main@origin"),
             context: None,
@@ -593,6 +643,14 @@ impl GenerateState {
 
     pub fn move_field_down(&mut self) {
         self.selected_field = (self.selected_field + 1).min(FieldId::ALL.len().saturating_sub(1));
+    }
+
+    pub fn scroll_preview_up(&mut self) {
+        self.preview_scroll.scroll_up();
+    }
+
+    pub fn scroll_preview_down(&mut self) {
+        self.preview_scroll.scroll_down();
     }
 
     pub fn begin_editing_selected_field(&mut self) {
@@ -1122,6 +1180,20 @@ mod tests {
         state.replace_revsets(vec![revset("@"), revset("@-"), revset("heads(trunk()..)")]);
 
         assert_eq!(state.selected_revset().label(), "@-");
+    }
+
+    #[test]
+    fn scroll_state_keeps_the_selected_range_visible() {
+        let mut scroll = ScrollState { offset: 8 };
+
+        scroll.ensure_visible(2, 4, 20, 6);
+        assert_eq!(scroll.offset, 2);
+
+        scroll.ensure_visible(15, 18, 20, 6);
+        assert_eq!(scroll.offset, 12);
+
+        scroll.clamp(8, 6);
+        assert_eq!(scroll.offset, 2);
     }
 
     #[test]
