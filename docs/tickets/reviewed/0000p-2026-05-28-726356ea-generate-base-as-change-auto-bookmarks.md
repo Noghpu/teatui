@@ -2,8 +2,8 @@
 id: 0000p-2026-05-28-726356ea-generate-base-as-change-auto-bookmarks
 created_at: 2026-05-28T10:00:46+02:00
 created_by_model: claude-opus-4-7/high
-state: implemented
-state_updated_at: 2026-05-28T10:38:48+02:00
+state: reviewed
+state_updated_at: 2026-05-28T10:41:57+02:00
 ---
 # Generate Screen: Base-as-Change with Auto Bookmark Generation
 
@@ -187,3 +187,36 @@ Implemented base-as-change with auto bookmark generation for the Generate screen
 - The base bookmark step always uses `bookmark create` even if the bookmark already exists (no existing-bookmark lookup). If a user has an existing bookmark on the base change, the step will fail and the user will see a jj error. A follow-up can add the create-or-move logic once Ticket A's per-change revset list is available in `ExecutionPlan::from_draft`.
 - Auto-generated base bookmarks (`pr-base/...`) persist on origin after PR merge. Users should prune them manually after closing PRs.
 - The `is_change_id_like` heuristic requires all-lowercase ASCII letters with no digits. Real jj change IDs are 12 lowercase letters matching `[a-z]+`. This is conservative and correct for jj.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: claude-opus-4-7
+- reviewed_at: 2026-05-28T10:41:57+02:00
+- state: reviewed
+
+## Review Summary
+
+Implementation matches the ticket: new `bookmark_naming` module with `slugify`, `tip_bookmark`, `base_bookmark`, `is_change_id_like`; `ExecutionPlan::from_draft` now branches on base shape (3 steps for remote-ref base, 5 steps for change_id base); auto-tip-bookmark from title when `branch_name` is empty; validation rejects `base == head` when both look like change_ids; UI base-field hint updated. `just verify` is green (114 unit tests + 4 integration tests).
+
+## Strengths
+
+- `bookmark_naming` has thorough unit coverage including unicode-drop, truncation-at-dash-boundary, fallback paths, and heuristic edge cases.
+- Generate `ExecutionPlan` tests cover both base shapes and the auto-tip-bookmark path; assertions reach into the actual command argv to verify `--base` receives the bookmark name, not the raw change_id.
+- Module documentation is clear about the heuristic rule and why it is conservative.
+
+## Reviewer Fixes Applied
+
+- `src/generate.rs`: step label said "create or move base bookmark" but the code only calls `bookmark_create_command` (no move). Renamed the label to "create base bookmark" so the rendered execution preview is honest about what jj will do. Updated the matching test assertion.
+- `src/generate.rs`: rewrote the comment block above the base-bookmark branch. The previous comment claimed to "look for an existing bookmark on the base change in the revsets listâ€¦if found, reuse it" but no such lookup happens. New comment explicitly states that `bookmark create` is always used and that the reuse logic is intentionally deferred until the per-change revsets list is plumbed through.
+
+## Acknowledged Deferrals (documented in the implementation note)
+
+- No existing-bookmark reuse for the base change; collision will surface as a `jj bookmark create` error to the user. Acceptable, called out in residual risks.
+- Ancestor validation (`base in trunk()..tip`) is not enforced in `validate_for_execution`. The ticket lists this but the per-change revsets list needed to enforce it does not flow into `validate_for_execution` yet; relying on jj/Gitea to surface a non-ancestor error at execution time is a pragmatic stopgap until Ticket A's per-change left column is integrated.
+
+## Verification
+
+`just verify` â€” pass (fmt, check, clippy, 114 unit tests, 4 integration tests).
