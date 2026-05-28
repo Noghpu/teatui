@@ -122,6 +122,10 @@ impl FieldState {
         self.dirty = self.value != self.initial;
     }
 
+    pub fn reset_editor_viewport(&mut self) {
+        self.editor = textarea_from_text(&self.buffer);
+    }
+
     pub fn input(&mut self, key: crossterm::event::KeyEvent) {
         let input = ratatui_textarea::Input {
             key: match key.code {
@@ -303,6 +307,20 @@ impl PrForm {
             FieldId::Assignees => &mut self.assignees,
             FieldId::Milestone => &mut self.milestone,
         }
+    }
+
+    pub fn editors_mut(&mut self) -> impl Iterator<Item = &mut FieldState> {
+        [
+            &mut self.head,
+            &mut self.branch_name,
+            &mut self.base,
+            &mut self.title,
+            &mut self.description,
+            &mut self.labels,
+            &mut self.assignees,
+            &mut self.milestone,
+        ]
+        .into_iter()
     }
 }
 
