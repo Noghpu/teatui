@@ -5,7 +5,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::command::{ExternalCommand, capture};
 use crate::config::Config;
-use crate::event::{BackgroundEvent, PullRequestsResult};
+use crate::event::{BackgroundEvent, PrCommentResult, PullRequestsResult};
 use crate::pull_requests::parse_pull_requests_json;
 
 #[derive(Debug, Clone)]
@@ -104,6 +104,21 @@ impl TeaClient {
         )
     }
 
+    pub fn pr_comment_command(
+        &self,
+        cwd: impl Into<PathBuf>,
+        index: impl ToString,
+        body: impl Into<String>,
+    ) -> ExternalCommand {
+        let index = index.to_string();
+        let body = body.into();
+        ExternalCommand::new(
+            self.program.clone(),
+            vec!["comment".to_string(), index, body],
+            cwd,
+        )
+    }
+
     pub fn pr_create_command(
         &self,
         cwd: impl Into<PathBuf>,
@@ -178,6 +193,34 @@ pub fn spawn_pull_requests_load(
         };
 
         let _ = tx.send(BackgroundEvent::PullRequests(result));
+    });
+}
+
+pub fn spawn_pr_comment(
+    config: Config,
+    cwd: PathBuf,
+    pr_index: u64,
+    body: String,
+    tx: UnboundedSender<BackgroundEvent>,
+) {
+    tokio::spawn(async move {
+        let client = TeaClient::new(&config);
+        let result = match capture(client.pr_comment_command(&cwd, pr_index, &body)).await {
+            Ok(capture) => PrCommentResult::Succeeded {
+                pr_index,
+                command: capture.command,
+                stdout: capture.stdout,
+                stderr: capture.stderr,
+            },
+            Err(error) => PrCommentResult::Failed {
+                pr_index,
+                command: error.command,
+                message: error.message,
+                stdout: error.stdout,
+                stderr: error.stderr,
+            },
+        };
+        let _ = tx.send(BackgroundEvent::PrComment(result));
     });
 }
 
@@ -380,6 +423,17 @@ mod tests {
                 "42",
             ]
         );
+        assert_eq!(command.cwd, PathBuf::from("C:/repo"));
+    }
+
+    #[test]
+    fn builds_pr_comment_command_argv() {
+        let config = Config::default();
+        let client = TeaClient::new(&config);
+        let command = client.pr_comment_command("C:/repo", 42u64, "looks good");
+
+        assert_eq!(command.program, "tea");
+        assert_eq!(command.args, vec!["comment", "42", "looks good"]);
         assert_eq!(command.cwd, PathBuf::from("C:/repo"));
     }
 
