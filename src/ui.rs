@@ -891,7 +891,7 @@ fn render_pull_request_work<'a>(app: &'a App) -> Vec<Line<'a>> {
     lines
 }
 
-fn render_pull_request_preview<'a>(app: &'a App) -> Vec<Line<'a>> {
+fn render_pull_request_preview(app: &App) -> Vec<Line<'static>> {
     let state = app.pull_requests();
     let filter = state.filter.display_value().trim().to_string();
     let filter_display = if filter.is_empty() {
@@ -901,7 +901,7 @@ fn render_pull_request_preview<'a>(app: &'a App) -> Vec<Line<'a>> {
     };
     let selected = state.selected_item().cloned();
     let has_selected = selected.is_some();
-    let mut lines: Vec<Line<'a>> = vec![
+    let mut lines: Vec<Line<'static>> = vec![
         Line::from("Pull Request".bold()),
         Line::from(""),
         Line::from(format!("Filter: {filter_display}")).fg(colors::MUTED),
@@ -955,7 +955,8 @@ fn render_pull_request_preview<'a>(app: &'a App) -> Vec<Line<'a>> {
                     state
                         .load_error
                         .as_deref()
-                        .unwrap_or("Failed to load open pull requests"),
+                        .unwrap_or("Failed to load open pull requests")
+                        .to_string(),
                 )
                 .fg(colors::BAD),
             );
@@ -1098,15 +1099,20 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
             let inner = block.inner(area);
             let content_height = wrapped_content_height(&lines, inner.width as usize);
             let viewport_height = inner.height as usize;
-            let scroll_offset = app
-                .pull_requests()
-                .preview_scroll
-                .offset
-                .min(content_height.saturating_sub(viewport_height));
+            {
+                let state = app.pull_requests_mut();
+                state.preview_scroll.clamp(content_height, viewport_height);
+            }
 
             let preview = Paragraph::new(lines)
                 .block(block)
-                .scroll((scroll_offset.min(u16::MAX as usize) as u16, 0))
+                .scroll((
+                    app.pull_requests()
+                        .preview_scroll
+                        .offset
+                        .min(u16::MAX as usize) as u16,
+                    0,
+                ))
                 .wrap(Wrap { trim: false });
             frame.render_widget(preview, area);
             return;

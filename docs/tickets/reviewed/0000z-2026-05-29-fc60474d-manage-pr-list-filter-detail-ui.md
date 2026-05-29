@@ -2,8 +2,8 @@
 id: 0000z-2026-05-29-fc60474d-manage-pr-list-filter-detail-ui
 created_at: 2026-05-29T17:15:41+02:00
 created_by_model: gpt-5.5/medium
-state: implemented
-state_updated_at: 2026-05-29T17:37:28+02:00
+state: reviewed
+state_updated_at: 2026-05-29T21:18:30+02:00
 ---
 # Manage PR List Filter And Detail Preview
 
@@ -124,3 +124,41 @@ Files changed:
 Residual risks:
 - PR preview rendering currently uses list payload fields only; if later tickets need comments or richer per-PR detail, the detail command path can be wired in then.
 - The filter uses simple substring matching across summary fields, which is intentionally lightweight and may be broadened later.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: claude-opus-4-7
+- reviewed_at: 2026-05-29T21:18:30+02:00
+- state: reviewed
+
+## Verdict
+Acceptable. Implementation meets all acceptance criteria. Applied one small render-path fix and kept the slice intact.
+
+## What works (facts)
+- Explicit `PullRequestState` replaces the placeholder `ListState` and carries items, filter buffer, load status/error, preview scroll, and a stale-result guard via `next_request_id`/`active_request_id` (`src/app.rs`).
+- `complete_load`/`fail_request` reject results whose `request_id` doesn't match the active request â€” confirmed by `stale_pr_list_result_is_ignored` test.
+- Entering Manage PRs from Landing and pressing `r` while in Manage PRs both call `spawn_pull_requests_load`; in-flight loads are skipped unless `force_refresh=true` (`src/app.rs:925`).
+- Filter editing routes through `InputMode::Editing` with PR-specific `apply_edit_key` and `finish_editing_pull_request_filter`; printable keys like `g`/`q`/`c` reach the field and do not fire global actions (`pr_filter_edit_mode_routes_printable_keys_into_the_filter` test).
+- `visible_items` filters from the in-flight buffer so filtering is live; `clamp_selection` runs on every keystroke and on commit (`pr_filter_clamps_selection_when_filter_changes` test).
+- PR list rows show `#index title` plus state/author/headâ†’base/updated/labels, not action placeholders. Work pane surfaces filter, status counters, selected metadata, and load errors. Preview shows full PR detail and body.
+- Issues placeholder menu and help no longer hint at comments either.
+- Background plumbing is via `BackgroundEvent::PullRequests(PullRequestsResult)` with a typed parser path (`src/tea.rs`, `src/pull_requests.rs`); no shell-string or table parsing.
+
+## Issues fixed during review
+- `render_preview` for `Screen::PullRequests` was reading `state.preview_scroll.offset` and clamping only into the local `scroll_offset`, never writing back. Combined with `ScrollState::scroll_down` using `saturating_add`, repeated scrolling could grow `offset` unbounded, and switching to a smaller PR detail would leave a stale large offset requiring many `k` presses to recover. Fixed to mirror the Issues pane: clamp through `app.pull_requests_mut().preview_scroll.clamp(...)` before rendering. Adjusted `render_pull_request_preview` to return `Vec<Line<'static>>` (all line strings were already owned via `format!`, with one `as_deref()` site converted via `to_string()`).
+
+## Deviations from plan (acceptable)
+- Implementer used the `tea pr list` payload as the detail source instead of issuing a separate `tea pr <index>` fetch. The ticket says the list fields already cover title/state/author/head/base/url/body/updated/labels â€” confirmed by `PR_FIELDS` in `src/tea.rs` â€” so this is in-scope for this slice. `pr_detail_command` is implemented for future use.
+
+## Inferences / residual notes
+- Filter input goes through `TextFieldState::input`, which uses a `TextArea` and accepts Tab/BackTab. For a single-line filter, Tab insertion is cosmetic only and harmless; Enter is intercepted by `apply_edit_key` before reaching the field, so commit semantics are correct.
+- When a load fails after a previous success, prior items are retained via `fail_load`; the error message surfaces in the work pane and as a `load error` row in the preview.
+
+## Verification
+- `cargo fmt --check` clean.
+- `cargo clippy --all-targets --all-features -- -D warnings` clean.
+- `cargo test --all-targets --all-features` â€” 181 lib tests + 4 integration tests pass.
+- Live `tea` not exercised; documented as not run.
