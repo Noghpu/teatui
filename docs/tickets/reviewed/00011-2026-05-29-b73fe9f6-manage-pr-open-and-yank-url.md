@@ -2,8 +2,8 @@
 id: 00011-2026-05-29-b73fe9f6-manage-pr-open-and-yank-url
 created_at: 2026-05-29T21:55:31+02:00
 created_by_model: claude-opus-4-7/high
-state: implemented
-state_updated_at: 2026-05-29T22:04:11+02:00
+state: reviewed
+state_updated_at: 2026-05-29T22:06:57+02:00
 ---
 # Manage PRs Open-In-Browser and Yank-URL Shortcuts
 
@@ -145,3 +145,37 @@ None. The plan was followed exactly. The `status_message` field was added as spe
 
 - `arboard` on Linux requires an X11/Wayland display; this is documented in the wrapper comment. CI is Windows so this is acceptable.
 - The `status_message` field is currently only rendered on the PullRequests screen status bar; if other screens need transient messages in the future, `render_status` will need extending.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: claude-opus-4-7/high
+- reviewed_at: 2026-05-29T22:06:57+02:00
+- state: reviewed
+
+## Verdict
+Accept as implemented. All acceptance criteria are satisfied and `just verify` passes (fmt, check, clippy `-D warnings`, 201 lib tests + 4 integration tests, all green). No code changes made during review.
+
+## What works (facts)
+- `src/external.rs` wraps `opener::open` and `arboard::Clipboard` behind `Result<(), String>` helpers, mapping errors to short user-facing strings â€” exactly as scoped.
+- `Action::OpenPrInBrowser` and `Action::CopyPrUrl` are added to `src/action.rs`.
+- Key dispatch (`App::handle_key`, `src/app.rs:536-554`) gates `o` and `y` on `screen == PullRequests`, `input_mode == Normal`, `comment_phase == Idle`, and `selected_item().is_some()`. The earlier short-circuit for `comment_phase != Idle` at the top of `handle_key` plus the `InputMode::Editing` branch above ensure leakage into the comment modal or the filter editor is impossible â€” both verified by `o_and_y_are_inert_while_comment_modal_open` and `o_and_y_are_inert_in_filter_edit_mode`.
+- Both action handlers (`open_selected_pr_in_browser`, `copy_selected_pr_url`) trim the URL and short-circuit on empty with a logged + status-bar `error:` message before calling the external helper, so the OS is never invoked with an empty string. Whitespace-only URLs are covered by the trim and the `copy_action_with_empty_url_logs_error_and_does_not_call_helper` test.
+- `App::status_message: Option<String>` is added and cleared at the top of every `App::update` invocation, so messages persist exactly until the next user key event â€” appropriate since `AppEvent::Tick` does not call `update`.
+- `render_status` shows the message in green (`colors::GOOD`) for success and red (`colors::BAD`) for any `error:`-prefixed message, in the PR-screen status bar.
+- Help bar (`src/ui.rs:1461-1478`) advertises `o open` / `y yank url` only when on `Screen::PullRequests` with a PR selected and no comment-modal phase active. The earlier match arms for `Editing`/`Failed`/`Submitting`/`InputMode::Editing` correctly take precedence, so the hint disappears in those states.
+- Eight new focused unit tests cover the action dispatch matrix without touching the OS clipboard or spawning a browser.
+
+## Issues fixed during review
+None. No fixes required.
+
+## Inferences / residual notes
+- The inline comment above the `self.status_message = None` line in `App::update` says "on each non-Tick user action", but the clear runs unconditionally including for `Action::Tick`. This is harmless because `AppEvent::Tick` is consumed at the run-loop without dispatching `update`, so the only way `Action::Tick` reaches `update` is via an unhandled key event â€” clearing the message on an unhandled keypress is reasonable behavior. Comment is mildly inaccurate but does not warrant a code change for this slice.
+- `status_message` is only rendered on the Manage PRs status bar today. That matches the slice scope; future screens that want transient feedback will need to extend `render_status` accordingly. Already flagged in the implementation note.
+- `arboard` on Linux requires X11/Wayland; documented in the wrapper. CI/dev is Windows, so this is acceptable.
+- Live smoke (real browser launch + real clipboard paste) was not run in the review environment; relying on `opener` and `arboard`'s upstream behavior. The narrow surface (a `Result` propagation) makes this low-risk.
+
+## Verification
+- `just verify` â€” clean: fmt OK, `cargo check` OK, `cargo clippy --all-targets --all-features -- -D warnings` OK, 201 lib tests pass, 4 integration tests pass.
