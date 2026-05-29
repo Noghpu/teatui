@@ -1111,8 +1111,9 @@ fn render_generate_fields(
 
     if let Some(blocker) = &app.generate().last_blocker {
         let max_width = area.width.saturating_sub(2) as usize;
-        let text = if blocker.len() > max_width && max_width > 3 {
-            format!("{}...", &blocker[..max_width.saturating_sub(3)])
+        let char_count = blocker.chars().count();
+        let text = if char_count > max_width && max_width > 3 {
+            format!("{}...", truncate_chars(blocker, max_width - 3))
         } else {
             blocker.clone()
         };
