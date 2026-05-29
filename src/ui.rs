@@ -14,6 +14,7 @@ use crate::generate::{
     PromptView, RevsetSummary, StaleCheckResult,
 };
 use crate::prompt::PromptBuild;
+use crate::pull_requests::PullRequestSummary;
 use crate::repo::{LlmStatus, TeaAuth, ToolStatus};
 
 const DESCRIPTION_FIELD_DISPLAY_LINES: usize = 6;
@@ -257,16 +258,10 @@ fn render_menu(frame: &mut Frame, app: &mut App, area: Rect) {
                     ),
                     "Modes",
                 ),
-                Screen::PullRequests => (
-                    selectable_list(
-                        &["Open items", "Filter", "Comment"],
-                        app.pull_requests().selected_item,
-                    ),
-                    "PRs",
-                ),
+                Screen::PullRequests => render_pull_request_menu(app),
                 Screen::Issues => (
                     selectable_list(
-                        &["Open items", "Filter", "Comment"],
+                        &["Open issues", "Filter", "Details"],
                         app.issues().selected_item,
                     ),
                     "Issues",
@@ -282,6 +277,67 @@ fn render_menu(frame: &mut Frame, app: &mut App, area: Rect) {
             frame.render_widget(list, area);
         }
     }
+}
+
+fn render_pull_request_menu(app: &App) -> (Vec<ListItem<'static>>, &'static str) {
+    let visible = app.pull_requests().visible_items();
+    let state = app.pull_requests();
+
+    if visible.is_empty() {
+        let mut items = Vec::new();
+        let message = match state.load_status {
+            crate::app::PullRequestLoadStatus::Loading if state.items.is_empty() => {
+                "Loading open pull requests..."
+            }
+            crate::app::PullRequestLoadStatus::Failed if state.items.is_empty() => state
+                .load_error
+                .as_deref()
+                .unwrap_or("No open pull requests"),
+            _ if state.items.is_empty() => "No open pull requests",
+            _ => "No pull requests match the current filter",
+        };
+        items.push(list_item(message, false));
+        return (items, "PRs");
+    }
+
+    let selected = app.pull_requests().selected_visible_index();
+    let items = visible
+        .into_iter()
+        .enumerate()
+        .map(|(index, (_, pr))| render_pull_request_menu_item(pr, index == selected))
+        .collect();
+    (items, "PRs")
+}
+
+fn render_pull_request_menu_item(pr: &PullRequestSummary, selected: bool) -> ListItem<'static> {
+    let header = if pr.title.is_empty() {
+        format!("#{} (untitled)", pr.index)
+    } else {
+        format!("#{} {}", pr.index, pr.title)
+    };
+
+    let mut detail = format!("{} · {} · {} → {}", pr.state, pr.author, pr.head, pr.base);
+    if !pr.updated.is_empty() {
+        detail.push_str(&format!(" · {}", pr.updated));
+    }
+    if !pr.labels.is_empty() {
+        detail.push_str(&format!(" · labels: {}", pr.labels.join(", ")));
+    }
+
+    let lines = vec![
+        if selected {
+            Line::from(header.clone()).bold().fg(colors::ACCENT)
+        } else {
+            Line::from(header).fg(colors::TEXT)
+        },
+        if selected {
+            Line::from(detail).fg(colors::ACCENT)
+        } else {
+            Line::from(detail).fg(colors::MUTED)
+        },
+    ];
+
+    ListItem::new(lines)
 }
 
 fn render_generate_menu(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -744,21 +800,12 @@ fn render_work(frame: &mut Frame, app: &mut App, area: Rect) {
 
             return;
         }
-        Screen::PullRequests => vec![
-            Line::from("Manage PRs".bold()),
-            Line::from(""),
-            Line::from(
-                "List open PRs, preview details, and add a simple comment.".fg(colors::MUTED),
-            ),
-            Line::from("This mode stays intentionally small.".fg(colors::MUTED)),
-        ],
+        Screen::PullRequests => render_pull_request_work(app),
         Screen::Issues => vec![
             Line::from("Manage Issues".bold()),
             Line::from(""),
-            Line::from(
-                "List open issues, preview details, and add a simple comment.".fg(colors::MUTED),
-            ),
-            Line::from("This mode stays intentionally small.".fg(colors::MUTED)),
+            Line::from("Open issue list".fg(colors::MUTED)),
+            Line::from("".to_string()),
         ],
     };
 
@@ -774,6 +821,164 @@ fn render_work(frame: &mut Frame, app: &mut App, area: Rect) {
         ))
         .wrap(Wrap { trim: false });
     frame.render_widget(form, area);
+}
+
+fn render_pull_request_work<'a>(app: &'a App) -> Vec<Line<'a>> {
+    let state = app.pull_requests();
+    let visible = state.visible_items();
+    let selected = state.selected_item().cloned();
+
+    let mut lines = vec![
+        Line::from("Manage PRs".bold()),
+        Line::from(""),
+        Line::from("Filter".fg(colors::MUTED)),
+        Line::from(format!(
+            "  {}",
+            if state.filter.display_value().trim().is_empty() {
+                "(type to filter)"
+            } else {
+                state.filter.display_value().trim()
+            }
+        )),
+        Line::from(format!(
+            "Status: {}  Visible: {}  Total: {}",
+            state.load_status_label(),
+            visible.len(),
+            state.items.len()
+        ))
+        .fg(colors::MUTED),
+    ];
+
+    if let Some(error) = state.load_error.as_deref() {
+        lines.push(Line::from(format!("Load error: {error}")).fg(colors::BAD));
+    }
+
+    match selected {
+        Some(pr) => {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Selected".fg(colors::MUTED)));
+            lines.push(Line::from(format!("#{} {}", pr.index, pr.title)));
+            lines.push(Line::from(format!(
+                "{} · {} · {} → {}",
+                pr.state, pr.author, pr.head, pr.base
+            )));
+            if !pr.updated.is_empty() {
+                lines.push(Line::from(format!("Updated: {}", pr.updated)).fg(colors::MUTED));
+            }
+            if !pr.labels.is_empty() {
+                lines.push(
+                    Line::from(format!("Labels: {}", pr.labels.join(", "))).fg(colors::MUTED),
+                );
+            }
+        }
+        None if state.load_status == crate::app::PullRequestLoadStatus::Loading => {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Loading open pull requests...").fg(colors::ACCENT));
+        }
+        None if !state.items.is_empty() => {
+            lines.push(Line::from(""));
+            lines.push(Line::from("No pull requests match the current filter.").fg(colors::MUTED));
+        }
+        None if visible.is_empty()
+            && state.load_status != crate::app::PullRequestLoadStatus::Failed =>
+        {
+            lines.push(Line::from(""));
+            lines.push(Line::from("No open pull requests found.".fg(colors::MUTED)));
+        }
+        None => {}
+    }
+
+    lines
+}
+
+fn render_pull_request_preview<'a>(app: &'a App) -> Vec<Line<'a>> {
+    let state = app.pull_requests();
+    let filter = state.filter.display_value().trim().to_string();
+    let filter_display = if filter.is_empty() {
+        "(none)".to_string()
+    } else {
+        filter.clone()
+    };
+    let selected = state.selected_item().cloned();
+    let has_selected = selected.is_some();
+    let mut lines: Vec<Line<'a>> = vec![
+        Line::from("Pull Request".bold()),
+        Line::from(""),
+        Line::from(format!("Filter: {filter_display}")).fg(colors::MUTED),
+    ];
+
+    if let Some(error) = state.load_error.as_deref() {
+        lines.push(Line::from(format!("Load error: {error}")).fg(colors::BAD));
+    }
+
+    match selected {
+        Some(pr) => {
+            lines.push(Line::from(""));
+            lines.push(Line::from(format!("#{} {}", pr.index, pr.title)).bold());
+            lines.push(Line::from(format!("State: {}", pr.state)).fg(colors::MUTED));
+            lines.push(Line::from(format!("Author: {}", pr.author)).fg(colors::MUTED));
+            lines.push(Line::from(format!("Head: {}", pr.head)).fg(colors::MUTED));
+            lines.push(Line::from(format!("Base: {}", pr.base)).fg(colors::MUTED));
+            if !pr.url.is_empty() {
+                lines.push(Line::from(format!("URL: {}", pr.url)).fg(colors::MUTED));
+            }
+            if !pr.updated.is_empty() {
+                lines.push(Line::from(format!("Updated: {}", pr.updated)).fg(colors::MUTED));
+            }
+            if !pr.labels.is_empty() {
+                lines.push(
+                    Line::from(format!("Labels: {}", pr.labels.join(", "))).fg(colors::MUTED),
+                );
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from("Body".bold()));
+            if pr.body.trim().is_empty() {
+                lines.push(Line::from("  (empty body)").fg(colors::MUTED));
+            } else {
+                for line in pr.body.lines() {
+                    lines.push(Line::from(format!("  {line}")));
+                }
+            }
+        }
+        None if state.load_status == crate::app::PullRequestLoadStatus::Loading => {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Loading open pull requests...").fg(colors::ACCENT));
+        }
+        None if !state.items.is_empty() => {
+            lines.push(Line::from(""));
+            lines.push(Line::from("No pull requests match the current filter.").fg(colors::MUTED));
+        }
+        None if state.load_status == crate::app::PullRequestLoadStatus::Failed => {
+            lines.push(Line::from(""));
+            lines.push(
+                Line::from(
+                    state
+                        .load_error
+                        .as_deref()
+                        .unwrap_or("Failed to load open pull requests"),
+                )
+                .fg(colors::BAD),
+            );
+        }
+        None => {
+            lines.push(Line::from(""));
+            lines.push(Line::from("No open pull requests available.").fg(colors::MUTED));
+        }
+    }
+
+    if has_selected {
+        lines.push(Line::from(""));
+        lines.push(
+            Line::from(format!(
+                "Visible: {}  Selected: {}",
+                state.visible_count(),
+                state.selected_visible_index() + 1
+            ))
+            .fg(colors::MUTED),
+        );
+    }
+
+    lines
 }
 
 #[allow(clippy::type_complexity)]
@@ -885,12 +1090,7 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
             return;
         }
         Screen::PullRequests => {
-            let lines = vec![
-                Line::from("PR Preview".bold()),
-                Line::from(""),
-                Line::from("Selected PR body, status, and comments will appear here."),
-                Line::from("Esc returns to Landing.".fg(colors::MUTED)),
-            ];
+            let lines = render_pull_request_preview(app);
             let block = themed_block(
                 focused_title("Preview", app.focus() == Focus::Preview),
                 app.focus() == Focus::Preview,
@@ -898,20 +1098,15 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
             let inner = block.inner(area);
             let content_height = wrapped_content_height(&lines, inner.width as usize);
             let viewport_height = inner.height as usize;
-            {
-                let state = app.pull_requests_mut();
-                state.preview_scroll.clamp(content_height, viewport_height);
-            }
+            let scroll_offset = app
+                .pull_requests()
+                .preview_scroll
+                .offset
+                .min(content_height.saturating_sub(viewport_height));
 
             let preview = Paragraph::new(lines)
                 .block(block)
-                .scroll((
-                    app.pull_requests()
-                        .preview_scroll
-                        .offset
-                        .min(u16::MAX as usize) as u16,
-                    0,
-                ))
+                .scroll((scroll_offset.min(u16::MAX as usize) as u16, 0))
                 .wrap(Wrap { trim: false });
             frame.render_widget(preview, area);
             return;
@@ -985,6 +1180,15 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
             PromptView::Prompt => "prompt:text",
         };
         raw_segments.push(format!(" {prompt_mode} ").fg(colors::MUTED));
+    } else if app.screen() == Screen::PullRequests {
+        let pr = app.pull_requests();
+        let selected = if pr.visible_count() == 0 {
+            0
+        } else {
+            pr.selected_visible_index() + 1
+        };
+        raw_segments.push(format!(" prs:{} ", pr.load_status_label()).fg(colors::MUTED));
+        raw_segments.push(format!(" prs:{selected}/{} ", pr.visible_count()).fg(colors::MUTED));
     }
 
     let divider = Span::styled(" │ ", Style::new().fg(colors::SURFACE1));
@@ -1104,11 +1308,29 @@ fn render_help(frame: &mut Frame, app: &App, area: Rect) {
             " Esc ".bold().fg(colors::ACCENT),
             "back ".fg(colors::MUTED),
         ]),
-        Screen::PullRequests | Screen::Issues => Line::from(vec![
+        Screen::PullRequests if app.input_mode() == InputMode::Editing => Line::from(vec![
+            " cursor ".bold().fg(colors::ACCENT),
+            "editing filter ".fg(colors::MUTED),
+            " Enter ".bold().fg(colors::ACCENT),
+            "save ".fg(colors::MUTED),
+            " Esc ".bold().fg(colors::ACCENT),
+            "cancel ".fg(colors::MUTED),
+        ]),
+        Screen::PullRequests => Line::from(vec![
+            " j/k ".bold().fg(colors::ACCENT),
+            "move ".fg(colors::MUTED),
+            " h/l/tab ".bold().fg(colors::ACCENT),
+            "panes ".fg(colors::MUTED),
+            " Enter/i ".bold().fg(colors::ACCENT),
+            "edit filter ".fg(colors::MUTED),
+            " r ".bold().fg(colors::ACCENT),
+            "refresh ".fg(colors::MUTED),
+            " Esc ".bold().fg(colors::ACCENT),
+            "back ".fg(colors::MUTED),
+        ]),
+        Screen::Issues => Line::from(vec![
             " Enter ".bold().fg(colors::ACCENT),
             "select ".fg(colors::MUTED),
-            " c ".bold().fg(colors::ACCENT),
-            "comment ".fg(colors::MUTED),
             " Esc ".bold().fg(colors::ACCENT),
             "back ".fg(colors::MUTED),
         ]),

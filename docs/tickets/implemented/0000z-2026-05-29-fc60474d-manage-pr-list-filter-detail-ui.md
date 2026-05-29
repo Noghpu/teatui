@@ -2,7 +2,8 @@
 id: 0000z-2026-05-29-fc60474d-manage-pr-list-filter-detail-ui
 created_at: 2026-05-29T17:15:41+02:00
 created_by_model: gpt-5.5/medium
-state: open
+state: implemented
+state_updated_at: 2026-05-29T17:37:28+02:00
 ---
 # Manage PR List Filter And Detail Preview
 
@@ -91,3 +92,35 @@ The PR-generation cleanup work established patterns this ticket must preserve:
 - Key handling can regress Generate PR editing if `InputMode::Editing` is generalized carelessly. Keep Generate and PR edit paths explicit.
 - PR list loads can race with refresh; use a small request id or equivalent guard if results can arrive out of order.
 - `tea` auth or repo discovery failures are normal. Surface them without clearing usable previous data.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: unknown
+- completed_at: 2026-05-29T17:37:28+02:00
+- state: implemented
+
+Completed:
+- Wired Manage PRs to load open pull requests asynchronously through the typed tea command path.
+- Replaced the placeholder PR list state with explicit PR viewer state, including filter edit buffer, load status/error, preview scroll, and stale request guarding.
+- Rendered the PR list, work/filter pane, and detail preview from real PR data.
+- Removed comment affordances from the PR screen and left issues without comment hints as well.
+
+Deviations:
+- Used the PR list payload as the detail source instead of adding a separate detail fetch, because the existing tea list fields already include the preview data needed for this slice.
+
+Verification:
+- Ran `just test`.
+- Ran `just verify`.
+
+Files changed:
+- src/app.rs
+- src/event.rs
+- src/tea.rs
+- src/ui.rs
+
+Residual risks:
+- PR preview rendering currently uses list payload fields only; if later tickets need comments or richer per-PR detail, the detail command path can be wired in then.
+- The filter uses simple substring matching across summary fields, which is intentionally lightweight and may be broadened later.

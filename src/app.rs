@@ -10,16 +10,18 @@ use crate::command::run_plan_sequentially;
 use crate::context::{self, ContextResult};
 use crate::event::{
     AppEvent, BackgroundEvent, EventHandler, ExecutionOutcome, GenerationResult, JobResult,
-    JobStatus,
+    JobStatus, PullRequestsResult,
 };
 use crate::generate::{
     ExecutionPlan, Focus, GeneratePhase, GenerateState, InputMode, PrForm, RevsetSummary,
-    StaleCheckResult, validate_for_execution,
+    StaleCheckResult, TextFieldState, validate_for_execution,
 };
 use crate::jj;
 use crate::llm::LlmClient;
+use crate::pull_requests::PullRequestSummary;
 use crate::repo::{self, RepoState};
 use crate::repo_options::{self, RepoOptions, RepoOptionsResult};
+use crate::tea;
 use crate::tui::Tui;
 use crate::ui;
 
@@ -115,6 +117,204 @@ pub struct ListState {
     pub preview_scroll: crate::generate::ScrollState,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PullRequestLoadStatus {
+    #[default]
+    Idle,
+    Loading,
+    Ready,
+    Failed,
+}
+
+impl PullRequestLoadStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Loading => "loading",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PullRequestState {
+    pub items: Vec<PullRequestSummary>,
+    pub selected_item: usize,
+    pub filter: TextFieldState,
+    pub load_status: PullRequestLoadStatus,
+    pub load_error: Option<String>,
+    pub preview_scroll: crate::generate::ScrollState,
+    pub next_request_id: u64,
+    pub active_request_id: Option<u64>,
+}
+
+impl Default for PullRequestState {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            selected_item: 0,
+            filter: TextFieldState::new(""),
+            load_status: PullRequestLoadStatus::Idle,
+            load_error: None,
+            preview_scroll: crate::generate::ScrollState::default(),
+            next_request_id: 1,
+            active_request_id: None,
+        }
+    }
+}
+
+impl PullRequestState {
+    pub fn begin_load(&mut self) -> u64 {
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        self.active_request_id = Some(request_id);
+        self.load_status = PullRequestLoadStatus::Loading;
+        self.load_error = None;
+        request_id
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.active_request_id.is_some()
+    }
+
+    pub fn load_status_label(&self) -> &'static str {
+        self.load_status.label()
+    }
+
+    pub fn begin_filter_edit(&mut self) {
+        self.filter.begin_edit();
+    }
+
+    pub fn input_filter(&mut self, key: crossterm::event::KeyEvent) {
+        self.filter.input(key);
+        self.clamp_selection();
+    }
+
+    pub fn commit_filter(&mut self) {
+        self.filter.commit();
+        self.clamp_selection();
+    }
+
+    pub fn cancel_filter(&mut self) {
+        self.filter.cancel();
+        self.clamp_selection();
+    }
+
+    pub fn reset_filter_editor_viewport(&mut self) {
+        self.filter.reset_editor_viewport();
+    }
+
+    pub fn selected_visible_index(&self) -> usize {
+        self.selected_item
+    }
+
+    pub fn visible_items(&self) -> Vec<(usize, &PullRequestSummary)> {
+        let filter = self.filter.display_value().trim().to_lowercase();
+        self.items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| pull_request_matches_filter(item, &filter))
+            .collect()
+    }
+
+    pub fn selected_item(&self) -> Option<&PullRequestSummary> {
+        self.visible_items()
+            .get(self.selected_item)
+            .map(|(_, item)| *item)
+    }
+
+    pub fn visible_count(&self) -> usize {
+        self.visible_items().len()
+    }
+
+    pub fn move_selected_up(&mut self) {
+        if self.visible_count() > 0 {
+            self.selected_item = self.selected_item.saturating_sub(1);
+        }
+    }
+
+    pub fn move_selected_down(&mut self) {
+        let visible = self.visible_count();
+        if visible > 0 {
+            self.selected_item = (self.selected_item + 1).min(visible.saturating_sub(1));
+        }
+    }
+
+    pub fn set_items(&mut self, items: Vec<PullRequestSummary>) {
+        self.items = items;
+        self.load_status = PullRequestLoadStatus::Ready;
+        self.load_error = None;
+        self.clamp_selection();
+    }
+
+    pub fn fail_load(&mut self, message: String) {
+        self.load_status = PullRequestLoadStatus::Failed;
+        self.load_error = Some(message);
+        self.active_request_id = None;
+        self.clamp_selection();
+    }
+
+    pub fn complete_load(&mut self, request_id: u64, items: Vec<PullRequestSummary>) -> bool {
+        if self.active_request_id != Some(request_id) {
+            return false;
+        }
+
+        self.active_request_id = None;
+        self.set_items(items);
+        true
+    }
+
+    pub fn fail_request(&mut self, request_id: u64, message: String) -> bool {
+        if self.active_request_id != Some(request_id) {
+            return false;
+        }
+
+        self.fail_load(message);
+        true
+    }
+
+    fn clamp_selection(&mut self) {
+        let visible = self.visible_count();
+        if visible == 0 {
+            self.selected_item = 0;
+        } else {
+            self.selected_item = self.selected_item.min(visible - 1);
+        }
+    }
+}
+
+fn pull_request_matches_filter(item: &PullRequestSummary, filter: &str) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+
+    let mut haystack = String::new();
+    haystack.push_str(&item.index.to_string());
+    haystack.push(' ');
+    haystack.push_str(&item.title);
+    haystack.push(' ');
+    haystack.push_str(&item.state);
+    haystack.push(' ');
+    haystack.push_str(&item.author);
+    haystack.push(' ');
+    haystack.push_str(&item.head);
+    haystack.push(' ');
+    haystack.push_str(&item.base);
+    haystack.push(' ');
+    haystack.push_str(&item.updated);
+    haystack.push(' ');
+    haystack.push_str(&item.url);
+    haystack.push(' ');
+    haystack.push_str(&item.body);
+    for label in &item.labels {
+        haystack.push(' ');
+        haystack.push_str(label);
+    }
+
+    haystack.to_lowercase().contains(filter)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GenerationRequest {
     id: u64,
@@ -132,7 +332,7 @@ pub struct App {
     repo: RepoState,
     landing: LandingState,
     generate: GenerateState,
-    pull_requests: ListState,
+    pull_requests: PullRequestState,
     issues: ListState,
     logs: LogState,
     jobs: JobRegistry,
@@ -156,7 +356,7 @@ impl App {
             repo,
             landing: LandingState::default(),
             generate: GenerateState::with_placeholder("Revsets pending discovery"),
-            pull_requests: ListState::default(),
+            pull_requests: PullRequestState::default(),
             issues: ListState::default(),
             logs: LogState::default(),
             jobs: JobRegistry::default(),
@@ -190,6 +390,7 @@ impl App {
         for field in self.generate.form.editors_mut() {
             field.reset_editor_viewport();
         }
+        self.pull_requests.reset_filter_editor_viewport();
     }
 
     fn handle_key(&self, key: KeyEvent) -> Action {
@@ -295,6 +496,7 @@ impl App {
             BackgroundEvent::Context(result) => self.apply_context(result),
             BackgroundEvent::Repo(repo) => self.apply_repo(*repo),
             BackgroundEvent::Revsets(revsets) => self.apply_revsets(revsets),
+            BackgroundEvent::PullRequests(result) => self.apply_pull_requests(result),
             BackgroundEvent::StaleCheck(result) => self.apply_stale_check(result),
             BackgroundEvent::Job(job) => self.apply_job(job),
             BackgroundEvent::ExecutionStep { index, total } => {
@@ -358,12 +560,18 @@ impl App {
             (Screen::Landing, _, Direction::Down) => {
                 self.landing.selected_entry = (self.landing.selected_entry + 1).min(2);
             }
-            (Screen::PullRequests, _, Direction::Up) => {
-                self.pull_requests.selected_item =
-                    self.pull_requests.selected_item.saturating_sub(1);
+            (Screen::PullRequests, Focus::Menu, Direction::Up) => {
+                self.pull_requests.move_selected_up();
             }
-            (Screen::PullRequests, _, Direction::Down) => {
-                self.pull_requests.selected_item = (self.pull_requests.selected_item + 1).min(2);
+            (Screen::PullRequests, Focus::Menu, Direction::Down) => {
+                self.pull_requests.move_selected_down();
+            }
+            (Screen::PullRequests, Focus::Form, _) => {}
+            (Screen::PullRequests, Focus::Preview, Direction::Up) => {
+                self.pull_requests.preview_scroll.scroll_up();
+            }
+            (Screen::PullRequests, Focus::Preview, Direction::Down) => {
+                self.pull_requests.preview_scroll.scroll_down();
             }
             (Screen::Issues, _, Direction::Up) => {
                 self.issues.selected_item = self.issues.selected_item.saturating_sub(1);
@@ -390,6 +598,9 @@ impl App {
             Screen::Landing => self.open_selected_landing_entry(),
             Screen::Generate if self.focus == Focus::Menu => self.select_revset(),
             Screen::Generate if self.focus == Focus::Form => self.begin_editing_form_field(),
+            Screen::PullRequests if self.focus == Focus::Form => {
+                self.begin_editing_pull_request_filter()
+            }
             _ => {}
         }
     }
@@ -411,6 +622,8 @@ impl App {
             self.generate.phase = GeneratePhase::SelectingRevset;
             // Trigger repo options load (stale-while-revalidate) on Generate PR entry.
             self.spawn_repo_options_load(false);
+        } else if self.screen == Screen::PullRequests {
+            self.spawn_pull_requests_load(false);
         }
     }
 
@@ -422,36 +635,53 @@ impl App {
     }
 
     fn begin_editing_form_field(&mut self) {
-        if self.screen == Screen::Generate && self.focus == Focus::Form {
-            self.generate.begin_editing_selected_field();
+        match self.screen {
+            Screen::Generate if self.focus == Focus::Form => {
+                self.generate.begin_editing_selected_field();
+                self.input_mode = InputMode::Editing;
+            }
+            Screen::PullRequests if self.focus == Focus::Form => {
+                self.begin_editing_pull_request_filter();
+            }
+            _ => {}
+        }
+    }
+
+    fn begin_editing_pull_request_filter(&mut self) {
+        if self.screen == Screen::PullRequests && self.focus == Focus::Form {
+            self.pull_requests.begin_filter_edit();
             self.input_mode = InputMode::Editing;
         }
     }
 
     fn apply_edit_key(&mut self, key: KeyEvent) {
-        if self.screen != Screen::Generate || self.focus != Focus::Form {
-            return;
-        }
-
-        match key.code {
-            KeyCode::Esc => self.finish_editing(false),
-            KeyCode::Enter => {
-                if self.generate.selected_field().kind().is_multiline() {
-                    self.generate
-                        .form
-                        .field_mut(self.generate.selected_field())
-                        .input(key);
-                } else {
+        match (self.screen, self.focus) {
+            (Screen::Generate, Focus::Form) => match key.code {
+                KeyCode::Esc => self.finish_editing(false),
+                KeyCode::Enter => {
+                    if self.generate.selected_field().kind().is_multiline() {
+                        self.generate
+                            .form
+                            .field_mut(self.generate.selected_field())
+                            .input(key);
+                    } else {
+                        self.finish_editing(true);
+                    }
+                }
+                KeyCode::Char('s')
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && self.generate.selected_field().kind().is_multiline() =>
+                {
                     self.finish_editing(true);
                 }
-            }
-            KeyCode::Char('s')
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.generate.selected_field().kind().is_multiline() =>
-            {
-                self.finish_editing(true);
-            }
-            _ => self.generate.input_selected_field(key),
+                _ => self.generate.input_selected_field(key),
+            },
+            (Screen::PullRequests, Focus::Form) => match key.code {
+                KeyCode::Esc => self.finish_editing_pull_request_filter(false),
+                KeyCode::Enter => self.finish_editing_pull_request_filter(true),
+                _ => self.pull_requests.input_filter(key),
+            },
+            _ => {}
         }
     }
 
@@ -461,6 +691,17 @@ impl App {
                 self.generate.commit_selected_field();
             } else {
                 self.generate.cancel_selected_field();
+            }
+        }
+        self.input_mode = InputMode::Normal;
+    }
+
+    fn finish_editing_pull_request_filter(&mut self, commit: bool) {
+        if self.screen == Screen::PullRequests && self.focus == Focus::Form {
+            if commit {
+                self.pull_requests.commit_filter();
+            } else {
+                self.pull_requests.cancel_filter();
             }
         }
         self.input_mode = InputMode::Normal;
@@ -659,10 +900,13 @@ impl App {
         }
     }
 
-    pub fn refresh(&self) {
+    pub fn refresh(&mut self) {
         repo::spawn_discovery(self.config.clone(), self.cwd.clone(), self.bg_tx.clone());
         jj::spawn_revset_discovery(&self.config, self.cwd.clone(), self.bg_tx.clone());
         self.spawn_repo_options_load(true);
+        if self.screen == Screen::PullRequests {
+            self.spawn_pull_requests_load(true);
+        }
     }
 
     fn spawn_repo_options_load(&self, force_refresh: bool) {
@@ -674,6 +918,20 @@ impl App {
             self.cwd.clone(),
             remote,
             force_refresh,
+            self.bg_tx.clone(),
+        );
+    }
+
+    fn spawn_pull_requests_load(&mut self, force_refresh: bool) {
+        if self.pull_requests.is_loading() && !force_refresh {
+            return;
+        }
+
+        let request_id = self.pull_requests.begin_load();
+        tea::spawn_pull_requests_load(
+            self.config.clone(),
+            self.cwd.clone(),
+            request_id,
             self.bg_tx.clone(),
         );
     }
@@ -734,6 +992,39 @@ impl App {
         self.generate.validate_form();
 
         self.repo_options = result.options;
+    }
+
+    fn apply_pull_requests(&mut self, result: PullRequestsResult) {
+        match result {
+            PullRequestsResult::Ready { request_id, items } => {
+                if !self.pull_requests.complete_load(request_id, items) {
+                    self.log(format!(
+                        "discarded PR list result {request_id}: newer request is active"
+                    ));
+                    return;
+                }
+
+                let count = self.pull_requests.items.len();
+                self.log(format!("loaded {count} open pull requests"));
+            }
+            PullRequestsResult::Failed {
+                request_id,
+                command,
+                message,
+                stdout,
+                stderr,
+            } => {
+                if !self.pull_requests.fail_request(request_id, message.clone()) {
+                    self.log(format!(
+                        "discarded PR list error {request_id}: newer request is active"
+                    ));
+                    return;
+                }
+
+                self.log(format!("PR list load failed: {message}"));
+                self.log_command_capture("tea pr list", &command, &stdout, &stderr);
+            }
+        }
     }
 
     fn apply_revsets(&mut self, revsets: Vec<RevsetSummary>) {
@@ -1017,11 +1308,11 @@ impl App {
         &mut self.generate
     }
 
-    pub fn pull_requests(&self) -> &ListState {
+    pub fn pull_requests(&self) -> &PullRequestState {
         &self.pull_requests
     }
 
-    pub fn pull_requests_mut(&mut self) -> &mut ListState {
+    pub fn pull_requests_mut(&mut self) -> &mut PullRequestState {
         &mut self.pull_requests
     }
 
@@ -1058,6 +1349,21 @@ mod tests {
         let config = Config::default();
         let (tx, _rx) = unbounded_channel();
         App::new(config, tx)
+    }
+
+    fn sample_pull_request(index: u64, title: &str) -> PullRequestSummary {
+        PullRequestSummary {
+            index,
+            title: title.into(),
+            state: "open".into(),
+            author: "alice".into(),
+            url: format!("https://example.com/pr/{index}"),
+            head: format!("feature/{index}"),
+            base: "main".into(),
+            body: format!("Body {index}"),
+            updated: "2026-05-29T10:00:00Z".into(),
+            labels: vec!["ui".into()],
+        }
     }
 
     #[test]
@@ -1118,6 +1424,29 @@ mod tests {
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::empty())),
             Action::EditKey(KeyEvent::new(KeyCode::Home, KeyModifiers::empty()))
+        );
+    }
+
+    #[test]
+    fn pr_filter_edit_mode_routes_printable_keys_into_the_filter() {
+        let mut app = test_app();
+        app.screen = Screen::PullRequests;
+        app.focus = Focus::Form;
+
+        app.update(Action::Edit);
+
+        assert_eq!(app.input_mode, InputMode::Editing);
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty())),
+            Action::EditKey(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()))
+        );
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty())),
+            Action::EditKey(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()))
+        );
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())),
+            Action::EditKey(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()))
         );
     }
 
@@ -1301,6 +1630,48 @@ mod tests {
         assert_eq!(app.generate.phase, GeneratePhase::Failed);
         assert!(app.generate.draft.is_none());
         assert_eq!(app.generate.form.title.display_value(), "User edit");
+    }
+
+    #[test]
+    fn pr_filter_clamps_selection_when_filter_changes() {
+        let mut app = test_app();
+        app.pull_requests.items = vec![
+            sample_pull_request(1, "First"),
+            sample_pull_request(2, "Second"),
+        ];
+        app.pull_requests.selected_item = 1;
+        app.pull_requests.filter = crate::generate::TextFieldState::new("Second");
+
+        app.pull_requests.commit_filter();
+
+        assert_eq!(app.pull_requests.selected_item, 0);
+        assert_eq!(app.pull_requests.visible_count(), 1);
+        assert_eq!(
+            app.pull_requests
+                .selected_item()
+                .expect("selected PR")
+                .title,
+            "Second"
+        );
+    }
+
+    #[test]
+    fn stale_pr_list_result_is_ignored() {
+        let mut app = test_app();
+        app.screen = Screen::PullRequests;
+        let request_id = app.pull_requests.begin_load();
+
+        app.handle_background(BackgroundEvent::PullRequests(PullRequestsResult::Ready {
+            request_id: request_id + 1,
+            items: vec![sample_pull_request(1, "Fresh")],
+        }));
+
+        assert!(app.pull_requests.items.is_empty());
+        assert_eq!(
+            app.pull_requests.load_status,
+            PullRequestLoadStatus::Loading
+        );
+        assert_eq!(app.pull_requests.active_request_id, Some(request_id));
     }
 
     #[test]
