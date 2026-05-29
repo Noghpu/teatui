@@ -832,7 +832,7 @@ impl App {
         self.focus = Focus::Form;
         self.generate.phase = GeneratePhase::EditingForm;
         self.generate.selected_field = 0;
-        self.generate.sync_head_from_selected_revset();
+        self.generate.force_sync_head_from_selected_revset();
     }
 
     fn begin_editing_form_field(&mut self) {
