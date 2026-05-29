@@ -1406,32 +1406,7 @@ fn render_help(frame: &mut Frame, app: &App, area: Rect) {
             " Esc ".bold().fg(colors::ACCENT),
             "back ".fg(colors::MUTED),
         ]),
-        Screen::Generate if app.focus() == Focus::Preview => Line::from(vec![
-            " p ".bold().fg(colors::ACCENT),
-            "toggle prompt ".fg(colors::MUTED),
-            " g ".bold().fg(colors::ACCENT),
-            "regenerate ".fg(colors::MUTED),
-            " Esc ".bold().fg(colors::ACCENT),
-            "back ".fg(colors::MUTED),
-        ]),
-        Screen::Generate => Line::from(vec![
-            " h/l ".bold().fg(colors::ACCENT),
-            "move focus ".fg(colors::MUTED),
-            " Enter ".bold().fg(colors::ACCENT),
-            "select/edit ".fg(colors::MUTED),
-            " i ".bold().fg(colors::ACCENT),
-            "edit ".fg(colors::MUTED),
-            " g ".bold().fg(colors::ACCENT),
-            "generate ".fg(colors::MUTED),
-            " c ".bold().fg(colors::ACCENT),
-            "confirm ".fg(colors::MUTED),
-            " p ".bold().fg(colors::ACCENT),
-            "prompt ".fg(colors::MUTED),
-            " r ".bold().fg(colors::ACCENT),
-            "refresh ".fg(colors::MUTED),
-            " Esc ".bold().fg(colors::ACCENT),
-            "back ".fg(colors::MUTED),
-        ]),
+        Screen::Generate => generate_footer_hints(app.focus(), app.generate().draft.is_some()),
         Screen::PullRequests
             if matches!(
                 app.pull_requests().comment_phase,
@@ -2424,14 +2399,70 @@ fn render_picker_modal(frame: &mut Frame, app: &App, frame_area: Rect) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
+/// Returns the footer hint line for the Generate screen's default (non-editing,
+/// non-confirm, non-terminal-phase) state, varying by focused pane and whether
+/// a generated draft is currently present.
+fn generate_footer_hints(focus: Focus, has_draft: bool) -> Line<'static> {
+    match focus {
+        Focus::Menu => Line::from(vec![
+            " ↑/↓ ".bold().fg(colors::ACCENT),
+            "select ".fg(colors::MUTED),
+            " Enter ".bold().fg(colors::ACCENT),
+            "pick revset ".fg(colors::MUTED),
+            " r ".bold().fg(colors::ACCENT),
+            "refresh ".fg(colors::MUTED),
+            " Tab ".bold().fg(colors::ACCENT),
+            "→ Form ".fg(colors::MUTED),
+            " Esc ".bold().fg(colors::ACCENT),
+            "back ".fg(colors::MUTED),
+        ]),
+        Focus::Form => Line::from(vec![
+            " ↑/↓ ".bold().fg(colors::ACCENT),
+            "field ".fg(colors::MUTED),
+            " Enter/i ".bold().fg(colors::ACCENT),
+            "edit ".fg(colors::MUTED),
+            " g ".bold().fg(colors::ACCENT),
+            "generate ".fg(colors::MUTED),
+            " Tab ".bold().fg(colors::ACCENT),
+            "→ Preview ".fg(colors::MUTED),
+            " Shift+Tab ".bold().fg(colors::ACCENT),
+            "→ Menu ".fg(colors::MUTED),
+            " Esc ".bold().fg(colors::ACCENT),
+            "back ".fg(colors::MUTED),
+        ]),
+        Focus::Preview if !has_draft => Line::from(vec![
+            " ↑/↓ ".bold().fg(colors::ACCENT),
+            "scroll ".fg(colors::MUTED),
+            " Tab ".bold().fg(colors::ACCENT),
+            "→ Menu ".fg(colors::MUTED),
+            " Esc ".bold().fg(colors::ACCENT),
+            "back ".fg(colors::MUTED),
+        ]),
+        Focus::Preview => Line::from(vec![
+            " ↑/↓ ".bold().fg(colors::ACCENT),
+            "scroll ".fg(colors::MUTED),
+            " p ".bold().fg(colors::ACCENT),
+            "manifest/raw ".fg(colors::MUTED),
+            " g ".bold().fg(colors::ACCENT),
+            "regenerate ".fg(colors::MUTED),
+            " c ".bold().fg(colors::ACCENT),
+            "confirm ".fg(colors::MUTED),
+            " Tab ".bold().fg(colors::ACCENT),
+            "→ Menu ".fg(colors::MUTED),
+            " Esc ".bold().fg(colors::ACCENT),
+            "back ".fg(colors::MUTED),
+        ]),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         bounded_multiline_field_lines, centered_rect, compact_diff_stat, compute_editor_rect,
-        is_jj_default_description, picker_visible_slice, truncate_chars, wrap_chars,
-        wrapped_content_height,
+        generate_footer_hints, is_jj_default_description, picker_visible_slice, truncate_chars,
+        wrap_chars, wrapped_content_height,
     };
-    use crate::generate::PickerOptionView;
+    use crate::generate::{Focus, PickerOptionView};
     use ratatui::layout::Rect;
     use ratatui::text::{Line, Span};
 
@@ -2725,5 +2756,109 @@ mod tests {
         let (slice, remaining) = picker_visible_slice(&opts, 2, 0);
         assert!(slice.is_empty());
         assert_eq!(remaining, 0);
+    }
+
+    // ---------------------------------------------------------------------------
+    // generate_footer_hints tests
+    // ---------------------------------------------------------------------------
+
+    fn line_text(line: &Line<'static>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn generate_footer_hints_menu_contains_r_refresh() {
+        let line = generate_footer_hints(Focus::Menu, false);
+        let text = line_text(&line);
+        assert!(
+            text.contains("r") && text.contains("refresh"),
+            "Menu hints should contain 'r refresh', got: {text:?}"
+        );
+        // Pane-exclusive keys must not appear in Menu hints.
+        assert!(
+            !text.contains("generate"),
+            "Menu hints must not contain 'generate', got: {text:?}"
+        );
+        assert!(
+            !text.contains("manifest/raw"),
+            "Menu hints must not contain 'manifest/raw', got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn generate_footer_hints_menu_no_draft_still_same() {
+        // The Menu arm doesn't vary with has_draft.
+        let with_draft = line_text(&generate_footer_hints(Focus::Menu, true));
+        let without_draft = line_text(&generate_footer_hints(Focus::Menu, false));
+        assert_eq!(with_draft, without_draft);
+    }
+
+    #[test]
+    fn generate_footer_hints_form_contains_g_generate() {
+        let line = generate_footer_hints(Focus::Form, false);
+        let text = line_text(&line);
+        assert!(
+            text.contains("generate"),
+            "Form hints should contain 'generate', got: {text:?}"
+        );
+        // Refresh is Menu-only.
+        assert!(
+            !text.contains("refresh"),
+            "Form hints must not contain 'refresh', got: {text:?}"
+        );
+        assert!(
+            !text.contains("manifest/raw"),
+            "Form hints must not contain 'manifest/raw', got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn generate_footer_hints_preview_no_draft_omits_draft_keys() {
+        let line = generate_footer_hints(Focus::Preview, false);
+        let text = line_text(&line);
+        assert!(
+            !text.contains("manifest/raw"),
+            "Preview without draft must not show 'manifest/raw', got: {text:?}"
+        );
+        assert!(
+            !text.contains("confirm"),
+            "Preview without draft must not show 'confirm', got: {text:?}"
+        );
+        assert!(
+            !text.contains("regenerate"),
+            "Preview without draft must not show 'regenerate', got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn generate_footer_hints_preview_with_draft_shows_manifest_confirm_regenerate() {
+        let line = generate_footer_hints(Focus::Preview, true);
+        let text = line_text(&line);
+        assert!(
+            text.contains("manifest/raw"),
+            "Preview with draft must show 'manifest/raw', got: {text:?}"
+        );
+        assert!(
+            text.contains("regenerate"),
+            "Preview with draft must show 'regenerate', got: {text:?}"
+        );
+        assert!(
+            text.contains("confirm"),
+            "Preview with draft must show 'confirm', got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn generate_footer_hints_no_p_prompt_anywhere() {
+        // The literal "p prompt" label must not appear in any hint combination.
+        for focus in [Focus::Menu, Focus::Form, Focus::Preview] {
+            for has_draft in [false, true] {
+                let text = line_text(&generate_footer_hints(focus, has_draft));
+                assert!(
+                    !text.contains("prompt"),
+                    "Hint 'prompt' must not appear (focus={focus:?}, has_draft={has_draft}): {text:?}"
+                );
+            }
+        }
     }
 }
