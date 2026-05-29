@@ -10,7 +10,7 @@ use crate::command::run_plan_sequentially;
 use crate::context::{self, ContextResult};
 use crate::event::{
     AppEvent, BackgroundEvent, EventHandler, ExecutionOutcome, GenerationResult, JobResult,
-    JobStatus, PullRequestsResult,
+    JobStatus, PrCommentResult, PullRequestsResult,
 };
 use crate::generate::{
     ExecutionPlan, Focus, GeneratePhase, GenerateState, InputMode, PrForm, RevsetSummary,
@@ -106,6 +106,15 @@ impl JobRegistry {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PrCommentPhase {
+    #[default]
+    Idle,
+    Editing,
+    Submitting,
+    Failed,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct LandingState {
     pub selected_entry: usize,
@@ -147,6 +156,10 @@ pub struct PullRequestState {
     pub preview_scroll: crate::generate::ScrollState,
     pub next_request_id: u64,
     pub active_request_id: Option<u64>,
+    pub comment_phase: PrCommentPhase,
+    pub comment_buffer: String,
+    pub comment_cursor: usize,
+    pub comment_error: Option<String>,
 }
 
 impl Default for PullRequestState {
@@ -160,6 +173,10 @@ impl Default for PullRequestState {
             preview_scroll: crate::generate::ScrollState::default(),
             next_request_id: 1,
             active_request_id: None,
+            comment_phase: PrCommentPhase::Idle,
+            comment_buffer: String::new(),
+            comment_cursor: 0,
+            comment_error: None,
         }
     }
 }
@@ -272,6 +289,76 @@ impl PullRequestState {
 
         self.fail_load(message);
         true
+    }
+
+    pub fn open_comment_modal(&mut self) {
+        self.comment_phase = PrCommentPhase::Editing;
+        self.comment_error = None;
+    }
+
+    pub fn close_comment_modal(&mut self) {
+        self.comment_phase = PrCommentPhase::Idle;
+        self.comment_buffer.clear();
+        self.comment_cursor = 0;
+        self.comment_error = None;
+    }
+
+    pub fn comment_input_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+        match key.code {
+            KeyCode::Char(ch) => {
+                self.comment_buffer.insert(self.comment_cursor, ch);
+                self.comment_cursor += ch.len_utf8();
+            }
+            KeyCode::Backspace => {
+                if self.comment_cursor > 0 {
+                    // Find the start of the previous char.
+                    let prev = self
+                        .comment_buffer
+                        .char_indices()
+                        .rev()
+                        .find(|(i, _)| *i < self.comment_cursor)
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    self.comment_buffer.drain(prev..self.comment_cursor);
+                    self.comment_cursor = prev;
+                }
+            }
+            KeyCode::Delete => {
+                if self.comment_cursor < self.comment_buffer.len() {
+                    // Find the end of the current char.
+                    let next = self.comment_buffer[self.comment_cursor..]
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| self.comment_cursor + i)
+                        .unwrap_or(self.comment_buffer.len());
+                    self.comment_buffer.drain(self.comment_cursor..next);
+                }
+            }
+            KeyCode::Left => {
+                self.comment_cursor = self
+                    .comment_buffer
+                    .char_indices()
+                    .rev()
+                    .find(|(i, _)| *i < self.comment_cursor)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+            }
+            KeyCode::Right => {
+                self.comment_cursor = self.comment_buffer[self.comment_cursor..]
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, _)| self.comment_cursor + i)
+                    .unwrap_or(self.comment_buffer.len());
+            }
+            KeyCode::Home => {
+                self.comment_cursor = 0;
+            }
+            KeyCode::End => {
+                self.comment_cursor = self.comment_buffer.len();
+            }
+            _ => {}
+        }
     }
 
     fn clamp_selection(&mut self) {
@@ -394,6 +481,16 @@ impl App {
     }
 
     fn handle_key(&self, key: KeyEvent) -> Action {
+        // Comment modal input mode: capture all printable/edit keys.
+        if self.screen == Screen::PullRequests
+            && matches!(
+                self.pull_requests.comment_phase,
+                PrCommentPhase::Editing | PrCommentPhase::Failed
+            )
+        {
+            return self.handle_comment_modal_key(key);
+        }
+
         if self.input_mode == InputMode::Editing {
             return self.handle_edit_key(key);
         }
@@ -433,6 +530,15 @@ impl App {
             }
         }
 
+        // PR comment shortcut: 'c' opens comment modal when a PR is selected.
+        if self.screen == Screen::PullRequests
+            && matches!(key.code, KeyCode::Char('c'))
+            && self.pull_requests.selected_item().is_some()
+            && self.pull_requests.comment_phase == PrCommentPhase::Idle
+        {
+            return Action::OpenCommentModal;
+        }
+
         match key.code {
             KeyCode::Char('q') => Action::Quit,
             KeyCode::Esc => Action::Back,
@@ -446,6 +552,21 @@ impl App {
             KeyCode::Char('p') => Action::TogglePromptView,
             KeyCode::Char('r') => Action::Refresh,
             KeyCode::Enter => Action::Select,
+            _ => Action::Tick,
+        }
+    }
+
+    fn handle_comment_modal_key(&self, key: KeyEvent) -> Action {
+        match key.code {
+            KeyCode::Esc => Action::CancelComment,
+            KeyCode::Enter => Action::SubmitComment,
+            KeyCode::Backspace
+            | KeyCode::Delete
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::Char(_) => Action::EditKey(key),
             _ => Action::Tick,
         }
     }
@@ -487,6 +608,9 @@ impl App {
             Action::ExecuteConfirmed => self.execute_confirmed(),
             Action::TogglePromptView => self.toggle_prompt_view(),
             Action::Refresh => self.refresh(),
+            Action::OpenCommentModal => self.open_comment_modal(),
+            Action::SubmitComment => self.submit_comment(),
+            Action::CancelComment => self.cancel_comment(),
         }
     }
 
@@ -497,6 +621,7 @@ impl App {
             BackgroundEvent::Repo(repo) => self.apply_repo(*repo),
             BackgroundEvent::Revsets(revsets) => self.apply_revsets(revsets),
             BackgroundEvent::PullRequests(result) => self.apply_pull_requests(result),
+            BackgroundEvent::PrComment(result) => self.apply_pr_comment(result),
             BackgroundEvent::StaleCheck(result) => self.apply_stale_check(result),
             BackgroundEvent::Job(job) => self.apply_job(job),
             BackgroundEvent::ExecutionStep { index, total } => {
@@ -508,6 +633,15 @@ impl App {
     }
 
     fn back(&mut self) {
+        // Cancel comment modal on Esc if editing.
+        if self.screen == Screen::PullRequests
+            && self.pull_requests.comment_phase != PrCommentPhase::Idle
+            && self.pull_requests.comment_phase != PrCommentPhase::Submitting
+        {
+            self.pull_requests.close_comment_modal();
+            return;
+        }
+
         if self.screen == Screen::Generate
             && matches!(
                 self.generate.phase,
@@ -655,6 +789,17 @@ impl App {
     }
 
     fn apply_edit_key(&mut self, key: KeyEvent) {
+        // Comment modal has its own edit path; guard here to be safe.
+        if self.screen == Screen::PullRequests
+            && matches!(
+                self.pull_requests.comment_phase,
+                PrCommentPhase::Editing | PrCommentPhase::Failed
+            )
+        {
+            self.pull_requests.comment_input_key(key);
+            return;
+        }
+
         match (self.screen, self.focus) {
             (Screen::Generate, Focus::Form) => match key.code {
                 KeyCode::Esc => self.finish_editing(false),
@@ -705,6 +850,92 @@ impl App {
             }
         }
         self.input_mode = InputMode::Normal;
+    }
+
+    fn open_comment_modal(&mut self) {
+        if self.screen != Screen::PullRequests {
+            return;
+        }
+        if self.pull_requests.selected_item().is_none() {
+            return;
+        }
+        self.pull_requests.open_comment_modal();
+    }
+
+    fn cancel_comment(&mut self) {
+        self.pull_requests.close_comment_modal();
+    }
+
+    fn submit_comment(&mut self) {
+        if self.screen != Screen::PullRequests
+            || !matches!(
+                self.pull_requests.comment_phase,
+                PrCommentPhase::Editing | PrCommentPhase::Failed
+            )
+        {
+            return;
+        }
+
+        let body = self.pull_requests.comment_buffer.trim().to_string();
+        if body.is_empty() {
+            self.pull_requests.comment_error = Some("Comment cannot be empty.".into());
+            return;
+        }
+
+        let Some(pr) = self.pull_requests.selected_item().cloned() else {
+            self.pull_requests.comment_error = Some("No PR selected.".into());
+            return;
+        };
+
+        self.pull_requests.comment_phase = PrCommentPhase::Submitting;
+        self.pull_requests.comment_error = None;
+        let pr_index = pr.index;
+        self.log(format!("submitting comment on PR #{pr_index}"));
+
+        tea::spawn_pr_comment(
+            self.config.clone(),
+            self.cwd.clone(),
+            pr_index,
+            body,
+            self.bg_tx.clone(),
+        );
+    }
+
+    fn apply_pr_comment(&mut self, result: PrCommentResult) {
+        match result {
+            PrCommentResult::Succeeded {
+                pr_index,
+                command,
+                stdout,
+                stderr,
+            } => {
+                self.log(format!("comment on PR #{pr_index} succeeded"));
+                self.log_command_capture(
+                    &format!("tea comment #{pr_index}"),
+                    &command,
+                    &stdout,
+                    &stderr,
+                );
+                self.pull_requests.close_comment_modal();
+            }
+            PrCommentResult::Failed {
+                pr_index,
+                command,
+                message,
+                stdout,
+                stderr,
+            } => {
+                self.log(format!("comment on PR #{pr_index} failed: {message}"));
+                self.log_command_capture(
+                    &format!("tea comment #{pr_index}"),
+                    &command,
+                    &stdout,
+                    &stderr,
+                );
+                self.pull_requests.comment_phase = PrCommentPhase::Failed;
+                self.pull_requests.comment_error = Some(message);
+            }
+        }
     }
 
     fn generate_pr(&mut self) {
@@ -1789,5 +2020,219 @@ mod tests {
 
         assert_eq!(app.generate.selected_revset, 1);
         assert_eq!(app.generate.preview_scroll.offset, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // PR comment modal tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn c_key_opens_comment_modal_when_pr_is_selected() {
+        let mut app = test_app();
+        app.screen = Screen::PullRequests;
+        app.pull_requests.items = vec![sample_pull_request(1, "First")];
+        app.pull_requests.selected_item = 0;
+
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty()));
+        assert_eq!(action, Action::OpenCommentModal);
+
+        app.update(action);
+        assert_eq!(app.pull_requests.comment_phase, PrCommentPhase::Editing);
+    }
+
+    #[test]
+    fn c_key_does_not_open_comment_modal_when_no_pr_selected() {
+        let mut app = test_app();
+        app.screen = Screen::PullRequests;
+        // No items — visible list is empty.
+
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty()));
+        assert_eq!(action, Action::Tick);
+        assert_eq!(app.pull_requests.comment_phase, PrCommentPhase::Idle);
+    }
+
+    #[test]
+    fn comment_modal_captures_global_keys_in_editing_phase() {
+        let mut app = test_app();
+        app.screen = Screen::PullRequests;
+        app.pull_requests.items = vec![sample_pull_request(5, "PR Five")];
+        app.pull_requests.comment_phase = PrCommentPhase::Editing;
+
+        // 'q' should NOT quit — it should insert text.
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()));
+        assert_eq!(
+            action,
+            Action::EditKey(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()))
+        );
+
+        // 'j' should NOT navigate — it should insert text.
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()));
+        assert_eq!(
+            action,
+            Action::EditKey(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()))
+        );
+
+        // 'g' should NOT generate — it should insert text.
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()));
+        assert_eq!(
+            action,
+            Action::EditKey(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()))
+        );
+
+        // 'r' should NOT refresh — it should insert text.
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()));
+        assert_eq!(
+            action,
+            Action::EditKey(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()))
+        );
+
+        // 'c' should NOT open another modal — it should insert text.
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty()));
+        assert_eq!(
+            action,
+            Action::EditKey(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty()))
+        );
+    }
+
+    #[test]
+    fn comment_modal_enter_submits_esc_cancels() {
+        let mut app = test_app();
+        app.screen = Screen::PullRequests;
+        app.pull_requests.comment_phase = PrCommentPhase::Editing;
+
+        let enter_action = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert_eq!(enter_action, Action::SubmitComment);
+
+        let esc_action = app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert_eq!(esc_action, Action::CancelComment);
+    }
+
+    #[test]
+    fn empty_comment_does_not_spawn_command_and_shows_error() {
+        let mut app = test_app();
+        app.screen = Screen::PullRequests;
+        app.pull_requests.items = vec![sample_pull_request(3, "Some PR")];
+        app.pull_requests.comment_phase = PrCommentPhase::Editing;
+        // Buffer is empty by default.
+
+        app.submit_comment();
+
+        // Should stay in Editing with an error, not move to Submitting.
+        assert_eq!(app.pull_requests.comment_phase, PrCommentPhase::Editing);
+        assert!(app.pull_requests.comment_error.is_some());
+        assert!(
+            app.pull_requests
+                .comment_error
+                .as_deref()
+                .unwrap()
+                .to_lowercase()
+                .contains("empty")
+        );
+    }
+
+    #[test]
+    fn cancel_comment_clears_buffer_and_returns_to_idle() {
+        let mut app = test_app();
+        app.screen = Screen::PullRequests;
+        app.pull_requests.comment_phase = PrCommentPhase::Editing;
+        app.pull_requests.comment_buffer = "partial text".into();
+        app.pull_requests.comment_cursor = 12;
+
+        app.update(Action::CancelComment);
+
+        assert_eq!(app.pull_requests.comment_phase, PrCommentPhase::Idle);
+        assert!(app.pull_requests.comment_buffer.is_empty());
+        assert_eq!(app.pull_requests.comment_cursor, 0);
+    }
+
+    #[test]
+    fn failed_comment_keeps_buffer_for_retry() {
+        let mut app = test_app();
+        app.screen = Screen::PullRequests;
+        app.pull_requests.comment_phase = PrCommentPhase::Submitting;
+        app.pull_requests.comment_buffer = "my comment text".into();
+
+        app.apply_pr_comment(crate::event::PrCommentResult::Failed {
+            pr_index: 1,
+            command: "tea comment 1 ...".into(),
+            message: "connection refused".into(),
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+
+        assert_eq!(app.pull_requests.comment_phase, PrCommentPhase::Failed);
+        // Buffer must be preserved for retry.
+        assert_eq!(app.pull_requests.comment_buffer, "my comment text");
+        assert!(app.pull_requests.comment_error.is_some());
+    }
+
+    #[test]
+    fn successful_comment_clears_buffer_and_closes_modal() {
+        let mut app = test_app();
+        app.screen = Screen::PullRequests;
+        app.pull_requests.comment_phase = PrCommentPhase::Submitting;
+        app.pull_requests.comment_buffer = "LGTM".into();
+
+        app.apply_pr_comment(crate::event::PrCommentResult::Succeeded {
+            pr_index: 2,
+            command: "tea comment 2 LGTM".into(),
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+
+        assert_eq!(app.pull_requests.comment_phase, PrCommentPhase::Idle);
+        assert!(app.pull_requests.comment_buffer.is_empty());
+        assert!(app.pull_requests.comment_error.is_none());
+    }
+
+    #[test]
+    fn generate_pr_c_confirm_behavior_not_regressed() {
+        // DraftReady phase: 'c' maps to ConfirmExecution, not OpenCommentModal.
+        let mut app = test_app();
+        app.screen = Screen::Generate;
+        app.generate.phase = GeneratePhase::DraftReady;
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty())),
+            Action::ConfirmExecution
+        );
+
+        // Failed phase: 'c' maps to ConfirmExecution.
+        app.generate.phase = GeneratePhase::Failed;
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty())),
+            Action::ConfirmExecution
+        );
+    }
+
+    #[test]
+    fn comment_buffer_editing_inserts_and_moves_cursor() {
+        let mut state = PullRequestState::default();
+        state.comment_phase = PrCommentPhase::Editing;
+
+        state.comment_input_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
+        state.comment_input_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::empty()));
+        state.comment_input_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty()));
+
+        assert_eq!(state.comment_buffer, "abc");
+        assert_eq!(state.comment_cursor, 3);
+
+        state.comment_input_key(KeyEvent::new(KeyCode::Left, KeyModifiers::empty()));
+        assert_eq!(state.comment_cursor, 2);
+
+        state.comment_input_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
+        assert_eq!(state.comment_buffer, "ac");
+        assert_eq!(state.comment_cursor, 1);
+
+        state.comment_input_key(KeyEvent::new(KeyCode::Home, KeyModifiers::empty()));
+        assert_eq!(state.comment_cursor, 0);
+
+        // Delete at cursor 0 removes 'a'.
+        state.comment_input_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()));
+        assert_eq!(state.comment_buffer, "c");
+        assert_eq!(state.comment_cursor, 0);
+
+        state.comment_input_key(KeyEvent::new(KeyCode::End, KeyModifiers::empty()));
+        assert_eq!(state.comment_cursor, 1);
     }
 }

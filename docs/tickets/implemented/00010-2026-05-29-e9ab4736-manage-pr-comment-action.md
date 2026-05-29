@@ -2,7 +2,8 @@
 id: 00010-2026-05-29-e9ab4736-manage-pr-comment-action
 created_at: 2026-05-29T17:16:26+02:00
 created_by_model: gpt-5.5/medium
-state: open
+state: implemented
+state_updated_at: 2026-05-29T21:35:51+02:00
 ---
 # Manage PR Comment Action
 
@@ -90,3 +91,60 @@ For this app, the command must be constructed as argv, with the comment body sup
 - `tea comment` accepts both issue and PR indexes. The app should present this only from the PR viewer against the selected PR index.
 - Comment submission is mutating. Keep the action explicit, user-typed, and visible; do not submit on mere text entry.
 - Reusing global `InputMode::Editing` can regress Generate PR unless PR edit targets are handled explicitly.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: claude-sonnet-4-6
+- completed_at: 2026-05-29T21:35:51+02:00
+- state: implemented
+
+## What was completed
+
+Implemented the Manage PR comment flow as specified in ticket 00010.
+
+### Changes
+
+**src/tea.rs**
+- Added `TeaClient::pr_comment_command` that builds `tea comment <index> <body>` as an argv array
+- Added `spawn_pr_comment` async helper that runs the command and sends `PrCommentResult` via the background channel
+- Added unit test `builds_pr_comment_command_argv`
+
+**src/event.rs**
+- Added `PrCommentResult` enum with `Succeeded` and `Failed` variants
+- Added `BackgroundEvent::PrComment(PrCommentResult)` variant
+
+**src/action.rs**
+- Added `OpenCommentModal`, `SubmitComment`, and `CancelComment` action variants
+
+**src/app.rs**
+- Added `PrCommentPhase` enum (Idle/Editing/Submitting/Failed)
+- Added comment state fields to `PullRequestState`: `comment_phase`, `comment_buffer`, `comment_cursor`, `comment_error`
+- Added editing methods: `open_comment_modal`, `close_comment_modal`, `comment_input_key` (handles Char/Backspace/Delete/Left/Right/Home/End)
+- In `handle_key`: comment modal captures all keys when phase is Editing or Failed (global keys like q/j/k/g/r/c are blocked)
+- Added `handle_comment_modal_key` routing Enterâ†’SubmitComment, Escâ†’CancelComment
+- In `apply_edit_key`: routes EditKey to comment buffer when modal is active
+- Added `open_comment_modal`, `cancel_comment`, `submit_comment`, `apply_pr_comment` methods
+- `submit_comment` validates non-empty body before spawning command
+- Failed submissions keep the buffer; successful submissions clear and close the modal
+- `back()` closes comment modal (except while Submitting)
+- Added 10 focused unit tests covering: key blocking, empty-body validation, failed-keeps-buffer, success-clears, cursor editing, Generate PR `c` regression check
+
+**src/ui.rs**
+- Added `render_pr_comment_modal` that shows a centered modal over the PR screen
+- Modal displays PR title, single-line input with block-cursor rendering, status/error, and key hints
+- `render_pull_request_work` shows compact submitting/failed state beneath selected PR info
+- Help bar updated: shows `c comment` hint when PR is selected; comment editing and submitting hints for modal phases
+
+### Deviations from plan
+None significant. The comment input is manual (not ratatui-textarea) since the ticket calls for a "first version" single-line input with basic editing keys.
+
+### Verification
+- `just test` passes: 192 tests (10 new)
+- Live comment submission was not run (no configured Gitea repo available in this environment)
+
+### Residual risks
+- `tea comment` accepts both issue and PR indexes. The app only exposes this from the PR viewer.
+- Comment submission is mutating and explicit; no accidental submission on text entry.

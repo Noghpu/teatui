@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::colors;
 
-use crate::app::{App, JobRecord, Screen};
+use crate::app::{App, JobRecord, PrCommentPhase, Screen};
 use crate::generate::{
     ExecutionPlan, FieldId, Focus, GeneratePhase, GenerateState, InputMode, PickerOptionView,
     PromptView, RevsetSummary, StaleCheckResult,
@@ -49,6 +49,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     // Render picker modal last so it overlays all other panes.
     render_picker_modal(frame, app, frame.area());
+
+    // Render PR comment modal on top of everything when active.
+    render_pr_comment_modal(frame, app, frame.area());
 }
 
 fn render_landing_hero(frame: &mut Frame, app: &App, area: Rect) {
@@ -870,6 +873,23 @@ fn render_pull_request_work<'a>(app: &'a App) -> Vec<Line<'a>> {
                     Line::from(format!("Labels: {}", pr.labels.join(", "))).fg(colors::MUTED),
                 );
             }
+            match state.comment_phase {
+                PrCommentPhase::Submitting => {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from("Submitting comment...").fg(colors::ACCENT));
+                }
+                PrCommentPhase::Failed => {
+                    lines.push(Line::from(""));
+                    lines.push(
+                        Line::from(format!(
+                            "Comment failed: {}",
+                            state.comment_error.as_deref().unwrap_or("unknown error")
+                        ))
+                        .fg(colors::BAD),
+                    );
+                }
+                _ => {}
+            }
         }
         None if state.load_status == crate::app::PullRequestLoadStatus::Loading => {
             lines.push(Line::from(""));
@@ -980,6 +1000,95 @@ fn render_pull_request_preview(app: &App) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+fn render_pr_comment_modal(frame: &mut Frame, app: &App, frame_area: Rect) {
+    let state = app.pull_requests();
+    if !matches!(
+        state.comment_phase,
+        PrCommentPhase::Editing | PrCommentPhase::Submitting | PrCommentPhase::Failed
+    ) {
+        return;
+    }
+
+    let pr_title = state
+        .selected_item()
+        .map(|pr| format!("#{} {}", pr.index, pr.title))
+        .unwrap_or_else(|| "(no PR selected)".into());
+
+    let modal_width = (70u16).min(frame_area.width.saturating_sub(8)).max(30);
+    // Height: title line + blank + PR name + blank + input label + input line +
+    //         blank + status/error line + blank + hint line + 2 border rows = 12
+    let modal_height = 12u16.min(frame_area.height.saturating_sub(4).max(6));
+    let modal_rect = centered_rect(modal_width, modal_height, frame_area);
+
+    frame.render_widget(Clear, modal_rect);
+
+    let phase_label = match state.comment_phase {
+        PrCommentPhase::Submitting => "SUBMITTING",
+        PrCommentPhase::Failed => "FAILED — edit and retry",
+        _ => "Add Comment",
+    };
+
+    let title = Line::from(phase_label.bold().fg(colors::ACCENT));
+    let block = themed_block(title, true);
+    let inner = block.inner(modal_rect);
+    frame.render_widget(block, modal_rect);
+
+    let cursor_pos = state.comment_cursor;
+    let buf = &state.comment_buffer;
+
+    // Build a visual representation of the input with a cursor marker.
+    let before_cursor = &buf[..cursor_pos];
+    let after_cursor = &buf[cursor_pos..];
+    let cursor_char = after_cursor.chars().next().unwrap_or(' ');
+    let rest_after_cursor = after_cursor
+        .char_indices()
+        .nth(1)
+        .map(|(i, _)| &after_cursor[i..])
+        .unwrap_or("");
+
+    let input_line = Line::from(vec![
+        Span::raw(before_cursor.to_string()),
+        Span::styled(
+            cursor_char.to_string(),
+            Style::new().fg(colors::BASE).bg(colors::ACCENT),
+        ),
+        Span::raw(rest_after_cursor.to_string()),
+    ]);
+
+    let pr_name_line = truncate_chars(&pr_title, inner.width as usize);
+
+    let mut content_lines: Vec<Line<'static>> = vec![
+        Line::from(pr_name_line.fg(colors::MUTED)),
+        Line::from(""),
+        Line::from("Comment:".fg(colors::TEXT)),
+        input_line,
+        Line::from(""),
+    ];
+
+    if let Some(error) = state.comment_error.as_deref() {
+        content_lines.push(Line::from(error.to_string()).fg(colors::BAD));
+    } else if state.comment_phase == PrCommentPhase::Submitting {
+        content_lines.push(Line::from("Submitting...").fg(colors::ACCENT));
+    } else {
+        content_lines.push(Line::from(""));
+    }
+
+    content_lines.push(Line::from(""));
+    let hint = if state.comment_phase == PrCommentPhase::Submitting {
+        Line::from("Please wait...".fg(colors::MUTED))
+    } else {
+        Line::from(vec![
+            " Enter ".bold().fg(colors::ACCENT),
+            "submit ".fg(colors::MUTED),
+            " Esc ".bold().fg(colors::ACCENT),
+            "cancel".fg(colors::MUTED),
+        ])
+    };
+    content_lines.push(hint);
+
+    frame.render_widget(Paragraph::new(content_lines), inner);
 }
 
 #[allow(clippy::type_complexity)]
@@ -1314,6 +1423,24 @@ fn render_help(frame: &mut Frame, app: &App, area: Rect) {
             " Esc ".bold().fg(colors::ACCENT),
             "back ".fg(colors::MUTED),
         ]),
+        Screen::PullRequests
+            if matches!(
+                app.pull_requests().comment_phase,
+                PrCommentPhase::Editing | PrCommentPhase::Failed
+            ) =>
+        {
+            Line::from(vec![
+                " cursor ".bold().fg(colors::ACCENT),
+                "editing comment ".fg(colors::MUTED),
+                " Enter ".bold().fg(colors::ACCENT),
+                "submit ".fg(colors::MUTED),
+                " Esc ".bold().fg(colors::ACCENT),
+                "cancel ".fg(colors::MUTED),
+            ])
+        }
+        Screen::PullRequests if app.pull_requests().comment_phase == PrCommentPhase::Submitting => {
+            Line::from(vec![" submitting comment... ".fg(colors::ACCENT)])
+        }
         Screen::PullRequests if app.input_mode() == InputMode::Editing => Line::from(vec![
             " cursor ".bold().fg(colors::ACCENT),
             "editing filter ".fg(colors::MUTED),
@@ -1321,6 +1448,20 @@ fn render_help(frame: &mut Frame, app: &App, area: Rect) {
             "save ".fg(colors::MUTED),
             " Esc ".bold().fg(colors::ACCENT),
             "cancel ".fg(colors::MUTED),
+        ]),
+        Screen::PullRequests if app.pull_requests().selected_item().is_some() => Line::from(vec![
+            " j/k ".bold().fg(colors::ACCENT),
+            "move ".fg(colors::MUTED),
+            " h/l/tab ".bold().fg(colors::ACCENT),
+            "panes ".fg(colors::MUTED),
+            " c ".bold().fg(colors::ACCENT),
+            "comment ".fg(colors::MUTED),
+            " Enter/i ".bold().fg(colors::ACCENT),
+            "edit filter ".fg(colors::MUTED),
+            " r ".bold().fg(colors::ACCENT),
+            "refresh ".fg(colors::MUTED),
+            " Esc ".bold().fg(colors::ACCENT),
+            "back ".fg(colors::MUTED),
         ]),
         Screen::PullRequests => Line::from(vec![
             " j/k ".bold().fg(colors::ACCENT),

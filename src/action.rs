@@ -14,6 +14,9 @@ pub enum Action {
     ExecuteConfirmed,
     TogglePromptView,
     Refresh,
+    OpenCommentModal,
+    SubmitComment,
+    CancelComment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
