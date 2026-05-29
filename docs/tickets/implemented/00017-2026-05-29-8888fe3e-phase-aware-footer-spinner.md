@@ -2,7 +2,8 @@
 id: 00017-2026-05-29-8888fe3e-phase-aware-footer-spinner
 created_at: 2026-05-29T22:39:05+02:00
 created_by_model: claude-opus-4-7/high
-state: open
+state: implemented
+state_updated_at: 2026-05-29T23:23:58+02:00
 ---
 # Phase-aware footer spinner during async work
 
@@ -75,3 +76,42 @@ Today the footer hint line stays the same during long-running phases like contex
 - If the existing tick rate is too slow, the spinner will look choppy; that is acceptable as long as it visibly animates. Avoid adding a new thread just to drive the spinner.
 - Braille glyphs render inconsistently on some Windows terminals; pick a glyph set that renders in the default Windows Terminal font (Cascadia Mono is fine for Braille).
 - Test assertions on glyph chars are brittle if the frame set changes; assert "contains some spinner char" rather than a specific glyph.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: claude-sonnet-4-6
+- completed_at: 2026-05-29T23:23:58+02:00
+- state: implemented
+
+## What was completed
+
+Added a Braille spinner-led status line in the Generate-screen footer for the four async phases: `CollectingContext`, `Generating`, `CheckingFreshness`, and `Executing`.
+
+### Functions added in `src/ui.rs`
+- `spinner_frame(now: Instant) -> char`: cycles through 10 Braille frames at ~10 fps using elapsed milliseconds.
+- `generate_async_status_line(phase: GeneratePhase, now: Instant) -> Option<Line<'static>>`: returns a spinner + phase-specific status line for async phases, `None` for steady phases.
+
+### Match arm changes in `render_help`
+- Replaced the separate `CheckingFreshness` and `Executing` arms with a single `matches!` guard arm covering all four async phases (`CollectingContext`, `Generating`, `CheckingFreshness`, `Executing`), delegating to `generate_async_status_line`.
+- The `Confirming` (input mode `Confirm`) and `Editing` arms remain dedicated and unchanged.
+- Cancel hint (`Esc cancel`) is included for `CollectingContext`, `Generating`, and `CheckingFreshness`, and omitted for `Executing` (non-cancellable).
+
+## Deviations from plan
+None. Implementation follows the plan exactly.
+
+## Verification
+- `just fmt` â€” pass
+- `just check` â€” pass
+- `just clippy` â€” pass
+- `just test` â€” 218 tests pass (6 new tests for the new functions)
+- Manual smoke was not run (no runtime available), but all automated checks pass.
+
+## Important files changed
+- `src/ui.rs`: added `use std::time::Instant;`, two new helper functions, updated match arm, added 6 unit tests.
+
+## Residual risks / follow-up
+- Tick rate drives repaints; if the tick interval is slower than 100ms the spinner may appear to skip frames but will still animate.
+- Braille glyphs render correctly in Cascadia Mono (Windows Terminal default); other terminals were not tested.
