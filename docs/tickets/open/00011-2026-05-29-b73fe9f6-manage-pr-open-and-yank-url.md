@@ -1,0 +1,98 @@
+---
+id: 00011-2026-05-29-b73fe9f6-manage-pr-open-and-yank-url
+created_at: 2026-05-29T21:55:31+02:00
+created_by_model: claude-opus-4-7/high
+state: open
+---
+# Manage PRs Open-In-Browser and Yank-URL Shortcuts
+
+## Goal
+Add two read-only shortcuts to the Manage PRs viewer: `o` opens the selected PR's URL in the system browser, and `y` copies that URL to the system clipboard. Both surface a short confirmation in the status bar and log so the user has visible feedback.
+
+## Context
+The Manage PRs screen (`Screen::PullRequests`) already exposes a list of `PullRequestSummary` records with a `url` field populated by the `tea` JSON parsers (`src/pull_requests.rs`). Selection state and a comment modal flow already exist in `PullRequestState` (`src/app.rs`). Help-bar text is rendered per-phase in `src/ui.rs`.
+
+The keys are vim-flavored: `y` mirrors yank, `o` is a single-letter "open". Both must be inert outside the Manage PRs normal mode so they cannot conflict with form editing, filter editing, or the comment modal.
+
+The repo has no clipboard or browser-launcher dependency yet. Add `arboard` (clipboard) and `opener` (browser launch) as new crate dependencies. Both are cross-platform and widely used.
+
+## Non-Goals
+- Do not add a `g`-prefix sequence (`gx` etc.) or any multi-key vim chord.
+- Do not add open/copy actions for any field other than the PR URL (no copying titles, branches, bodies, etc.).
+- Do not add a confirmation modal â€” feedback is a single status-bar/log line.
+- Do not change the Generate screen or the comment modal key surface.
+- Do not add tests that actually open a browser or touch the real clipboard.
+
+## Design Decisions
+- Add two new `Action` variants: `OpenPrInBrowser` and `CopyPrUrl`. Both are dispatched only when `screen == Screen::PullRequests`, `input_mode == InputMode::Normal`, the comment modal is `Idle`, and a PR is currently selected with a non-empty `url`.
+- Keybindings live in `App::handle_key` next to the existing `c`/`r`/`g` PR-screen shortcuts. The matches use `KeyCode::Char('o')` and `KeyCode::Char('y')` with `KeyModifiers::empty()`. Uppercase `O`/`Y` are not bound.
+- Browser launch goes through a thin wrapper around `opener::open(&url)`. Add a free function `pub fn open_in_browser(url: &str) -> Result<(), String>` in a new small module `src/external.rs`.
+- Clipboard write uses `arboard::Clipboard::new()?.set_text(url.to_string())`. Wrap in `pub fn copy_to_clipboard(text: &str) -> Result<(), String>` in the same `src/external.rs` module. Both wrappers map underlying errors to short user-facing strings.
+- Both actions run synchronously on the UI thread. `opener::open` returns immediately after spawning the platform handler; `arboard` writes are also effectively instant. No job runner integration is needed.
+- Success path: log `opened <url> in browser` / `copied <url> to clipboard` and set a transient status-bar message field on `App`. If a transient status field does not yet exist, add `App::status_message: Option<String>` (cleared on the next key press, navigation, or background event that updates UI state â€” keep the clearing rule simple). Inspect the existing status-bar implementation in `src/ui.rs`; if it already supports an ephemeral message, reuse that path instead.
+- Failure path: log the error and surface it in the same status-bar slot prefixed with `error:`.
+- Help-bar additions: when on the Manage PRs screen with a PR selected and no modal open, include `o open` and `y yank url` hints alongside the existing `c comment` hint.
+
+## Implementation Plan
+1. Add `arboard` and `opener` to `[dependencies]` in `Cargo.toml`. Run `cargo check` to confirm they build on Windows.
+2. Create `src/external.rs` exposing `open_in_browser(url: &str) -> Result<(), String>` and `copy_to_clipboard(text: &str) -> Result<(), String>`. Register the module in `src/lib.rs`.
+3. Add `Action::OpenPrInBrowser` and `Action::CopyPrUrl` variants in `src/action.rs`.
+4. In `src/app.rs::handle_key`, after the existing PR-screen `c` shortcut block, add `o` and `y` shortcuts gated by the same selection + idle-modal conditions. Return the new actions.
+5. In `App::update`, route the new actions to small methods `open_selected_pr_in_browser` and `copy_selected_pr_url`. Each fetches the selected PR's URL, calls the `external` helper, and writes a status-bar/log message.
+6. Inspect the current status-bar render path in `src/ui.rs`. If an ephemeral message slot exists, reuse it; otherwise add `App::status_message: Option<String>` and render it in the status bar. Clear on the next non-tick key action.
+7. Extend the Manage PRs help-bar text to include `o open` and `y yank url` when a PR is selected and the comment modal is `Idle`.
+8. Unit tests in `src/app.rs`:
+   - `o_in_pr_view_emits_open_action_when_pr_selected`
+   - `y_in_pr_view_emits_copy_action_when_pr_selected`
+   - `o_and_y_are_inert_with_no_selection`
+   - `o_and_y_are_inert_while_comment_modal_open`
+   - `o_and_y_are_inert_in_filter_edit_mode`
+   - `open_action_with_empty_url_logs_error_and_does_not_call_helper` (use the action handler, not the helper itself â€” verify the URL-empty guard via observable state like status_message/log)
+   Do not call `open_in_browser` or `copy_to_clipboard` directly in tests; gate them behind action dispatch and assert on side effects (log entries / status message) without actually touching the OS.
+9. Run `just verify`.
+
+<!-- ticket-section:agent-handoff v1 -->
+## Agent Handoff
+```json
+{
+  "read_next": ["AGENTS.md", "docs/design.md", "src/app.rs", "src/action.rs", "src/ui.rs", "src/pull_requests.rs", "Cargo.toml"],
+  "likely_files": ["Cargo.toml", "src/lib.rs", "src/external.rs", "src/action.rs", "src/app.rs", "src/ui.rs"],
+  "verification_commands": ["just verify"],
+  "review_focus": [
+    "o and y are inert outside Manage PRs normal mode (no leakage into filter edit, comment modal, Generate screen, or Landing).",
+    "Browser launch and clipboard write go through the external module wrappers; tests do not touch the real OS clipboard or spawn a browser.",
+    "Status-bar/log feedback is visible on both success and failure paths.",
+    "Empty PR URL is handled defensively without panic or shelling out an empty string.",
+    "Help-bar hints appear only when a PR is selected and the comment modal is Idle."
+  ],
+  "jj_description_prefix": "feat"
+}
+```
+
+## Acceptance Criteria
+- Pressing `o` on the Manage PRs screen with a PR selected opens that PR's URL in the system browser and logs/surfaces a confirmation message.
+- Pressing `y` on the Manage PRs screen with a PR selected copies that PR's URL to the system clipboard and logs/surfaces a confirmation message.
+- Both keys do nothing (and produce no log spam) when no PR is selected, when the comment modal is open, when the filter is being edited, or on any non-Manage-PRs screen.
+- Failures from `opener` or `arboard` are caught and surfaced as a single status-bar/log error line, not propagated as panics.
+- The Manage PRs help bar advertises `o` and `y` only when a PR is selected and no modal is open.
+- `just verify` passes (fmt, check, clippy -D warnings, tests).
+
+## Verification Plan
+- `just verify`.
+- Manual smoke on Windows: select a PR in Manage PRs, press `o` (browser opens to the URL), press `y` (paste into another app yields the URL). Confirm the status bar shows the confirmation line for both.
+- Manual smoke with no PR selected: confirm `o` and `y` are no-ops.
+- Manual smoke while the comment modal is open: confirm `o` and `y` insert into the comment buffer instead of triggering the new actions.
+
+## Files Likely Touched
+- `Cargo.toml`
+- `src/lib.rs`
+- `src/external.rs` (new)
+- `src/action.rs`
+- `src/app.rs`
+- `src/ui.rs`
+
+## Risks
+- `arboard` on Linux requires an X11/Wayland display; the dev machine is Windows so this is acceptable, but document the caveat in the wrapper if it surfaces in CI.
+- `opener::open` on Windows uses `ShellExecute`; URLs containing characters that need escaping should already be safe because `opener` does its own quoting. Avoid hand-building a `cmd /c start` string.
+- Adding two new crates increases compile time; both are small but worth noting.
+- If a status-bar ephemeral message slot does not yet exist, adding one touches `App` state shared with many flows â€” keep the addition minimal and clear the message on the next key event to avoid stale text bleeding across screens.
