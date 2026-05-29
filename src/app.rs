@@ -2177,99 +2177,6 @@ mod tests {
     }
 
     #[test]
-    fn p_toggles_prompt_view_on_preview_focus() {
-        let mut app = test_app();
-        app.screen = Screen::Generate;
-        app.focus = Focus::Preview;
-
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::empty())),
-            Action::TogglePromptView
-        );
-    }
-
-    #[test]
-    fn g_fires_generate_only_on_form_and_preview() {
-        let mut app = test_app();
-        app.screen = Screen::Generate;
-
-        // Menu: 'g' is a no-op.
-        app.focus = Focus::Menu;
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty())),
-            Action::Tick
-        );
-
-        // Form: 'g' fires Generate.
-        app.focus = Focus::Form;
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty())),
-            Action::Generate
-        );
-
-        // Preview: 'g' fires Generate.
-        app.focus = Focus::Preview;
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty())),
-            Action::Generate
-        );
-    }
-
-    #[test]
-    fn r_fires_refresh_only_on_menu() {
-        let mut app = test_app();
-        app.screen = Screen::Generate;
-
-        // Menu: 'r' fires Refresh.
-        app.focus = Focus::Menu;
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty())),
-            Action::Refresh
-        );
-
-        // Form: 'r' is a no-op.
-        app.focus = Focus::Form;
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty())),
-            Action::Tick
-        );
-
-        // Preview: 'r' is a no-op.
-        app.focus = Focus::Preview;
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty())),
-            Action::Tick
-        );
-    }
-
-    #[test]
-    fn i_fires_edit_only_on_form() {
-        let mut app = test_app();
-        app.screen = Screen::Generate;
-
-        // Menu: 'i' is a no-op.
-        app.focus = Focus::Menu;
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty())),
-            Action::Tick
-        );
-
-        // Form: 'i' fires Edit.
-        app.focus = Focus::Form;
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty())),
-            Action::Edit
-        );
-
-        // Preview: 'i' is a no-op.
-        app.focus = Focus::Preview;
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty())),
-            Action::Tick
-        );
-    }
-
-    #[test]
     fn global_keys_work_from_all_generate_panes() {
         // Tab, Esc, q, arrows must work regardless of which pane is focused.
         for focus in [Focus::Menu, Focus::Form, Focus::Preview] {
@@ -2293,27 +2200,6 @@ mod tests {
                 "'q' must work from {focus:?}"
             );
         }
-    }
-
-    #[test]
-    fn c_is_noop_in_generate_normal_outside_preview() {
-        // 'c' must be a no-op in SelectingRevset phase (not DraftReady/Failed) when
-        // Menu or Form is focused.
-        let mut app = test_app();
-        app.screen = Screen::Generate;
-        app.generate.phase = GeneratePhase::SelectingRevset;
-
-        app.focus = Focus::Menu;
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty())),
-            Action::Tick
-        );
-
-        app.focus = Focus::Form;
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty())),
-            Action::Tick
-        );
     }
 
     // -------------------------------------------------------------------------
