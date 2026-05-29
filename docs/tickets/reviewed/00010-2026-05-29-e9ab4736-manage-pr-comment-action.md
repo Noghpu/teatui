@@ -2,8 +2,8 @@
 id: 00010-2026-05-29-e9ab4736-manage-pr-comment-action
 created_at: 2026-05-29T17:16:26+02:00
 created_by_model: gpt-5.5/medium
-state: implemented
-state_updated_at: 2026-05-29T21:35:51+02:00
+state: reviewed
+state_updated_at: 2026-05-29T21:41:00+02:00
 ---
 # Manage PR Comment Action
 
@@ -148,3 +148,42 @@ None significant. The comment input is manual (not ratatui-textarea) since the t
 ### Residual risks
 - `tea comment` accepts both issue and PR indexes. The app only exposes this from the PR viewer.
 - Comment submission is mutating and explicit; no accidental submission on text entry.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: claude-opus-4-7
+- reviewed_at: 2026-05-29T21:41:00+02:00
+- state: reviewed
+
+## Verdict
+Acceptable with fixes. Implementation meets the acceptance criteria; review tightened modal key capture during submission and resolved clippy lints the implementer's `just test` run did not catch.
+
+## What works (facts)
+- `TeaClient::pr_comment_command` builds `["comment", "<index>", "<body>"]` as argv with no shell construction; `spawn_pr_comment` runs it via `capture` and emits a typed `PrCommentResult` on the background channel (`src/tea.rs`).
+- `c` opens the modal only when `Screen::PullRequests`, a PR is selected, and `comment_phase == Idle`. The Generate `c â†’ ConfirmExecution` mapping is preserved because the Generate phase check returns earlier in `handle_key` (`generate_pr_c_confirm_behavior_not_regressed` test).
+- `submit_comment` trims and rejects empty bodies before spawning, populating `comment_error`.
+- `PrCommentResult::Failed` leaves the buffer untouched and flips phase to `Failed`; `PrCommentResult::Succeeded` calls `close_comment_modal` which clears buffer/cursor/error and returns to `Idle`.
+- `render_pr_comment_modal` is centered over the PR screen with a block-cursor input, status/error line, and Enter/Esc hint.
+- Help bar swaps between editing/submitting/normal variants per phase.
+- No issue-comment or review/merge plumbing added.
+
+## Issues fixed during review
+- `handle_key` only routed keys to the modal during `Editing | Failed`. While `Submitting`, all global keys leaked: pressing `Esc` reached `back()`, which is gated against closing the modal during submit and so fell through and dumped the user back to Landing; `q` would quit, `j/k/h/l` would still move the PR list. Fixed by capturing every non-`Idle` phase and short-circuiting all keys during `Submitting` to `Action::Tick`. Added `comment_modal_swallows_keys_while_submitting` test.
+- `cargo clippy --all-targets --all-features -- -D warnings` failed on the implementation:
+  - `collapsible_match` on the `KeyCode::Backspace` and `KeyCode::Delete` arms of `comment_input_key` (the inner `if cursor > 0` / `if cursor < len` blocks). Collapsed into match guards.
+  - `field_reassign_with_default` on the new `comment_buffer_editing_inserts_and_moves_cursor` test. Converted to struct-update syntax.
+  - The implementer ran `just test` per the ticket's verification list and never ran `just verify`, so these were not caught upstream.
+
+## Inferences / residual notes
+- `comment_input_key` walks `char_indices().rev()` and `nth(1)` on each key for cursor movement / boundary lookups. That is O(n) per keystroke; acceptable for short comments and matches the ticket's "first version" scope.
+- `tea comment` accepts both issue and PR indexes. The app only ever wires it from the PR viewer against the currently selected PR, matching the ticket's risk note.
+- Submission relies on `tea` picking up the right login from cwd. No `--login` or repo-spec is passed, which matches the project's existing `tea` invocations.
+- Live submission against a Gitea instance was not exercised â€” flagged here as in the implementation note.
+
+## Verification
+- `cargo fmt --check` clean.
+- `cargo clippy --all-targets --all-features -- -D warnings` clean.
+- `cargo test --all-targets --all-features` â€” 193 lib tests (11 new for this slice) + 4 integration tests pass.

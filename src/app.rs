@@ -310,30 +310,24 @@ impl PullRequestState {
                 self.comment_buffer.insert(self.comment_cursor, ch);
                 self.comment_cursor += ch.len_utf8();
             }
-            KeyCode::Backspace => {
-                if self.comment_cursor > 0 {
-                    // Find the start of the previous char.
-                    let prev = self
-                        .comment_buffer
-                        .char_indices()
-                        .rev()
-                        .find(|(i, _)| *i < self.comment_cursor)
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    self.comment_buffer.drain(prev..self.comment_cursor);
-                    self.comment_cursor = prev;
-                }
+            KeyCode::Backspace if self.comment_cursor > 0 => {
+                let prev = self
+                    .comment_buffer
+                    .char_indices()
+                    .rev()
+                    .find(|(i, _)| *i < self.comment_cursor)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                self.comment_buffer.drain(prev..self.comment_cursor);
+                self.comment_cursor = prev;
             }
-            KeyCode::Delete => {
-                if self.comment_cursor < self.comment_buffer.len() {
-                    // Find the end of the current char.
-                    let next = self.comment_buffer[self.comment_cursor..]
-                        .char_indices()
-                        .nth(1)
-                        .map(|(i, _)| self.comment_cursor + i)
-                        .unwrap_or(self.comment_buffer.len());
-                    self.comment_buffer.drain(self.comment_cursor..next);
-                }
+            KeyCode::Delete if self.comment_cursor < self.comment_buffer.len() => {
+                let next = self.comment_buffer[self.comment_cursor..]
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, _)| self.comment_cursor + i)
+                    .unwrap_or(self.comment_buffer.len());
+                self.comment_buffer.drain(self.comment_cursor..next);
             }
             KeyCode::Left => {
                 self.comment_cursor = self
@@ -481,12 +475,9 @@ impl App {
     }
 
     fn handle_key(&self, key: KeyEvent) -> Action {
-        // Comment modal input mode: capture all printable/edit keys.
+        // Comment modal input mode: capture all keys, including during submission.
         if self.screen == Screen::PullRequests
-            && matches!(
-                self.pull_requests.comment_phase,
-                PrCommentPhase::Editing | PrCommentPhase::Failed
-            )
+            && self.pull_requests.comment_phase != PrCommentPhase::Idle
         {
             return self.handle_comment_modal_key(key);
         }
@@ -557,6 +548,11 @@ impl App {
     }
 
     fn handle_comment_modal_key(&self, key: KeyEvent) -> Action {
+        // While the submission is in flight, swallow all keys so global
+        // shortcuts (q/Esc/navigation) cannot leak out of the modal.
+        if self.pull_requests.comment_phase == PrCommentPhase::Submitting {
+            return Action::Tick;
+        }
         match key.code {
             KeyCode::Esc => Action::CancelComment,
             KeyCode::Enter => Action::SubmitComment,
@@ -2095,6 +2091,23 @@ mod tests {
     }
 
     #[test]
+    fn comment_modal_swallows_keys_while_submitting() {
+        let mut app = test_app();
+        app.screen = Screen::PullRequests;
+        app.pull_requests.comment_phase = PrCommentPhase::Submitting;
+
+        for key in [
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()),
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()),
+        ] {
+            assert_eq!(app.handle_key(key), Action::Tick);
+        }
+    }
+
+    #[test]
     fn comment_modal_enter_submits_esc_cancels() {
         let mut app = test_app();
         app.screen = Screen::PullRequests;
@@ -2207,8 +2220,10 @@ mod tests {
 
     #[test]
     fn comment_buffer_editing_inserts_and_moves_cursor() {
-        let mut state = PullRequestState::default();
-        state.comment_phase = PrCommentPhase::Editing;
+        let mut state = PullRequestState {
+            comment_phase: PrCommentPhase::Editing,
+            ..PullRequestState::default()
+        };
 
         state.comment_input_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
         state.comment_input_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::empty()));
