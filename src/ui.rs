@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -1392,20 +1394,19 @@ fn render_help(frame: &mut Frame, app: &App, area: Rect) {
             " Esc ".bold().fg(colors::ACCENT),
             "cancel ".fg(colors::MUTED),
         ]),
-        Screen::Generate if app.generate().phase == GeneratePhase::CheckingFreshness => {
-            Line::from(vec![
-                " Esc ".bold().fg(colors::ACCENT),
-                "cancel ".fg(colors::MUTED),
-                " waiting ".fg(colors::MUTED),
-                "verifying repo context ".fg(colors::MUTED),
-            ])
+        Screen::Generate
+            if matches!(
+                app.generate().phase,
+                GeneratePhase::CollectingContext
+                    | GeneratePhase::Generating
+                    | GeneratePhase::CheckingFreshness
+                    | GeneratePhase::Executing
+            ) =>
+        {
+            // Unwrap is safe: generate_async_status_line returns Some for all
+            // four phases matched above.
+            generate_async_status_line(app.generate().phase, Instant::now()).unwrap()
         }
-        Screen::Generate if app.generate().phase == GeneratePhase::Executing => Line::from(vec![
-            " waiting ".fg(colors::MUTED),
-            "execution in progress ".fg(colors::MUTED),
-            " Esc ".bold().fg(colors::ACCENT),
-            "ignored ".fg(colors::MUTED),
-        ]),
         Screen::Generate if app.generate().phase == GeneratePhase::Complete => Line::from(vec![
             " Esc ".bold().fg(colors::ACCENT),
             "back ".fg(colors::MUTED),
@@ -2413,6 +2414,49 @@ fn render_picker_modal(frame: &mut Frame, app: &App, frame_area: Rect) {
 /// Returns the footer hint line for the Generate screen's default (non-editing,
 /// non-confirm, non-terminal-phase) state, varying by focused pane and whether
 /// a generated draft is currently present.
+/// Returns a Braille spinner character for the given instant.
+///
+/// Cycles through 10 frames at approximately 10 fps so the spinner visibly
+/// animates when the existing tick rate drives repaints at ~10 Hz.
+fn spinner_frame(now: Instant) -> char {
+    const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let millis = now.elapsed().as_millis();
+    let idx = (millis / 100) % (FRAMES.len() as u128);
+    FRAMES[idx as usize]
+}
+
+/// Builds the footer status line shown while an async Generate phase is
+/// running.  Returns `None` for non-async phases so callers can fall through
+/// to the default arm.
+fn generate_async_status_line(phase: GeneratePhase, now: Instant) -> Option<Line<'static>> {
+    let spinner = spinner_frame(now).to_string();
+    match phase {
+        GeneratePhase::CollectingContext => Some(Line::from(vec![
+            format!(" {spinner} ").fg(colors::ACCENT),
+            "Collecting context… ".fg(colors::MUTED),
+            " Esc ".bold().fg(colors::ACCENT),
+            "cancel ".fg(colors::MUTED),
+        ])),
+        GeneratePhase::Generating => Some(Line::from(vec![
+            format!(" {spinner} ").fg(colors::ACCENT),
+            "Generating draft… ".fg(colors::MUTED),
+            " Esc ".bold().fg(colors::ACCENT),
+            "cancel ".fg(colors::MUTED),
+        ])),
+        GeneratePhase::CheckingFreshness => Some(Line::from(vec![
+            format!(" {spinner} ").fg(colors::ACCENT),
+            "Verifying repo context… ".fg(colors::MUTED),
+            " Esc ".bold().fg(colors::ACCENT),
+            "cancel ".fg(colors::MUTED),
+        ])),
+        GeneratePhase::Executing => Some(Line::from(vec![
+            format!(" {spinner} ").fg(colors::ACCENT),
+            "Executing plan… ".fg(colors::MUTED),
+        ])),
+        _ => None,
+    }
+}
+
 fn generate_footer_hints(focus: Focus, has_draft: bool) -> Line<'static> {
     match focus {
         Focus::Menu => Line::from(vec![
@@ -2470,12 +2514,13 @@ fn generate_footer_hints(focus: Focus, has_draft: bool) -> Line<'static> {
 mod tests {
     use super::{
         bounded_multiline_field_lines, centered_rect, compact_diff_stat, compute_editor_rect,
-        generate_footer_hints, is_jj_default_description, picker_visible_slice, truncate_chars,
-        wrap_chars, wrapped_content_height,
+        generate_async_status_line, generate_footer_hints, is_jj_default_description,
+        picker_visible_slice, spinner_frame, truncate_chars, wrap_chars, wrapped_content_height,
     };
-    use crate::generate::{Focus, PickerOptionView};
+    use crate::generate::{Focus, GeneratePhase, PickerOptionView};
     use ratatui::layout::Rect;
     use ratatui::text::{Line, Span};
+    use std::time::Instant;
 
     #[test]
     fn jj_default_description_recognises_placeholder() {
@@ -2870,6 +2915,118 @@ mod tests {
                     "Hint 'prompt' must not appear (focus={focus:?}, has_draft={has_draft}): {text:?}"
                 );
             }
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // spinner_frame and generate_async_status_line tests
+    // ---------------------------------------------------------------------------
+
+    const SPINNER_CHARS: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+    #[test]
+    fn spinner_frame_returns_a_braille_char() {
+        let now = Instant::now();
+        let ch = spinner_frame(now);
+        assert!(
+            SPINNER_CHARS.contains(&ch),
+            "spinner_frame returned an unexpected char: {ch:?}"
+        );
+    }
+
+    #[test]
+    fn generate_async_status_line_collecting_context_has_status_and_cancel() {
+        let line = generate_async_status_line(GeneratePhase::CollectingContext, Instant::now())
+            .expect("CollectingContext should return Some");
+        let text = line_text(&line);
+        assert!(
+            text.contains("Collecting context"),
+            "Line must mention 'Collecting context', got: {text:?}"
+        );
+        assert!(
+            text.contains("cancel"),
+            "Line must contain cancel hint, got: {text:?}"
+        );
+        // Must contain a spinner char.
+        assert!(
+            text.chars().any(|c| SPINNER_CHARS.contains(&c)),
+            "Line must contain a spinner char, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn generate_async_status_line_generating_has_status_and_cancel() {
+        let line = generate_async_status_line(GeneratePhase::Generating, Instant::now())
+            .expect("Generating should return Some");
+        let text = line_text(&line);
+        assert!(
+            text.contains("Generating draft"),
+            "Line must mention 'Generating draft', got: {text:?}"
+        );
+        assert!(
+            text.contains("cancel"),
+            "Line must contain cancel hint, got: {text:?}"
+        );
+        assert!(
+            text.chars().any(|c| SPINNER_CHARS.contains(&c)),
+            "Line must contain a spinner char, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn generate_async_status_line_checking_freshness_has_status_and_cancel() {
+        let line = generate_async_status_line(GeneratePhase::CheckingFreshness, Instant::now())
+            .expect("CheckingFreshness should return Some");
+        let text = line_text(&line);
+        assert!(
+            text.contains("Verifying repo context"),
+            "Line must mention 'Verifying repo context', got: {text:?}"
+        );
+        assert!(
+            text.contains("cancel"),
+            "Line must contain cancel hint, got: {text:?}"
+        );
+        assert!(
+            text.chars().any(|c| SPINNER_CHARS.contains(&c)),
+            "Line must contain a spinner char, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn generate_async_status_line_executing_has_status_and_no_cancel() {
+        let line = generate_async_status_line(GeneratePhase::Executing, Instant::now())
+            .expect("Executing should return Some");
+        let text = line_text(&line);
+        assert!(
+            text.contains("Executing plan"),
+            "Line must mention 'Executing plan', got: {text:?}"
+        );
+        assert!(
+            !text.contains("cancel"),
+            "Executing line must NOT contain cancel hint, got: {text:?}"
+        );
+        assert!(
+            text.chars().any(|c| SPINNER_CHARS.contains(&c)),
+            "Line must contain a spinner char, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn generate_async_status_line_non_async_phases_return_none() {
+        let non_async = [
+            GeneratePhase::SelectingRevset,
+            GeneratePhase::EditingForm,
+            GeneratePhase::ContextReady,
+            GeneratePhase::DraftReady,
+            GeneratePhase::Confirming,
+            GeneratePhase::Complete,
+            GeneratePhase::Failed,
+        ];
+        for phase in non_async {
+            assert!(
+                generate_async_status_line(phase, Instant::now()).is_none(),
+                "Non-async phase {phase:?} should return None"
+            );
         }
     }
 }
