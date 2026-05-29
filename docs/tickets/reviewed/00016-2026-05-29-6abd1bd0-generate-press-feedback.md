@@ -2,8 +2,8 @@
 id: 00016-2026-05-29-6abd1bd0-generate-press-feedback
 created_at: 2026-05-29T22:38:43+02:00
 created_by_model: claude-opus-4-7/high
-state: implemented
-state_updated_at: 2026-05-29T23:17:16+02:00
+state: reviewed
+state_updated_at: 2026-05-29T23:20:23+02:00
 ---
 # Inline blocker banner and auto-focus Preview on `g`
 
@@ -125,3 +125,36 @@ Implemented inline blocker banner on the Generate screen and auto-focus-to-Previ
 
 - The banner is not cleared when the user navigates between revsets without pressing Enter (i.e., `sync_head_from_selected_revset` is not wired to `clear_blocker`, only `force_sync_head_from_selected_revset` is). This matches the ticket spec: "Menu pane writes a new revset selection (force-sync from enter-force-syncs-head, if present)". The non-force sync path intentionally does not clear the blocker.
 - Manual smoke test needed: clear head field, press `g`, confirm red banner; fill head, press `g`, confirm focus on Preview.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: claude-opus-4-7
+- reviewed_at: 2026-05-29T23:20:23+02:00
+- state: reviewed
+
+# Review postmortem: 00016 generate press feedback
+
+## Summary
+
+Implementation matches the plan: `GenerateState` gained `last_blocker` plus `set_blocker`/`clear_blocker` helpers wired into editing, phase transitions, and the force-sync revset path; `generate_pr` records the blocker text on the failure branch and moves focus to `Preview` on both success branches before spawning async work; `ui.rs::render_generate_fields` renders a one-line red banner above the field list. Two new tests cover both branches and pass.
+
+## Verification
+
+`just verify` passes locally (fmt, check, clippy, 212 unit tests + 4 integration tests).
+
+## Reviewer fixes
+
+- `src/ui.rs`: replaced the byte-index banner truncation with `truncate_chars`, the existing char-safe helper used elsewhere in this file. The original `&blocker[..max_width.saturating_sub(3)]` indexes into a `String` by byte offset, which panics if the cut falls inside a multi-byte UTF-8 codepoint. Blocker text is sourced from field validation errors (currently ASCII), but the banner is rendered every frame from arbitrary string state, so a future error message containing any non-ASCII glyph would crash the UI. Reusing `truncate_chars` matches the rest of the file's truncation style and removes the panic risk.
+
+## Notes / not changed
+
+- Banner clearing semantics intentionally fire only on the force-sync revset path (the Enter keypress), not on cursor navigation. This matches the plan's "Menu pane writes a new revset selection (force-sync from `enter-force-syncs-head`)" wording.
+- `last_blocker` is also cleared inside `begin_context_collection`/`begin_generation` (in addition to the focus-flip in `generate_pr`). That's defensive but harmless because `generate_pr` only re-runs after a user action.
+- The `pressing_g_with_valid_form_moves_focus_to_preview` test legitimately needs `#[tokio::test]` because the success path calls `tokio::spawn`. Setting `self.focus = Focus::Preview` before the spawn (rather than after) is deliberate so the assertion is observable without awaiting the spawned task.
+
+## Residual risk
+
+- Manual smoke test was not performed in this environment; behaviour is covered by automated tests.
