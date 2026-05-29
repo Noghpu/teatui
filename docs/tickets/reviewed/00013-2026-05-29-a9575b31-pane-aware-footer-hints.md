@@ -2,8 +2,8 @@
 id: 00013-2026-05-29-a9575b31-pane-aware-footer-hints
 created_at: 2026-05-29T22:38:28+02:00
 created_by_model: claude-opus-4-7/high
-state: implemented
-state_updated_at: 2026-05-29T22:54:14+02:00
+state: reviewed
+state_updated_at: 2026-05-29T22:56:32+02:00
 ---
 # Pane-aware footer hints and `p manifest/raw` rename
 
@@ -123,3 +123,47 @@ Added 6 unit tests in `ui::tests` asserting:
 ## Residual risks / follow-up
 
 - None. Key dispatch behavior is unchanged; this is purely a rendering change.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: claude-opus-4-7
+- reviewed_at: 2026-05-29T22:56:32+02:00
+- state: reviewed
+
+# Postmortem â€” 00013 pane-aware footer hints
+
+## Reviewer
+- model: claude-opus-4-7
+
+## Verdict
+Accepted as implemented. No reviewer code changes.
+
+## Verification
+- `just verify` passed (fmt, check, clippy, 209 unit tests + 4 windows integration tests).
+- 6 new `generate_footer_hints` unit tests pass and meaningfully assert pane-conditional hints.
+
+## Correctness vs. plan and acceptance criteria
+- Single default-arm collapse: `Screen::Generate => generate_footer_hints(app.focus(), app.generate().draft.is_some())` correctly replaces both the old fixed default arm and the old `Focus::Preview` arm at `src/ui.rs:1409`.
+- Per-pane hint sets match the plan:
+  - Menu: â†‘/â†“ select, Enter pick revset, r refresh, Tab â†’ Form, Esc back.
+  - Form: â†‘/â†“ field, Enter/i edit, g generate, Tab â†’ Preview, Shift+Tab â†’ Menu, Esc back.
+  - Preview (no draft): â†‘/â†“ scroll, Tab â†’ Menu, Esc back.
+  - Preview (draft): adds p manifest/raw, g regenerate, c confirm.
+- Hintâ†”dispatch contract upheld: `dispatch_generate_normal` in `src/app.rs:433` confirms `r` is Menu-only, `g`/`i` are Form actions, `p`/`g`/`c` are Preview actions; the `c â†’ ConfirmExecution` path is gated on `DraftReady|Failed` which only occur when a draft exists.
+- The literal `p prompt` is gone; `p manifest/raw` only renders in Preview-with-draft. Test `generate_footer_hints_no_p_prompt_anywhere` enforces this for every (focus, has_draft) combination.
+- Existing Editing/Confirm/CheckingFreshness/Executing/Complete/Failed arms above the new line at `src/ui.rs:1409` are untouched.
+
+## Plan deviations (acceptable)
+- Helper signature is `(focus, has_draft)` rather than the plan's `(focus, phase, has_draft)`. Reachable phases for this default arm are `Idle`, `Generating`, and `DraftReady` (all other phases have dedicated arms above). `draft.is_some()` is true only in `DraftReady`, which is exactly the condition under which `p manifest/raw`, `g regenerate`, and `c confirm` are meaningful. Adding a phase parameter would add no information for this footer.
+- The old separate `Focus::Preview` arm was folded into the helper rather than retained â€” also a deliberate simplification noted in the implementation note, and the cleaner outcome.
+
+## Code quality
+- Helper is colocated with other ui helpers near the bottom of `src/ui.rs`; allocation pattern (per-frame `Line::from(vec![...])`) matches the surrounding code, no clippy churn.
+- ASCII style and `colors::ACCENT`/`colors::MUTED` pattern preserved.
+- Tests use a small `line_text` joiner to assert on rendered text; readable and tightly scoped.
+
+## Risks / follow-up
+- None. Behavior change is purely cosmetic (footer hints); the keymap itself was previously normalized by `pane-local-keymap`.
