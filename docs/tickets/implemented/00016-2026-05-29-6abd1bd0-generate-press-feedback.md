@@ -2,7 +2,8 @@
 id: 00016-2026-05-29-6abd1bd0-generate-press-feedback
 created_at: 2026-05-29T22:38:43+02:00
 created_by_model: claude-opus-4-7/high
-state: open
+state: implemented
+state_updated_at: 2026-05-29T23:17:16+02:00
 ---
 # Inline blocker banner and auto-focus Preview on `g`
 
@@ -76,3 +77,51 @@ Make pressing `g` on the Generate screen visibly do something: surface validatio
 - If `head-field-as-change-id` lands first, the blocker text will mention change_ids; if it has not landed, the same text path still works because blockers are field error strings, not value strings.
 - Be careful not to clear the banner inside `validate_form` â€” clearing must be tied to user action (edit / press / select), not to a re-validation that happens to find no errors.
 - Confirm `colors::BAD` (or equivalent) exists in `src/colors.rs`. If not, reuse the closest red.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: claude-sonnet-4-6
+- completed_at: 2026-05-29T23:17:16+02:00
+- state: implemented
+
+## What was completed
+
+Implemented inline blocker banner on the Generate screen and auto-focus-to-Preview on successful `g` press.
+
+### Changes
+
+**`src/generate.rs`:**
+- Added `pub last_blocker: Option<String>` field to `GenerateState`, initialized to `None`.
+- Added `set_blocker(msg)` and `clear_blocker()` helper methods.
+- Wired `clear_blocker()` into `begin_editing_selected_field`, `begin_context_collection`, `begin_generation`, and `force_sync_head_from_selected_revset`.
+
+**`src/app.rs`:**
+- In `generate_pr`: on the blockers branch, call `self.generate.set_blocker(message.clone())` before `fail_context_collection`.
+- In `generate_pr`: on success branches (`start_generation` and `start_context_collection`), set `self.focus = Focus::Preview` before spawning async work so focus is updated even in tests.
+- Added two new tests: `pressing_g_with_blocker_records_inline_banner_and_keeps_focus_on_form` and `pressing_g_with_valid_form_moves_focus_to_preview` (the latter uses `#[tokio::test]` to provide a runtime for `tokio::spawn`).
+
+**`src/ui.rs`:**
+- In `render_generate_fields`, render a one-line `Line::from(text).fg(colors::BAD)` above the field list when `app.generate().last_blocker.is_some()`, with ellipsis truncation if the text exceeds the available width.
+
+## Deviations from plan
+
+- None significant. The test for "valid form" uses `#[tokio::test]` (not mentioned in plan) because `start_context_collection` calls `tokio::spawn`, which requires a runtime.
+- Focus is set before calling the spawn helper (not after) to ensure it's observable in tests, though functionally identical at runtime.
+
+## Verification
+
+`just verify` passes: fmt, check, clippy, test (212 + 4 integration tests all pass).
+
+## Important files changed
+
+- `src/generate.rs` â€” `GenerateState` struct and methods
+- `src/app.rs` â€” `generate_pr` logic and two new tests
+- `src/ui.rs` â€” banner rendering in `render_generate_fields`
+
+## Residual risks / follow-up
+
+- The banner is not cleared when the user navigates between revsets without pressing Enter (i.e., `sync_head_from_selected_revset` is not wired to `clear_blocker`, only `force_sync_head_from_selected_revset` is). This matches the ticket spec: "Menu pane writes a new revset selection (force-sync from enter-force-syncs-head, if present)". The non-force sync path intentionally does not clear the blocker.
+- Manual smoke test needed: clear head field, press `g`, confirm red banner; fill head, press `g`, confirm focus on Preview.
