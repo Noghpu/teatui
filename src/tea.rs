@@ -1,7 +1,12 @@
 use std::path::PathBuf;
 
-use crate::command::ExternalCommand;
+use serde_json::Value;
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::command::{ExternalCommand, capture};
 use crate::config::Config;
+use crate::event::{BackgroundEvent, PullRequestsResult};
+use crate::pull_requests::parse_pull_requests_json;
 
 #[derive(Debug, Clone)]
 pub struct TeaClient {
@@ -132,6 +137,48 @@ impl TeaClient {
 
         ExternalCommand::new(self.program.clone(), args, cwd)
     }
+}
+
+pub fn spawn_pull_requests_load(
+    config: Config,
+    cwd: PathBuf,
+    request_id: u64,
+    tx: UnboundedSender<BackgroundEvent>,
+) {
+    tokio::spawn(async move {
+        let client = TeaClient::new(&config);
+        let result = match capture(client.pr_list_command(&cwd)).await {
+            Ok(capture) => match serde_json::from_str::<Value>(&capture.stdout) {
+                Ok(Value::Array(_)) => PullRequestsResult::Ready {
+                    request_id,
+                    items: parse_pull_requests_json(&capture.stdout),
+                },
+                Ok(_) => PullRequestsResult::Failed {
+                    request_id,
+                    command: capture.command,
+                    message: "tea pr list returned unexpected JSON shape".into(),
+                    stdout: capture.stdout,
+                    stderr: capture.stderr,
+                },
+                Err(error) => PullRequestsResult::Failed {
+                    request_id,
+                    command: capture.command,
+                    message: format!("failed to parse tea pr list JSON: {error}"),
+                    stdout: capture.stdout,
+                    stderr: capture.stderr,
+                },
+            },
+            Err(error) => PullRequestsResult::Failed {
+                request_id,
+                command: error.command,
+                message: error.message,
+                stdout: error.stdout,
+                stderr: error.stderr,
+            },
+        };
+
+        let _ = tx.send(BackgroundEvent::PullRequests(result));
+    });
 }
 
 pub fn parse_pr_url(stdout: &str) -> Option<String> {
