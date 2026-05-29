@@ -2411,16 +2411,17 @@ fn render_picker_modal(frame: &mut Frame, app: &App, frame_area: Rect) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-/// Returns the footer hint line for the Generate screen's default (non-editing,
-/// non-confirm, non-terminal-phase) state, varying by focused pane and whether
-/// a generated draft is currently present.
 /// Returns a Braille spinner character for the given instant.
 ///
-/// Cycles through 10 frames at approximately 10 fps so the spinner visibly
-/// animates when the existing tick rate drives repaints at ~10 Hz.
+/// Cycles through 10 frames at approximately 10 fps. The frame is selected
+/// from the elapsed time between a process-wide anchor instant captured on
+/// first call and `now`, so successive calls advance the animation as the
+/// existing tick rate drives repaints.
 fn spinner_frame(now: Instant) -> char {
     const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-    let millis = now.elapsed().as_millis();
+    static ANCHOR: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let anchor = *ANCHOR.get_or_init(|| now);
+    let millis = now.saturating_duration_since(anchor).as_millis();
     let idx = (millis / 100) % (FRAMES.len() as u128);
     FRAMES[idx as usize]
 }
@@ -2457,6 +2458,9 @@ fn generate_async_status_line(phase: GeneratePhase, now: Instant) -> Option<Line
     }
 }
 
+/// Returns the footer hint line for the Generate screen's default (non-editing,
+/// non-confirm, non-terminal-phase) state, varying by focused pane and whether
+/// a generated draft is currently present.
 fn generate_footer_hints(focus: Focus, has_draft: bool) -> Line<'static> {
     match focus {
         Focus::Menu => Line::from(vec![
@@ -2932,6 +2936,24 @@ mod tests {
             SPINNER_CHARS.contains(&ch),
             "spinner_frame returned an unexpected char: {ch:?}"
         );
+    }
+
+    #[test]
+    fn spinner_frame_advances_across_time() {
+        // Anchor is captured on first call inside spinner_frame, so feeding a
+        // sequence of progressively later instants must yield at least one
+        // frame change within a full 1s cycle.
+        let base = Instant::now();
+        let first = spinner_frame(base);
+        let mut saw_change = false;
+        for step_ms in [100u64, 200, 300, 400, 500, 600, 700, 800, 900, 1000] {
+            let later = base + std::time::Duration::from_millis(step_ms);
+            if spinner_frame(later) != first {
+                saw_change = true;
+                break;
+            }
+        }
+        assert!(saw_change, "spinner_frame must advance over time");
     }
 
     #[test]
