@@ -11,6 +11,7 @@ pub mod jj;
 pub mod llm;
 pub mod logging;
 pub mod prompt;
+pub mod pull_requests;
 pub mod repo;
 pub mod repo_options;
 pub mod tea;
