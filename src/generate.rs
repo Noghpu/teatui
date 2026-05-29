@@ -681,6 +681,13 @@ impl FieldState {
         matches!(self, Self::Picker(_))
     }
 
+    pub fn text_editor(&self) -> Option<&TextArea<'static>> {
+        match self {
+            Self::Text(field) => Some(&field.editor),
+            Self::Picker(_) => None,
+        }
+    }
+
     pub fn is_multiline(&self) -> bool {
         matches!(self, Self::Text(field) if field.buffer.lines().count() > 1)
     }

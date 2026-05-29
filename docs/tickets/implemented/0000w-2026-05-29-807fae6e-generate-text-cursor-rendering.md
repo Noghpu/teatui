@@ -2,7 +2,8 @@
 id: 0000w-2026-05-29-807fae6e-generate-text-cursor-rendering
 created_at: 2026-05-29T12:41:55+02:00
 created_by_model: claude-opus-4-7/high
-state: open
+state: implemented
+state_updated_at: 2026-05-29T16:25:07+02:00
 ---
 # Render Cursor for Active Text Editor in Generate Form
 
@@ -101,3 +102,53 @@ The Generate form pane uses a single `Paragraph` built from a `Vec<Line>` for th
 - Scroll math: if `form_scroll.offset` is non-zero, the editor Rect must be translated by the offset and clipped to the inner viewport, otherwise the cursor may appear in the wrong row or be drawn off-area.
 - Rebuilding the `TextArea` on every render would reset the cursor. Keep the editor owned by the field and only mutate via `input()`.
 - Multi-line description: ensure the textarea widget's own internal scroll does not fight with `form_scroll`. If it does, prefer letting the textarea handle vertical scroll within its bounded Rect and let `form_scroll` only move the whole form when other fields go off-screen.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: claude-sonnet-4-6
+- completed_at: 2026-05-29T16:25:07+02:00
+- state: implemented
+
+## What was completed
+
+Implemented cursor rendering for the active text editor in the Generate PR form.
+
+When `Focus::Form + InputMode::Editing` is active on a text field (single-line or multi-line description), the `ratatui_textarea::TextArea` widget is now rendered as an overlay in a dedicated sub-Rect carved from the inner viewport, showing the native cursor.
+
+### Key changes
+
+**`src/generate.rs`**
+- Added `text_editor() -> Option<&TextArea<'static>>` on `FieldState` to allow the UI layer to borrow the editor for widget rendering.
+
+**`src/ui.rs`**
+- Added `Clear`, `InputMode` imports.
+- `render_generate_field`: added `editing: bool` parameter. When editing a text field, produces blank placeholder rows instead of value lines (1 for single-line fields, `DESCRIPTION_FIELD_DISPLAY_LINES` for description), returns a `(rel_start, rel_end)` range alongside the lines.
+- `render_generate_fields`: now accepts `editing_text: bool`, passes it through, collects the absolute `editor_row_range` and returns it as a third element.
+- `render_work` (Screen::Generate): after rendering the Paragraph, overlays `Clear` + `TextArea` widget for the editing field using a `compute_editor_rect` helper that translates content-relative rows to viewport-relative `Rect`, accounting for scroll offset.
+- `compute_editor_rect`: new helper that maps `(editor_start, editor_end, scroll_offset)` to a viewport-clipped `Rect`. Returns `None` when the editor is entirely outside the visible viewport.
+- Help text updated: `" cursor " / "editing active "` makes the cursor the canonical editing indicator.
+- Six unit tests added for `compute_editor_rect` covering no-scroll, multiline, partial-scroll, above-viewport, below-viewport, and zero-height cases.
+
+### Deviations from plan
+
+- Cursor style defaults were not overridden: `ratatui_textarea::TextArea` uses reversed-video by default, which stands out adequately on the Catppuccin theme. No explicit style call needed.
+- The `widget()` method on `TextArea` was deprecated in the version in use; passed `&editor` directly to `frame.render_widget()` per the deprecation hint.
+
+### Verification
+
+`just verify` passes: 163 tests pass, fmt/check/clippy clean.
+
+Manual TUI probe not run (no live terminal available in this session), but the logic is covered by unit tests and the rendering path is exercised via normal compile-check.
+
+### Important files changed
+
+- `src/ui.rs`
+- `src/generate.rs`
+
+### Residual risks / follow-up
+
+- The `TextArea`'s own internal scroll can fight with `form_scroll` for the description field if the user enters more lines than `DESCRIPTION_FIELD_DISPLAY_LINES`. The textarea widget is bounded to that Rect, so vertical scroll within the textarea is not surfaced; the form scroll handles moving the whole form. This is the expected behavior per the ticket but should be probed manually.
+- Picker fields are explicitly excluded from cursor rendering (no `TextArea`), consistent with the Non-Goals.
