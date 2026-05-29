@@ -2,7 +2,8 @@
 id: 00011-2026-05-29-b73fe9f6-manage-pr-open-and-yank-url
 created_at: 2026-05-29T21:55:31+02:00
 created_by_model: claude-opus-4-7/high
-state: open
+state: implemented
+state_updated_at: 2026-05-29T22:04:11+02:00
 ---
 # Manage PRs Open-In-Browser and Yank-URL Shortcuts
 
@@ -96,3 +97,51 @@ The repo has no clipboard or browser-launcher dependency yet. Add `arboard` (cli
 - `opener::open` on Windows uses `ShellExecute`; URLs containing characters that need escaping should already be safe because `opener` does its own quoting. Avoid hand-building a `cmd /c start` string.
 - Adding two new crates increases compile time; both are small but worth noting.
 - If a status-bar ephemeral message slot does not yet exist, adding one touches `App` state shared with many flows â€” keep the addition minimal and clear the message on the next key event to avoid stale text bleeding across screens.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: claude-sonnet-4-6
+- completed_at: 2026-05-29T22:04:11+02:00
+- state: implemented
+
+## What was completed
+
+Implemented `o` (open in browser) and `y` (yank/copy URL) shortcuts for the Manage PRs screen.
+
+- Added `arboard = "3"` and `opener = "0.7"` to `Cargo.toml`.
+- Created `src/external.rs` with `open_in_browser(url: &str) -> Result<(), String>` and `copy_to_clipboard(text: &str) -> Result<(), String>` wrappers.
+- Added `Action::OpenPrInBrowser` and `Action::CopyPrUrl` variants to `src/action.rs`.
+- Registered `pub mod external` in `src/lib.rs` (alphabetical order).
+- Added `status_message: Option<String>` field to `App` struct.
+- In `App::handle_key`, added `o` and `y` shortcuts gated by `screen == PullRequests`, `input_mode == Normal`, `comment_phase == Idle`, and a selected PR.
+- In `App::update`, cleared `status_message` on every action call, then dispatched new actions to `open_selected_pr_in_browser` and `copy_selected_pr_url` methods.
+- Both action handlers guard against empty URLs and surface errors to `status_message` and log.
+- Added `App::status_message()` public accessor.
+- Updated `render_status` in `src/ui.rs` to show `status_message` in the PR screen status bar (green for success, red for errors).
+- Updated `render_help` in `src/ui.rs` to include `o open` and `y yank url` hints when a PR is selected and no modal is active.
+- Added 8 unit tests covering all required scenarios.
+
+## Deviations from plan
+
+None. The plan was followed exactly. The `status_message` field was added as specified since no existing ephemeral message slot existed.
+
+## Verification
+
+`just verify` passed: fmt, check, clippy -D warnings, 201 tests (all passing), integration tests.
+
+## Important files changed
+
+- `Cargo.toml`
+- `src/lib.rs`
+- `src/external.rs` (new)
+- `src/action.rs`
+- `src/app.rs`
+- `src/ui.rs`
+
+## Residual risks / follow-up
+
+- `arboard` on Linux requires an X11/Wayland display; this is documented in the wrapper comment. CI is Windows so this is acceptable.
+- The `status_message` field is currently only rendered on the PullRequests screen status bar; if other screens need transient messages in the future, `render_status` will need extending.

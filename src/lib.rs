@@ -6,6 +6,7 @@ pub mod command;
 pub mod config;
 pub mod context;
 pub mod event;
+pub mod external;
 pub mod generate;
 pub mod jj;
 pub mod llm;
