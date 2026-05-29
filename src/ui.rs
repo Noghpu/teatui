@@ -1870,9 +1870,10 @@ fn render_recent_logs(
 #[cfg(test)]
 mod tests {
     use super::{
-        bounded_multiline_field_lines, compact_diff_stat, is_jj_default_description,
-        truncate_chars, wrap_chars, wrapped_content_height,
+        bounded_multiline_field_lines, compact_diff_stat, compute_editor_rect,
+        is_jj_default_description, truncate_chars, wrap_chars, wrapped_content_height,
     };
+    use ratatui::layout::Rect;
     use ratatui::text::{Line, Span};
 
     #[test]
@@ -1983,9 +1984,6 @@ mod tests {
     fn bounded_multiline_field_lines_hides_empty_description() {
         assert!(bounded_multiline_field_lines(" \n ", 6).is_empty());
     }
-
-    use super::compute_editor_rect;
-    use ratatui::layout::Rect;
 
     fn inner(x: u16, y: u16, width: u16, height: u16) -> Rect {
         Rect {
