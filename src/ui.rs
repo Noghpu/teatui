@@ -1934,7 +1934,7 @@ fn render_picker_modal(frame: &mut Frame, app: &App, frame_area: Rect) {
     if app.screen() != Screen::Generate || app.focus() != Focus::Form {
         return;
     }
-    if app.input_mode() != crate::generate::InputMode::Editing {
+    if app.input_mode() != InputMode::Editing {
         return;
     }
     let field_id = app.generate().selected_field();
@@ -1974,14 +1974,10 @@ fn render_picker_modal(frame: &mut Frame, app: &App, frame_area: Rect) {
     // Clear the background.
     frame.render_widget(Clear, modal_rect);
 
-    // Outer block (focused border + title = field label).
+    // Outer block (always "focused" because the modal owns input).  Reuse
+    // `themed_block` so the modal stays in step with other panes' chrome.
     let title = Line::from(label.bold().fg(colors::ACCENT));
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(colors::FOCUSED_BORDER))
-        .title(title)
-        .padding(Padding::horizontal(1));
+    let block = themed_block(title, true);
 
     let inner = block.inner(modal_rect);
     frame.render_widget(block, modal_rect);
@@ -2006,10 +2002,10 @@ fn render_picker_modal(frame: &mut Frame, app: &App, frame_area: Rect) {
         picker_visible_slice(&visible_options, highlighted, PICKER_MODAL_MAX_ROWS);
     for option in slice {
         let prefix = if option.highlighted { "▶" } else { " " };
-        let selection = if is_multi {
-            if option.selected { "[x]" } else { "[ ]" }
-        } else {
-            if option.selected { "[•]" } else { "[ ]" }
+        let selection = match (is_multi, option.selected) {
+            (true, true) => "[x]",
+            (false, true) => "[•]",
+            (_, false) => "[ ]",
         };
         let mut label_text = format!("{prefix} {selection} {}", option.label);
         if !option.enabled {

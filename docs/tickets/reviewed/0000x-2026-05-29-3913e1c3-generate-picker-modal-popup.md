@@ -2,8 +2,8 @@
 id: 0000x-2026-05-29-3913e1c3-generate-picker-modal-popup
 created_at: 2026-05-29T12:42:00+02:00
 created_by_model: claude-opus-4-7/high
-state: implemented
-state_updated_at: 2026-05-29T16:42:58+02:00
+state: reviewed
+state_updated_at: 2026-05-29T16:48:54+02:00
 ---
 # Move Picker Editing into a Centered Modal Popup
 
@@ -158,3 +158,70 @@ Manual TUI probe not run (no live Gitea/jj environment in this context), but the
 - Footer text uses literal arrow characters (`â†‘â†“`); on some terminals/fonts these may not render. A fallback to `Up/Down` text could be added if reported.
 - The `(â€¦ N more)` line is informational only; no scroll-in-modal mechanism. If needed, a future ticket can add scroll state to `PickerFieldState`.
 - The `max_rows` cap (`PICKER_MODAL_MAX_ROWS = 10`) is a constant; could be made configurable per-terminal-height in a follow-up.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: claude-opus-4-7
+- reviewed_at: 2026-05-29T16:48:54+02:00
+- state: reviewed
+
+## Review Outcome
+
+Accepted with small reviewer fixes. Implementation matches the ticket plan and
+acceptance criteria.
+
+## What was checked
+
+- `src/ui.rs` diff vs `@-` (the implementation revision).
+- Gating chain for `render_picker_modal` (`Screen::Generate` + `Focus::Form` +
+  `InputMode::Editing` + selected field is a picker + `picker_is_editing`).
+- Render order in `pub fn render`: the modal is drawn last, after status/menu/
+  work/preview/help, so it overlays the rest of the frame.
+- Inline picker render path in `render_generate_field`: while editing, only the
+  one-line `(editingâ€¦)` summary is emitted. Non-editing pickers still show the
+  selected-values summary and the `(no options loaded)` muted warning. No
+  double-render.
+- Help-bar arm: a picker-specific hint is emitted before the existing
+  text-editing arm so it wins when both could match.
+- Layout: `centered_rect` clamps width/height to the area; `picker_visible_slice`
+  windows around `highlighted` with in-bounds slicing.
+- Unit tests for `centered_rect` (fits, centered, clamped) and
+  `picker_visible_slice` (small, around highlighted, near start/end, empty,
+  zero-rows) â€” all six rows of behavior covered.
+- No new dependencies: only ratatui built-ins (`Clear`, `Rect`, `Block`,
+  `Paragraph`).
+- `PickerFieldState` shape and key handling untouched (confirmed via
+  `src/generate.rs` â€” only `PickerOptionView` is newly imported into `ui.rs`).
+
+## Reviewer fixes applied
+
+Cosmetic only; no behavioral changes:
+
+1. Replaced inline `Block::default()â€¦border_style(FOCUSED_BORDER)â€¦` modal
+   construction with the existing `themed_block(title, true)` helper. Keeps
+   modal chrome consistent with every other pane in `ui.rs` and removes a
+   second copy of the focused-border styling.
+2. Flattened a nested `if option.selected` inside an `else` arm into a single
+   `match (is_multi, option.selected)` so the single-/multi-select selection
+   marker is one expression. Easier to read and avoids a latent
+   `collapsible_else_if` style hit.
+3. Dropped a `crate::generate::InputMode::Editing` fully-qualified reference;
+   `InputMode` was already imported at the top of the file.
+
+## Verification
+
+- `just verify` (fmt + check + clippy + tests) passed after the reviewer fixes.
+- 172 tests pass, including the nine new picker-modal tests.
+
+## Residual notes
+
+- The unicode arrows in the footer (`â†‘â†“`) and the `(â€¦ N more)` ellipsis are
+  intentional and already used elsewhere in `ui.rs`. If a future terminal-font
+  report comes in, swap to ASCII; not worth pre-emptively guarding now.
+- The modal does not scroll independently of `picker_visible_options()`; the
+  `(â€¦ N more)` line is informational. Acceptance criteria do not require modal
+  scrolling, and adding scroll state would touch `PickerFieldState` which is
+  out of scope for this ticket.
