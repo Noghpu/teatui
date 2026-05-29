@@ -2,8 +2,8 @@
 id: 0000w-2026-05-29-807fae6e-generate-text-cursor-rendering
 created_at: 2026-05-29T12:41:55+02:00
 created_by_model: claude-opus-4-7/high
-state: implemented
-state_updated_at: 2026-05-29T16:25:07+02:00
+state: reviewed
+state_updated_at: 2026-05-29T16:36:42+02:00
 ---
 # Render Cursor for Active Text Editor in Generate Form
 
@@ -152,3 +152,53 @@ Manual TUI probe not run (no live terminal available in this session), but the l
 
 - The `TextArea`'s own internal scroll can fight with `form_scroll` for the description field if the user enters more lines than `DESCRIPTION_FIELD_DISPLAY_LINES`. The textarea widget is bounded to that Rect, so vertical scroll within the textarea is not surfaced; the form scroll handles moving the whole form. This is the expected behavior per the ticket but should be probed manually.
 - Picker fields are explicitly excluded from cursor rendering (no `TextArea`), consistent with the Non-Goals.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: claude-opus-4-7
+- reviewed_at: 2026-05-29T16:36:42+02:00
+- state: reviewed
+
+# Review postmortem: 0000w generate text cursor rendering
+
+## Verdict
+
+Accepted with a tidy-up. Implementation meets the ticket's goal, acceptance criteria, and design constraints. One small style fix applied during review.
+
+## Implementation summary (facts)
+
+- `FieldState::text_editor() -> Option<&TextArea<'static>>` added in `src/generate.rs` returns the inner editor only for text fields (None for pickers).
+- `Screen::Generate` branch of `render_work` now computes `editing_text = Focus::Form && InputMode::Editing && !selected.kind().is_picker()`, then calls `render_generate_fields` which threads that flag down and returns an extra `editor_row_range` describing the absolute placeholder row span.
+- Paragraph still renders first; then `Clear` + `frame.render_widget(editor, editor_rect)` overlays the textarea on the placeholder rows when `editing_text` is true and the rect is in-viewport.
+- `compute_editor_rect` translates `(editor_start, editor_end, scroll_offset)` to a viewport-clipped `Rect`, returns `None` when fully scrolled out. Six dedicated unit tests cover no-scroll, multiline, partial-scroll, fully-above, fully-below, and zero-height viewport cases.
+- `render_generate_field` was widened with an `editing: bool` parameter. When editing a single-line text field, the header omits the inline value; for both single-line and description fields, `N` blank `Line::from("")` placeholders are pushed (1 or `DESCRIPTION_FIELD_DISPLAY_LINES`) to reserve overdraw space. The relative range is returned to the caller.
+- Help-line wording for `InputMode::Editing` updated to lead with " cursor "/"editing active " as the canonical indicator.
+- `163` unit tests + integration tests pass under `just verify`.
+
+## Correctness check vs. acceptance criteria
+
+- Cursor only when `Focus::Form + InputMode::Editing` and selected field is text. The gate is exactly `app.focus() == Focus::Form && app.input_mode() == InputMode::Editing && !selected_field().kind().is_picker()`. Pickers excluded by construction; navigation mode excluded by `InputMode` gate.
+- Cursor disappears on commit/cancel: `apply_edit_key` / Esc path flips `InputMode` back to navigation; next frame's gate is false, no overlay rendered. Verified via reading `src/app.rs::begin_editing_form_field` and the InputMode transitions in `apply_edit_key`.
+- Unfocused fields render identically: `render_generate_field` only diverges when `editing_this_field` is true, which requires the field to be selected AND `editing_text` true. Non-selected fields hit the original branches verbatim.
+- Layout-shift on entry to description edit (1-line `(empty)` to 6 blank rows) is by design per the plan's "spans the existing DESCRIPTION_FIELD_DISPLAY_LINES block". `form_scroll.ensure_visible` keeps it onscreen.
+- `Clear` over the overlay rect prevents double-render. Placeholder rows under the rect are blank, so even if `Clear` were dropped there is no bleed-through.
+- TextArea is not rebuilt per frame: editor is owned by `TextFieldState` and only mutated in `begin_edit`/`commit`/`cancel`/`input`. Cursor position is preserved across frames.
+- Help text mentions the cursor indicator.
+
+## Code quality changes applied during review
+
+- Hoisted the `compute_editor_rect` and `Rect` imports in the test module to the existing `use super::{...}` block at the top of the `mod tests` block (was a mid-module `use` between tests, which is unusual style and would draw scrutiny from `clippy::items_after_test_module`-adjacent lints in future). No functional change.
+
+## Risks / follow-ups (inferences)
+
+- The TextArea owns its own internal vertical scroll; if a user puts > 6 lines into the description it scrolls within the bounded rect rather than expanding the form. This matches the ticket's risk note and is acceptable.
+- Cursor styling relies on `ratatui-textarea` defaults (reversed video). If theme changes later make this hard to see, consider an explicit cursor style in `begin_edit`.
+- The non-test `selected_range`-based scroll math uses the full set of lines including the 6 placeholder rows when editing the description. That means `ensure_visible` may pull more of the form into view than strictly necessary when editing description on a tall form, but it stays correct.
+
+## Verification
+
+- `just verify` ran twice (before and after the import tidy-up). Both runs: 163 unit + 4 integration tests passing, fmt/check/clippy clean.
+- Manual TUI probe not performed in this session (no live terminal).
