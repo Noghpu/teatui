@@ -2,7 +2,8 @@
 id: 00013-2026-05-29-a9575b31-pane-aware-footer-hints
 created_at: 2026-05-29T22:38:28+02:00
 created_by_model: claude-opus-4-7/high
-state: open
+state: implemented
+state_updated_at: 2026-05-29T22:54:14+02:00
 ---
 # Pane-aware footer hints and `p manifest/raw` rename
 
@@ -75,3 +76,50 @@ Today the Generate-screen default footer arm (`src/ui.rs` around line 1417) rend
 - The `Focus` enum may need to be in scope where it is not today â€” confirm imports.
 - Whitespace and color styling in the existing hint line is delicate; preserve `colors::ACCENT` / `colors::MUTED` pattern when refactoring.
 - Make sure the new helper does not allocate a fresh `Line<'static>` per frame in a way that surprises clippy lints (current code uses `Line::from(vec![...])` per frame, so equivalent allocation is fine).
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: claude-sonnet-4-6
+- completed_at: 2026-05-29T22:54:14+02:00
+- state: implemented
+
+## What was completed
+
+Replaced the single fixed Generate-screen default footer arm with pane-aware hints via a new `generate_footer_hints(focus: Focus, has_draft: bool) -> Line<'static>` helper in `src/ui.rs`.
+
+- `Focus::Menu`: shows `â†‘/â†“ select`, `Enter pick revset`, `r refresh`, `Tab â†’ Form`, `Esc back`.
+- `Focus::Form`: shows `â†‘/â†“ field`, `Enter/i edit`, `g generate`, `Tab â†’ Preview`, `Shift+Tab â†’ Menu`, `Esc back`.
+- `Focus::Preview` (no draft): shows `â†‘/â†“ scroll`, `Tab â†’ Menu`, `Esc back`.
+- `Focus::Preview` (has draft): shows `â†‘/â†“ scroll`, `p manifest/raw`, `g regenerate`, `c confirm`, `Tab â†’ Menu`, `Esc back`.
+
+The old `Screen::Generate if app.focus() == Focus::Preview` arm (which showed "toggle prompt" with no draft awareness) and the `Screen::Generate` default arm (which showed all keys regardless of focus) were both removed. The new arm is a single `Screen::Generate => generate_footer_hints(...)` call.
+
+Renamed `toggle prompt` / `prompt` hint labels to `manifest/raw` (Preview pane with draft only). The literal string "prompt" does not appear in any Generate-screen footer hint.
+
+Added 6 unit tests in `ui::tests` asserting:
+- `r refresh` appears only in Menu hints.
+- `g generate` appears only in Form hints.
+- `p manifest/raw`, `g regenerate`, `c confirm` appear only in Preview-with-draft.
+- Preview without draft omits all three draft-only keys.
+- Menu hints are draft-independent.
+- No hint combination contains the word "prompt".
+
+## Deviations from the plan
+
+- The existing dedicated `Screen::Generate if app.focus() == Focus::Preview` arm was removed and folded into `generate_footer_hints`, rather than kept as a separate arm. This simplifies the match and avoids divergence.
+- Tab direction labels are `â†’ Form` / `â†’ Preview` / `â†’ Menu` (using Unicode arrow) matching the design hint style.
+
+## Verification
+
+`just verify` passed: fmt, check, clippy, all 209 tests including 6 new `generate_footer_hints` tests.
+
+## Important files changed
+
+- `src/ui.rs`: replaced footer arms, added `generate_footer_hints` fn and tests.
+
+## Residual risks / follow-up
+
+- None. Key dispatch behavior is unchanged; this is purely a rendering change.
