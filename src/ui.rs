@@ -1109,6 +1109,16 @@ fn render_generate_fields(
     let mut selected_range = None;
     let mut editor_row_range = None;
 
+    if let Some(blocker) = &app.generate().last_blocker {
+        let max_width = area.width.saturating_sub(2) as usize;
+        let text = if blocker.len() > max_width && max_width > 3 {
+            format!("{}...", &blocker[..max_width.saturating_sub(3)])
+        } else {
+            blocker.clone()
+        };
+        lines.push(Line::from(text).fg(colors::BAD));
+    }
+
     for (index, field_id) in FieldId::ALL.iter().enumerate() {
         let start = lines.len();
         let is_selected = index == app.generate().selected_field;
