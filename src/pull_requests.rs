@@ -39,15 +39,16 @@ fn parse_pull_request_value(value: Value) -> Option<PullRequestSummary> {
     let Value::Object(map) = value else {
         return None;
     };
+    let index = parse_u64(map.get("index"))?;
 
     Some(PullRequestSummary {
-        index: parse_u64(map.get("index"))?,
-        title: parse_string(map.get("title"))?,
-        state: parse_string(map.get("state"))?,
-        author: parse_author(map.get("author"))?,
-        url: parse_string(map.get("url"))?,
-        head: parse_string(map.get("head"))?,
-        base: parse_string(map.get("base"))?,
+        index,
+        title: parse_string_or_default(map.get("title")),
+        state: parse_string_or_default(map.get("state")),
+        author: parse_author(map.get("author")).unwrap_or_default(),
+        url: parse_string_or_default(map.get("url")),
+        head: parse_string_or_default(map.get("head")),
+        base: parse_string_or_default(map.get("base")),
         body: parse_string_or_default(map.get("body")),
         updated: parse_string_or_default(map.get("updated")),
         labels: parse_labels(map.get("labels")),
@@ -191,27 +192,30 @@ mod tests {
     #[test]
     fn returns_none_for_invalid_or_incomplete_json() {
         assert!(parse_pull_request_json("not json").is_none());
-        assert!(parse_pull_request_json(r#"{"index": 1}"#).is_none());
+        assert!(parse_pull_request_json(r#"{"title": "missing index"}"#).is_none());
         assert!(parse_pull_requests_json("not json").is_empty());
         assert!(parse_pull_requests_json(r#"{"index": 1}"#).is_empty());
     }
 
     #[test]
-    fn tolerates_missing_optional_fields_in_list_entries() {
+    fn tolerates_missing_string_fields_in_list_entries() {
         let json = r##"[
           {
             "index": 1,
-            "title": "Title",
-            "state": "open",
-            "author": "alice",
-            "url": "https://example.com/pr/1",
-            "head": "branch",
-            "base": "main"
+            "title": null,
+            "state": null,
+            "author": null
           }
         ]"##;
 
         let prs = parse_pull_requests_json(json);
         assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].title, "");
+        assert_eq!(prs[0].state, "");
+        assert_eq!(prs[0].author, "");
+        assert_eq!(prs[0].url, "");
+        assert_eq!(prs[0].head, "");
+        assert_eq!(prs[0].base, "");
         assert_eq!(prs[0].body, "");
         assert_eq!(prs[0].updated, "");
         assert!(prs[0].labels.is_empty());

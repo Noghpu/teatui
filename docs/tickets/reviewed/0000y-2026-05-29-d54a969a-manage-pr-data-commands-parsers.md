@@ -2,8 +2,8 @@
 id: 0000y-2026-05-29-d54a969a-manage-pr-data-commands-parsers
 created_at: 2026-05-29T17:14:55+02:00
 created_by_model: gpt-5.5/medium
-state: implemented
-state_updated_at: 2026-05-29T17:21:39+02:00
+state: reviewed
+state_updated_at: 2026-05-29T17:24:07+02:00
 ---
 # Manage PR Data Commands And Parsers
 
@@ -112,3 +112,33 @@ Files changed:
 
 Residual risk:
 - `tea` JSON shape may vary across versions beyond the fields covered here, but malformed or incomplete payloads fail closed instead of panicking.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: gpt-5.5/medium
+- reviewed_at: 2026-05-29T17:24:07+02:00
+- state: reviewed
+
+Completed review of the PR data command/parser slice.
+
+Facts:
+- The implementation added typed `tea pr list` and PR detail command builders with argv arrays only.
+- The implementation added `src/pull_requests.rs` and exported it from `src/lib.rs`.
+- The implementation stayed out of app/UI/background wiring as requested.
+- Focused command/parser tests were present.
+
+Fixes applied during review:
+- Relaxed PR parsing so non-index string fields that are missing or null default to empty strings instead of dropping the PR. This matches the ticket's tolerance requirement and keeps later UI code from losing otherwise usable rows.
+- Updated the parser test to cover missing/null string fields.
+
+Verification:
+- `cargo test pull_requests --lib`
+- `cargo test tea --lib`
+- `just test`
+- `just fmt`
+
+Residual risk:
+- Future `tea` versions may expose additional author/label shapes, but malformed JSON and unparseable PR indexes fail closed without panics.
