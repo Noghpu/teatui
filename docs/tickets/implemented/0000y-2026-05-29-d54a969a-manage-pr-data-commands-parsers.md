@@ -2,7 +2,8 @@
 id: 0000y-2026-05-29-d54a969a-manage-pr-data-commands-parsers
 created_at: 2026-05-29T17:14:55+02:00
 created_by_model: gpt-5.5/medium
-state: open
+state: implemented
+state_updated_at: 2026-05-29T17:21:39+02:00
 ---
 # Manage PR Data Commands And Parsers
 
@@ -80,3 +81,34 @@ This ticket should establish the first two commands and parse their output. The 
 - `tea` JSON shapes can vary across versions. Keep parser tests based on representative fields but tolerant of additional shape variation.
 - The detail command syntax must not trigger comment prompts; preserve `--comments=false`.
 - Avoid adding app state too early; this ticket should be easy to review as a command/parser slice.
+---
+
+<!-- ticket-section:implementation-note v1 -->
+## Implementation Note
+
+Metadata:
+- model: unknown
+- completed_at: 2026-05-29T17:21:39+02:00
+- state: implemented
+
+Completed:
+- Added `src/pull_requests.rs` with `PullRequestSummary` plus tolerant parsers for PR list arrays and single PR detail objects.
+- Exported the new module from `src/lib.rs`.
+- Added `TeaClient::pr_list_command` and `TeaClient::pr_detail_command` in `src/tea.rs` with the requested argv shapes.
+- Added focused unit tests for command argv shape and JSON tolerance.
+
+Deviations:
+- None. The implementation stayed within the data-layer scope and did not wire any TUI state.
+
+Verification:
+- `cargo test pull_requests --lib`
+- `cargo test tea --lib`
+- `just test`
+
+Files changed:
+- `src/lib.rs`
+- `src/pull_requests.rs`
+- `src/tea.rs`
+
+Residual risk:
+- `tea` JSON shape may vary across versions beyond the fields covered here, but malformed or incomplete payloads fail closed instead of panicking.

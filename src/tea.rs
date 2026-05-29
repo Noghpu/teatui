@@ -67,6 +67,38 @@ impl TeaClient {
         )
     }
 
+    pub fn pr_list_command(&self, cwd: impl Into<PathBuf>) -> ExternalCommand {
+        ExternalCommand::new(
+            self.program.clone(),
+            [
+                "pr", "list", "--state", "open", "--fields", PR_FIELDS, "--output", "json",
+                "--limit", "50",
+            ],
+            cwd,
+        )
+    }
+
+    pub fn pr_detail_command(
+        &self,
+        cwd: impl Into<PathBuf>,
+        index: impl ToString,
+    ) -> ExternalCommand {
+        let index = index.to_string();
+        ExternalCommand::new(
+            self.program.clone(),
+            vec![
+                "pr".to_string(),
+                "--comments=false".to_string(),
+                "--fields".to_string(),
+                PR_FIELDS.to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+                index,
+            ],
+            cwd,
+        )
+    }
+
     pub fn pr_create_command(
         &self,
         cwd: impl Into<PathBuf>,
@@ -141,6 +173,8 @@ fn optional_single_value(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_string())
 }
+
+const PR_FIELDS: &str = "index,title,state,author,url,head,base,body,updated,labels";
 
 #[cfg(test)]
 mod tests {
@@ -259,6 +293,45 @@ mod tests {
         assert_eq!(
             command.args,
             vec!["api", "/repos/{owner}/{repo}/collaborators"]
+        );
+        assert_eq!(command.cwd, PathBuf::from("C:/repo"));
+    }
+
+    #[test]
+    fn builds_pr_list_command_argv() {
+        let config = Config::default();
+        let client = TeaClient::new(&config);
+        let command = client.pr_list_command("C:/repo");
+
+        assert_eq!(command.program, "tea");
+        assert_eq!(
+            command.args,
+            vec![
+                "pr", "list", "--state", "open", "--fields", PR_FIELDS, "--output", "json",
+                "--limit", "50",
+            ]
+        );
+        assert_eq!(command.cwd, PathBuf::from("C:/repo"));
+    }
+
+    #[test]
+    fn builds_pr_detail_command_argv() {
+        let config = Config::default();
+        let client = TeaClient::new(&config);
+        let command = client.pr_detail_command("C:/repo", 42);
+
+        assert_eq!(command.program, "tea");
+        assert_eq!(
+            command.args,
+            vec![
+                "pr",
+                "--comments=false",
+                "--fields",
+                PR_FIELDS,
+                "--output",
+                "json",
+                "42",
+            ]
         );
         assert_eq!(command.cwd, PathBuf::from("C:/repo"));
     }
