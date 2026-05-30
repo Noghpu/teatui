@@ -1071,6 +1071,7 @@ impl App {
         if !blockers.is_empty() {
             let message = blockers.join("; ");
             self.log(format!("context collection blocked: {message}"));
+            self.generate.set_blocker(message.clone());
             self.generate.fail_context_collection(message);
             self.focus = Focus::Form;
             return;
@@ -1080,12 +1081,16 @@ impl App {
             GeneratePhase::ContextReady | GeneratePhase::DraftReady | GeneratePhase::Failed
                 if self.generate.context.is_some() =>
             {
+                self.focus = Focus::Preview;
                 self.start_generation();
             }
             GeneratePhase::Generating => {
                 self.log("generation already in progress");
             }
-            _ => self.start_context_collection(),
+            _ => {
+                self.focus = Focus::Preview;
+                self.start_context_collection();
+            }
         }
     }
 
@@ -1962,6 +1967,61 @@ mod tests {
         assert_eq!(app.generate.phase, GeneratePhase::Failed);
         assert_eq!(app.focus, Focus::Form);
         assert!(app.logs.entries[0].contains("context collection blocked"));
+    }
+
+    #[test]
+    fn pressing_g_with_blocker_records_inline_banner_and_keeps_focus_on_form() {
+        let mut app = test_app();
+        app.screen = Screen::Generate;
+        app.focus = Focus::Form;
+        // The default placeholder state has no revset options so the head picker
+        // reports "head has no available options" — a validation blocker.
+
+        app.generate_pr();
+
+        assert!(
+            app.generate.last_blocker.is_some(),
+            "expected last_blocker to be set on validation failure"
+        );
+        assert_eq!(
+            app.focus,
+            Focus::Form,
+            "focus must stay on Form when blockers are present"
+        );
+    }
+
+    #[tokio::test]
+    async fn pressing_g_with_valid_form_moves_focus_to_preview() {
+        let mut app = test_app();
+        app.screen = Screen::Generate;
+        app.focus = Focus::Form;
+        // Seed a prior blocker to ensure it gets cleared on success.
+        app.generate.last_blocker = Some("stale error".into());
+        // Replace revsets so the head picker has a valid selection and no blockers.
+        app.generate
+            .replace_revsets(vec![crate::generate::RevsetSummary::new(
+                "@",
+                "description",
+                vec!["feature/test".into()],
+                "1 file changed",
+                1,
+                vec!["abc123".into()],
+                vec!["abc123".into()],
+                Vec::new(),
+                Vec::new(),
+            )]);
+
+        app.generate_pr();
+
+        assert!(
+            app.generate.last_blocker.is_none(),
+            "last_blocker must be cleared on a successful g press"
+        );
+        assert_eq!(
+            app.focus,
+            Focus::Preview,
+            "focus must move to Preview on successful g press"
+        );
     }
 
     #[test]

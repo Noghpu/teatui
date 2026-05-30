@@ -1109,6 +1109,7 @@ pub struct GenerateState {
     pub context_started_at: Option<SystemTime>,
     pub context_error: Option<String>,
     pub generation_error: Option<String>,
+    pub last_blocker: Option<String>,
     pub draft: Option<GeneratedDraft>,
     pub execution_plan: Option<ExecutionPlan>,
     pub confirmation_summary: Option<String>,
@@ -1149,6 +1150,7 @@ impl GenerateState {
             context_started_at: None,
             context_error: None,
             generation_error: None,
+            last_blocker: None,
             draft: None,
             execution_plan: None,
             confirmation_summary: None,
@@ -1224,7 +1226,16 @@ impl GenerateState {
         self.preview_scroll.scroll_down();
     }
 
+    pub fn set_blocker(&mut self, msg: impl Into<String>) {
+        self.last_blocker = Some(msg.into());
+    }
+
+    pub fn clear_blocker(&mut self) {
+        self.last_blocker = None;
+    }
+
     pub fn begin_editing_selected_field(&mut self) {
+        self.clear_blocker();
         self.form.field_mut(self.selected_field()).begin_edit();
     }
 
@@ -1305,6 +1316,7 @@ impl GenerateState {
             .cloned()
             .unwrap_or_default();
         self.form.branch_name.set_value(branch_name);
+        self.clear_blocker();
         self.validate_form();
     }
 
@@ -1343,6 +1355,7 @@ impl GenerateState {
         self.context_started_at = Some(SystemTime::now());
         self.context_error = None;
         self.generation_error = None;
+        self.last_blocker = None;
         self.context = None;
         self.prompt_cache = None;
         self.clear_completion_state();
@@ -1372,6 +1385,7 @@ impl GenerateState {
         self.phase = GeneratePhase::Generating;
         self.context_error = None;
         self.generation_error = None;
+        self.last_blocker = None;
         self.clear_completion_state();
         self.clear_confirmation_state();
     }
