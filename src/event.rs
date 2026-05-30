@@ -26,6 +26,7 @@ pub enum BackgroundEvent {
     Repo(Box<RepoState>),
     Revsets(Vec<RevsetSummary>),
     PullRequests(PullRequestsResult),
+    PrComment(PrCommentResult),
     StaleCheck(StaleCheckResult),
     Job(JobResult),
     ExecutionStep { index: usize, total: usize },
@@ -53,6 +54,23 @@ pub enum PullRequestsResult {
     },
     Failed {
         request_id: u64,
+        command: String,
+        message: String,
+        stdout: String,
+        stderr: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrCommentResult {
+    Succeeded {
+        pr_index: u64,
+        command: String,
+        stdout: String,
+        stderr: String,
+    },
+    Failed {
+        pr_index: u64,
         command: String,
         message: String,
         stdout: String,
