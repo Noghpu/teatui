@@ -1281,6 +1281,19 @@ impl GenerateState {
         self.validate_form();
     }
 
+    pub fn force_sync_head_from_selected_revset(&mut self) {
+        let selected = self.selected_revset().label().to_string();
+        self.form.head.set_value(selected);
+        let branch_name = self
+            .selected_revset()
+            .bookmarks()
+            .first()
+            .cloned()
+            .unwrap_or_default();
+        self.form.branch_name.set_value(branch_name);
+        self.validate_form();
+    }
+
     pub fn validate_form(&mut self) {
         let head_errors = self.form_picker_errors(&self.form.head, "head");
         let base_errors = self.form_picker_errors(&self.form.base, "base");
@@ -2305,6 +2318,62 @@ mod tests {
                 .iter()
                 .any(|e| e.contains("base and head must be different")),
             "expected base==head error, got: {errors:?}"
+        );
+    }
+
+    fn revset_with_bookmark(label: &str, bookmark: &str) -> RevsetSummary {
+        RevsetSummary::new(
+            label,
+            "description",
+            vec![bookmark.into()],
+            "1 file changed",
+            1,
+            vec!["commit".into()],
+            vec!["change".into()],
+            vec!["commit change description".into()],
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn select_revset_overwrites_head_even_when_dirty() {
+        let mut state = GenerateState::new(vec![
+            revset_with_bookmark("@", "feature/current"),
+            revset_with_bookmark("@-", "feature/previous"),
+        ]);
+        // Simulate user editing the head field so it becomes dirty.
+        // set_value resets dirty to false; set dirty=true manually afterward.
+        state.form.head.set_value("user-edited");
+        if let FieldState::Picker(ref mut picker) = state.form.head {
+            picker.dirty = true;
+        }
+        if let FieldState::Text(ref mut text) = state.form.branch_name {
+            text.value = "user-branch".into();
+            text.buffer = "user-branch".into();
+            text.dirty = true;
+        }
+
+        // Select the second revset and force-sync.
+        state.selected_revset = 1;
+        state.force_sync_head_from_selected_revset();
+
+        assert_eq!(
+            state.form.head.display_value(),
+            "@-",
+            "force_sync must overwrite dirty head field"
+        );
+        assert_eq!(
+            state.form.branch_name.display_value(),
+            "feature/previous",
+            "force_sync must overwrite dirty branch_name field"
+        );
+        assert!(
+            !state.form.head.dirty(),
+            "dirty flag must be cleared after force-sync"
+        );
+        assert!(
+            !state.form.branch_name.dirty(),
+            "dirty flag must be cleared after force-sync"
         );
     }
 }
