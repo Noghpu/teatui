@@ -10,8 +10,8 @@ use crate::colors;
 
 use crate::app::{App, JobRecord, Screen};
 use crate::generate::{
-    ExecutionPlan, FieldId, Focus, GeneratePhase, GenerateState, InputMode, PromptView,
-    RevsetSummary, StaleCheckResult,
+    ExecutionPlan, FieldId, Focus, GeneratePhase, GenerateState, InputMode, PickerOptionView,
+    PromptView, RevsetSummary, StaleCheckResult,
 };
 use crate::prompt::PromptBuild;
 use crate::repo::{LlmStatus, TeaAuth, ToolStatus};
@@ -45,6 +45,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     render_preview(frame, app, preview_area);
     render_status(frame, &*app, status_area);
     render_help(frame, &*app, help_area);
+
+    // Render picker modal last so it overlays all other panes.
+    render_picker_modal(frame, app, frame.area());
 }
 
 fn render_landing_hero(frame: &mut Frame, app: &App, area: Rect) {
@@ -1005,6 +1008,35 @@ fn render_help(frame: &mut Frame, app: &App, area: Rect) {
             " q ".bold().fg(colors::ACCENT),
             "quit ".fg(colors::MUTED),
         ]),
+        Screen::Generate
+            if app.input_mode() == InputMode::Editing
+                && app.generate().selected_field().kind().is_picker() =>
+        {
+            let is_multi = app.generate().selected_field().kind().is_multi_select();
+            if is_multi {
+                Line::from(vec![
+                    " ↑↓ ".bold().fg(colors::ACCENT),
+                    "move ".fg(colors::MUTED),
+                    " Space ".bold().fg(colors::ACCENT),
+                    "toggle ".fg(colors::MUTED),
+                    " Enter ".bold().fg(colors::ACCENT),
+                    "ok ".fg(colors::MUTED),
+                    " Esc ".bold().fg(colors::ACCENT),
+                    "cancel ".fg(colors::MUTED),
+                ])
+            } else {
+                Line::from(vec![
+                    " ↑↓ ".bold().fg(colors::ACCENT),
+                    "move ".fg(colors::MUTED),
+                    " type ".bold().fg(colors::ACCENT),
+                    "filter ".fg(colors::MUTED),
+                    " Enter ".bold().fg(colors::ACCENT),
+                    "ok ".fg(colors::MUTED),
+                    " Esc ".bold().fg(colors::ACCENT),
+                    "cancel ".fg(colors::MUTED),
+                ])
+            }
+        }
         Screen::Generate if app.input_mode() == InputMode::Editing => Line::from(vec![
             " cursor ".bold().fg(colors::ACCENT),
             "editing active ".fg(colors::MUTED),
@@ -1383,48 +1415,21 @@ fn render_generate_field(
         }
     } else if is_picker {
         let selected_values = field.picker_selected_values();
-        lines.push(Line::from(format!(
-            "    selected: {}",
-            if selected_values.is_empty() {
-                "(none)".into()
-            } else {
-                selected_values.join(", ")
-            }
-        )));
+        let selected_summary = if selected_values.is_empty() {
+            "(none)".to_string()
+        } else {
+            selected_values.join(", ")
+        };
 
         if field.picker_is_editing() {
-            let filter = field.picker_filter().unwrap_or("").trim();
-            lines.push(
-                Line::from(format!(
-                    "    filter: {}",
-                    if filter.is_empty() { "(none)" } else { filter }
-                ))
-                .fg(colors::MUTED),
-            );
-
-            let visible_options = field.picker_visible_options();
-            if visible_options.is_empty() {
-                lines.push(Line::from("    (no options available)").fg(colors::MUTED));
-            } else {
-                for option in visible_options.into_iter().take(5) {
-                    let prefix = if option.highlighted { "▶" } else { " " };
-                    let selection = if option.selected { "[x]" } else { "[ ]" };
-                    let mut line = format!("    {prefix} {selection} {}", option.label);
-                    if !option.enabled {
-                        line.push_str(" (disabled)");
-                    }
-                    let styled = if option.highlighted {
-                        Line::from(line).fg(colors::ACCENT)
-                    } else if option.enabled {
-                        Line::from(line)
-                    } else {
-                        Line::from(line).fg(colors::MUTED)
-                    };
-                    lines.push(styled);
-                }
+            // While the modal is open, collapse the inline listing to a single
+            // summary row so the form pane does not double-render option lists.
+            lines.push(Line::from(format!("    {selected_summary}  (editing…)")).fg(colors::MUTED));
+        } else {
+            lines.push(Line::from(format!("    selected: {selected_summary}")));
+            if field.picker_options().is_empty() {
+                lines.push(Line::from("    (no options loaded)").fg(colors::MUTED));
             }
-        } else if field.picker_options().is_empty() {
-            lines.push(Line::from("    (no options loaded)").fg(colors::MUTED));
         }
     }
 
@@ -1867,12 +1872,184 @@ fn render_recent_logs(
     lines
 }
 
+// ---------------------------------------------------------------------------
+// Picker modal helpers
+// ---------------------------------------------------------------------------
+
+/// Return a `Rect` centered inside `area` with the given width and height,
+/// clamped so it never exceeds `area`.
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+/// The maximum number of option rows the modal will show before adding a
+/// `(… N more)` muted line.
+const PICKER_MODAL_MAX_ROWS: usize = 10;
+
+/// Compute a visible slice of `options` around `highlighted`, limited to
+/// `max_rows` entries.  Returns the slice and a count of options that were
+/// trimmed off the end.
+fn picker_visible_slice(
+    options: &[PickerOptionView],
+    highlighted: usize,
+    max_rows: usize,
+) -> (&[PickerOptionView], usize) {
+    if options.is_empty() || max_rows == 0 {
+        return (&[], 0);
+    }
+    let total = options.len();
+    if total <= max_rows {
+        return (options, 0);
+    }
+    // Center the window around `highlighted`, staying in-bounds.
+    let half = max_rows / 2;
+    let start = if highlighted >= half {
+        (highlighted - half).min(total - max_rows)
+    } else {
+        0
+    };
+    let end = (start + max_rows).min(total);
+    let remaining = total.saturating_sub(end);
+    (&options[start..end], remaining)
+}
+
+/// Render a centered modal popup for the actively-editing picker field, if the
+/// gating conditions are met:
+///
+/// - `Screen::Generate` is active.
+/// - `Focus::Form` is held.
+/// - The selected field is a picker.
+/// - The selected picker field is currently in editing mode.
+fn render_picker_modal(frame: &mut Frame, app: &App, frame_area: Rect) {
+    // Gate: Generate screen, Form focus, editing a picker.
+    if app.screen() != Screen::Generate || app.focus() != Focus::Form {
+        return;
+    }
+    if app.input_mode() != InputMode::Editing {
+        return;
+    }
+    let field_id = app.generate().selected_field();
+    if !field_id.kind().is_picker() {
+        return;
+    }
+    let field = app.generate().form.field(field_id);
+    if !field.picker_is_editing() {
+        return;
+    }
+
+    let label = field_id.label();
+    let filter = field.picker_filter().unwrap_or("").trim();
+    let is_multi = field_id.kind().is_multi_select();
+
+    let visible_options = field.picker_visible_options();
+    let highlighted = visible_options
+        .iter()
+        .position(|o| o.highlighted)
+        .unwrap_or_default();
+
+    // Layout: 1 (filter row) + up to PICKER_MODAL_MAX_ROWS (options) + 1
+    // (footer) = at most PICKER_MODAL_MAX_ROWS + 2 inner rows, plus 2 for
+    // border = PICKER_MODAL_MAX_ROWS + 4.
+    let option_display_rows = visible_options.len().min(PICKER_MODAL_MAX_ROWS);
+    let has_more_indicator = visible_options.len() > PICKER_MODAL_MAX_ROWS;
+    let inner_height = 1 // filter
+        + option_display_rows
+        + usize::from(has_more_indicator) // "(… N more)" line
+        + 1; // footer
+    let modal_height = (inner_height + 2) as u16; // +2 for block border
+    let modal_width = (60u16).min(frame_area.width.saturating_sub(8)).max(20);
+    let clamped_height = modal_height.min(frame_area.height.saturating_sub(4).max(6));
+
+    let modal_rect = centered_rect(modal_width, clamped_height, frame_area);
+
+    // Clear the background.
+    frame.render_widget(Clear, modal_rect);
+
+    // Outer block (always "focused" because the modal owns input).  Reuse
+    // `themed_block` so the modal stays in step with other panes' chrome.
+    let title = Line::from(label.bold().fg(colors::ACCENT));
+    let block = themed_block(title, true);
+
+    let inner = block.inner(modal_rect);
+    frame.render_widget(block, modal_rect);
+
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    // Build content lines inside the modal.
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Filter row.
+    let filter_display = if filter.is_empty() {
+        "(none)".to_string()
+    } else {
+        filter.to_string()
+    };
+    lines.push(Line::from(format!("Filter: {filter_display}")).fg(colors::MUTED));
+
+    // Option rows (sliced around highlighted).
+    let (slice, remaining) =
+        picker_visible_slice(&visible_options, highlighted, PICKER_MODAL_MAX_ROWS);
+    for option in slice {
+        let prefix = if option.highlighted { "▶" } else { " " };
+        let selection = match (is_multi, option.selected) {
+            (true, true) => "[x]",
+            (false, true) => "[•]",
+            (_, false) => "[ ]",
+        };
+        let mut label_text = format!("{prefix} {selection} {}", option.label);
+        if !option.enabled {
+            label_text.push_str(" (disabled)");
+        }
+        let styled = if option.highlighted {
+            Line::from(label_text).fg(colors::ACCENT)
+        } else if !option.enabled {
+            Line::from(label_text).fg(colors::MUTED)
+        } else {
+            Line::from(label_text)
+        };
+        lines.push(styled);
+    }
+
+    if remaining > 0 {
+        lines.push(Line::from(format!("(… {remaining} more)")).fg(colors::MUTED));
+    }
+
+    // Footer key-hint row.
+    let footer_text = if inner.width < 40 {
+        if is_multi {
+            "↑↓ · Spc tog · Ent ok · Esc x".to_string()
+        } else {
+            "↑↓ · Ent ok · Esc x".to_string()
+        }
+    } else if is_multi {
+        "↑↓ move · Space toggle · Enter ok · Esc cancel".to_string()
+    } else {
+        "↑↓ move · type filter · Enter ok · Esc cancel".to_string()
+    };
+    lines.push(Line::from(footer_text).fg(colors::MUTED));
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        bounded_multiline_field_lines, compact_diff_stat, compute_editor_rect,
-        is_jj_default_description, truncate_chars, wrap_chars, wrapped_content_height,
+        bounded_multiline_field_lines, centered_rect, compact_diff_stat, compute_editor_rect,
+        is_jj_default_description, picker_visible_slice, truncate_chars, wrap_chars,
+        wrapped_content_height,
     };
+    use crate::generate::PickerOptionView;
     use ratatui::layout::Rect;
     use ratatui::text::{Line, Span};
 
@@ -2039,5 +2216,132 @@ mod tests {
     #[test]
     fn compute_editor_rect_zero_height_viewport_returns_none() {
         assert!(compute_editor_rect(inner(0, 0, 40, 0), 0, 1, 0).is_none());
+    }
+
+    // ---------------------------------------------------------------------------
+    // centered_rect tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn centered_rect_fits_inside_area() {
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 40,
+        };
+        let r = centered_rect(60, 20, area);
+        // Must be contained within the area.
+        assert!(r.x >= area.x);
+        assert!(r.y >= area.y);
+        assert!(r.x + r.width <= area.x + area.width);
+        assert!(r.y + r.height <= area.y + area.height);
+        assert_eq!(r.width, 60);
+        assert_eq!(r.height, 20);
+    }
+
+    #[test]
+    fn centered_rect_is_centered() {
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 40,
+        };
+        let r = centered_rect(60, 20, area);
+        // Horizontal center: (80 - 60) / 2 = 10.
+        assert_eq!(r.x, 10);
+        // Vertical center: (40 - 20) / 2 = 10.
+        assert_eq!(r.y, 10);
+    }
+
+    #[test]
+    fn centered_rect_clamps_to_area_when_larger() {
+        let area = Rect {
+            x: 5,
+            y: 3,
+            width: 20,
+            height: 10,
+        };
+        let r = centered_rect(100, 100, area);
+        assert_eq!(r.x, area.x);
+        assert_eq!(r.y, area.y);
+        assert_eq!(r.width, area.width);
+        assert_eq!(r.height, area.height);
+    }
+
+    // ---------------------------------------------------------------------------
+    // picker_visible_slice tests
+    // ---------------------------------------------------------------------------
+
+    fn make_options(count: usize) -> Vec<PickerOptionView> {
+        (0..count)
+            .map(|i| PickerOptionView {
+                label: format!("option {i}"),
+                value: format!("v{i}"),
+                enabled: true,
+                selected: false,
+                highlighted: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn picker_visible_slice_all_fit_when_small() {
+        let opts = make_options(5);
+        let (slice, remaining) = picker_visible_slice(&opts, 2, 10);
+        assert_eq!(slice.len(), 5);
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn picker_visible_slice_windows_around_highlighted() {
+        let opts = make_options(20);
+        // max_rows=5, highlighted=10 → window should include index 10.
+        let (slice, remaining) = picker_visible_slice(&opts, 10, 5);
+        assert_eq!(slice.len(), 5);
+        // Remaining = 20 - (start + 5); window starts around 10-2=8, so end=13, remaining=7.
+        assert!(remaining > 0);
+        // The highlighted index (10) should be inside the slice.
+        let slice_values: Vec<&str> = slice.iter().map(|o| o.value.as_str()).collect();
+        assert!(
+            slice_values.contains(&"v10"),
+            "highlighted not in slice: {slice_values:?}"
+        );
+    }
+
+    #[test]
+    fn picker_visible_slice_highlight_near_start_stays_in_bounds() {
+        let opts = make_options(20);
+        let (slice, _remaining) = picker_visible_slice(&opts, 1, 5);
+        assert_eq!(slice.len(), 5);
+        // Window starts at 0 because highlighted=1 < half=2.
+        assert_eq!(slice[0].value, "v0");
+    }
+
+    #[test]
+    fn picker_visible_slice_highlight_near_end_stays_in_bounds() {
+        let opts = make_options(20);
+        let (slice, remaining) = picker_visible_slice(&opts, 19, 5);
+        assert_eq!(slice.len(), 5);
+        // Window must end at 20.
+        assert_eq!(remaining, 0);
+        assert_eq!(slice.last().unwrap().value, "v19");
+    }
+
+    #[test]
+    fn picker_visible_slice_empty_input_returns_empty() {
+        let opts: Vec<PickerOptionView> = Vec::new();
+        let (slice, remaining) = picker_visible_slice(&opts, 0, 10);
+        assert!(slice.is_empty());
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn picker_visible_slice_zero_max_rows_returns_empty() {
+        let opts = make_options(5);
+        let (slice, remaining) = picker_visible_slice(&opts, 2, 0);
+        assert!(slice.is_empty());
+        assert_eq!(remaining, 0);
     }
 }
