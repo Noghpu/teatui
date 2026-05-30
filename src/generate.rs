@@ -1081,6 +1081,11 @@ impl RevsetSummary {
         &self.change_ids
     }
 
+    /// Returns the change_id of the tip commit in this revset, if any.
+    pub fn tip_change_id(&self) -> Option<&str> {
+        self.change_ids.first().map(String::as_str)
+    }
+
     pub fn recent_log(&self) -> &[String] {
         &self.recent_log
     }
@@ -1122,8 +1127,9 @@ impl GenerateState {
     pub fn new(revsets: Vec<RevsetSummary>) -> Self {
         let default_head = revsets
             .first()
-            .map(|revset| revset.label().to_string())
-            .unwrap_or_default();
+            .and_then(|revset| revset.tip_change_id())
+            .unwrap_or_default()
+            .to_string();
         let default_branch = revsets
             .first()
             .and_then(|revset| revset.bookmarks().first().cloned())
@@ -1265,7 +1271,11 @@ impl GenerateState {
     }
 
     pub fn sync_head_from_selected_revset(&mut self) {
-        let selected = self.selected_revset().label().to_string();
+        let selected = self
+            .selected_revset()
+            .tip_change_id()
+            .unwrap_or("")
+            .to_string();
         if !self.form.head.dirty() {
             self.form.head.set_value(selected);
         }
@@ -1282,7 +1292,11 @@ impl GenerateState {
     }
 
     pub fn force_sync_head_from_selected_revset(&mut self) {
-        let selected = self.selected_revset().label().to_string();
+        let selected = self
+            .selected_revset()
+            .tip_change_id()
+            .unwrap_or("")
+            .to_string();
         self.form.head.set_value(selected);
         let branch_name = self
             .selected_revset()
@@ -1518,7 +1532,10 @@ impl GenerateState {
     fn head_picker_options(&self) -> Vec<PickerOption> {
         let mut options = Vec::new();
         for revset in &self.revsets {
-            options.push(PickerOption::new(revset.label(), revset.label()));
+            let change_id = revset.tip_change_id().unwrap_or("");
+            if !change_id.is_empty() {
+                options.push(PickerOption::new(revset.label(), change_id));
+            }
         }
         options
     }
@@ -2321,7 +2338,11 @@ mod tests {
         );
     }
 
-    fn revset_with_bookmark(label: &str, bookmark: &str) -> RevsetSummary {
+    fn revset_with_bookmark_and_change_id(
+        label: &str,
+        bookmark: &str,
+        change_id: &str,
+    ) -> RevsetSummary {
         RevsetSummary::new(
             label,
             "description",
@@ -2329,7 +2350,7 @@ mod tests {
             "1 file changed",
             1,
             vec!["commit".into()],
-            vec!["change".into()],
+            vec![change_id.into()],
             vec!["commit change description".into()],
             Vec::new(),
         )
@@ -2338,8 +2359,8 @@ mod tests {
     #[test]
     fn select_revset_overwrites_head_even_when_dirty() {
         let mut state = GenerateState::new(vec![
-            revset_with_bookmark("@", "feature/current"),
-            revset_with_bookmark("@-", "feature/previous"),
+            revset_with_bookmark_and_change_id("@", "feature/current", "aaaabbbb"),
+            revset_with_bookmark_and_change_id("@-", "feature/previous", "ccccdddd"),
         ]);
         // Simulate user editing the head field so it becomes dirty.
         // set_value resets dirty to false; set dirty=true manually afterward.
@@ -2359,8 +2380,8 @@ mod tests {
 
         assert_eq!(
             state.form.head.display_value(),
-            "@-",
-            "force_sync must overwrite dirty head field"
+            "ccccdddd",
+            "force_sync must overwrite dirty head field with bare change_id"
         );
         assert_eq!(
             state.form.branch_name.display_value(),
