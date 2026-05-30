@@ -9,6 +9,7 @@ use tokio::{select, time::interval_at};
 use crate::context::ContextResult;
 use crate::generate::{GeneratedDraft, RevsetSummary, StaleCheckResult};
 use crate::llm::LlmError;
+use crate::pull_requests::PullRequestSummary;
 use crate::repo::RepoState;
 use crate::repo_options::RepoOptionsResult;
 
@@ -24,6 +25,7 @@ pub enum BackgroundEvent {
     Context(ContextResult),
     Repo(Box<RepoState>),
     Revsets(Vec<RevsetSummary>),
+    PullRequests(PullRequestsResult),
     StaleCheck(StaleCheckResult),
     Job(JobResult),
     ExecutionStep { index: usize, total: usize },
@@ -40,6 +42,21 @@ pub enum GenerationResult {
     Failed {
         request_id: u64,
         error: LlmError,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PullRequestsResult {
+    Ready {
+        request_id: u64,
+        items: Vec<PullRequestSummary>,
+    },
+    Failed {
+        request_id: u64,
+        command: String,
+        message: String,
+        stdout: String,
+        stderr: String,
     },
 }
 
