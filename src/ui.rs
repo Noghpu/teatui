@@ -1304,6 +1304,15 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         };
         raw_segments.push(format!(" prs:{} ", pr.load_status_label()).fg(colors::MUTED));
         raw_segments.push(format!(" prs:{selected}/{} ", pr.visible_count()).fg(colors::MUTED));
+        if let Some(msg) = app.status_message() {
+            let is_error = msg.starts_with("error:");
+            let span: Span<'static> = if is_error {
+                Span::styled(format!(" {msg} "), Style::new().fg(colors::BAD))
+            } else {
+                Span::styled(format!(" {msg} "), Style::new().fg(colors::GOOD))
+            };
+            raw_segments.push(span);
+        }
     }
 
     let divider = Span::styled(" │ ", Style::new().fg(colors::SURFACE1));
@@ -1456,6 +1465,10 @@ fn render_help(frame: &mut Frame, app: &App, area: Rect) {
             "panes ".fg(colors::MUTED),
             " c ".bold().fg(colors::ACCENT),
             "comment ".fg(colors::MUTED),
+            " o ".bold().fg(colors::ACCENT),
+            "open ".fg(colors::MUTED),
+            " y ".bold().fg(colors::ACCENT),
+            "yank url ".fg(colors::MUTED),
             " Enter/i ".bold().fg(colors::ACCENT),
             "edit filter ".fg(colors::MUTED),
             " r ".bold().fg(colors::ACCENT),

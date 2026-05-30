@@ -17,6 +17,8 @@ pub enum Action {
     OpenCommentModal,
     SubmitComment,
     CancelComment,
+    OpenPrInBrowser,
+    CopyPrUrl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

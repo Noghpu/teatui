@@ -12,6 +12,7 @@ use crate::event::{
     AppEvent, BackgroundEvent, EventHandler, ExecutionOutcome, GenerationResult, JobResult,
     JobStatus, PrCommentResult, PullRequestsResult,
 };
+use crate::external;
 use crate::generate::{
     ExecutionPlan, Focus, GeneratePhase, GenerateState, InputMode, PrForm, RevsetSummary,
     StaleCheckResult, TextFieldState, validate_for_execution,
@@ -421,6 +422,7 @@ pub struct App {
     active_generation: Option<GenerationRequest>,
     repo_options: RepoOptions,
     should_quit: bool,
+    pub status_message: Option<String>,
 }
 
 impl App {
@@ -445,6 +447,7 @@ impl App {
             active_generation: None,
             repo_options: RepoOptions::default(),
             should_quit: false,
+            status_message: None,
         }
     }
 
@@ -530,6 +533,26 @@ impl App {
             return Action::OpenCommentModal;
         }
 
+        // PR open-in-browser shortcut: 'o' opens the selected PR URL.
+        if self.screen == Screen::PullRequests
+            && self.input_mode == InputMode::Normal
+            && self.pull_requests.comment_phase == PrCommentPhase::Idle
+            && matches!(key.code, KeyCode::Char('o'))
+            && self.pull_requests.selected_item().is_some()
+        {
+            return Action::OpenPrInBrowser;
+        }
+
+        // PR yank-URL shortcut: 'y' copies the selected PR URL.
+        if self.screen == Screen::PullRequests
+            && self.input_mode == InputMode::Normal
+            && self.pull_requests.comment_phase == PrCommentPhase::Idle
+            && matches!(key.code, KeyCode::Char('y'))
+            && self.pull_requests.selected_item().is_some()
+        {
+            return Action::CopyPrUrl;
+        }
+
         match key.code {
             KeyCode::Char('q') => Action::Quit,
             KeyCode::Esc => Action::Back,
@@ -589,6 +612,10 @@ impl App {
     }
 
     fn update(&mut self, action: Action) {
+        // Clear any transient status message on each non-Tick user action so it
+        // does not linger across unrelated interactions.  The OpenPrInBrowser
+        // and CopyPrUrl handlers will set a fresh message after the clear.
+        self.status_message = None;
         match action {
             Action::Tick => {}
             Action::Quit => self.should_quit = true,
@@ -607,6 +634,8 @@ impl App {
             Action::OpenCommentModal => self.open_comment_modal(),
             Action::SubmitComment => self.submit_comment(),
             Action::CancelComment => self.cancel_comment(),
+            Action::OpenPrInBrowser => self.open_selected_pr_in_browser(),
+            Action::CopyPrUrl => self.copy_selected_pr_url(),
         }
     }
 
@@ -860,6 +889,62 @@ impl App {
 
     fn cancel_comment(&mut self) {
         self.pull_requests.close_comment_modal();
+    }
+
+    fn open_selected_pr_in_browser(&mut self) {
+        if self.screen != Screen::PullRequests {
+            return;
+        }
+        let Some(pr) = self.pull_requests.selected_item() else {
+            return;
+        };
+        let url = pr.url.trim().to_string();
+        if url.is_empty() {
+            let msg = "error: PR has no URL".to_string();
+            self.log(msg.clone());
+            self.status_message = Some(msg);
+            return;
+        }
+        match external::open_in_browser(&url) {
+            Ok(()) => {
+                let msg = format!("opened {url} in browser");
+                self.log(msg.clone());
+                self.status_message = Some(msg);
+            }
+            Err(e) => {
+                let msg = format!("error: {e}");
+                self.log(msg.clone());
+                self.status_message = Some(msg);
+            }
+        }
+    }
+
+    fn copy_selected_pr_url(&mut self) {
+        if self.screen != Screen::PullRequests {
+            return;
+        }
+        let Some(pr) = self.pull_requests.selected_item() else {
+            return;
+        };
+        let url = pr.url.trim().to_string();
+        if url.is_empty() {
+            let msg = "error: PR has no URL".to_string();
+            self.log(msg.clone());
+            self.status_message = Some(msg);
+            return;
+        }
+        match external::copy_to_clipboard(&url) {
+            Ok(()) => {
+                let msg = format!("copied {url} to clipboard");
+                self.log(msg.clone());
+                self.status_message = Some(msg);
+            }
+            Err(e) => {
+                let msg = format!("error: {e}");
+                self.log(msg.clone());
+                self.status_message = Some(msg);
+            }
+        }
     }
 
     fn submit_comment(&mut self) {
@@ -1562,6 +1647,10 @@ impl App {
     pub fn repo_options(&self) -> &RepoOptions {
         &self.repo_options
     }
+
+    pub fn status_message(&self) -> Option<&str> {
+        self.status_message.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -2216,6 +2305,157 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty())),
             Action::ConfirmExecution
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Open-in-browser / yank-URL shortcut tests
+    // -------------------------------------------------------------------------
+
+    fn pr_app_with_selected() -> App {
+        let mut app = test_app();
+        app.screen = Screen::PullRequests;
+        app.pull_requests.items = vec![sample_pull_request(1, "First")];
+        app.pull_requests.selected_item = 0;
+        app
+    }
+
+    #[test]
+    fn o_in_pr_view_emits_open_action_when_pr_selected() {
+        let app = pr_app_with_selected();
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()));
+        assert_eq!(action, Action::OpenPrInBrowser);
+    }
+
+    #[test]
+    fn y_in_pr_view_emits_copy_action_when_pr_selected() {
+        let app = pr_app_with_selected();
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()));
+        assert_eq!(action, Action::CopyPrUrl);
+    }
+
+    #[test]
+    fn o_and_y_are_inert_with_no_selection() {
+        let mut app = test_app();
+        app.screen = Screen::PullRequests;
+        // No items — visible list is empty, selected_item() returns None.
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty())),
+            Action::Tick
+        );
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty())),
+            Action::Tick
+        );
+    }
+
+    #[test]
+    fn o_and_y_are_inert_while_comment_modal_open() {
+        let mut app = pr_app_with_selected();
+        app.pull_requests.comment_phase = PrCommentPhase::Editing;
+
+        // While comment modal is open all keys are routed through
+        // handle_comment_modal_key, so 'o' and 'y' become EditKey actions.
+        let o_action = app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()));
+        assert_ne!(o_action, Action::OpenPrInBrowser);
+
+        let y_action = app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()));
+        assert_ne!(y_action, Action::CopyPrUrl);
+    }
+
+    #[test]
+    fn o_and_y_are_inert_in_filter_edit_mode() {
+        let mut app = pr_app_with_selected();
+        app.input_mode = InputMode::Editing;
+
+        // In Editing mode handle_edit_key routes characters to EditKey.
+        let o_action = app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()));
+        assert_eq!(
+            o_action,
+            Action::EditKey(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()))
+        );
+
+        let y_action = app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()));
+        assert_eq!(
+            y_action,
+            Action::EditKey(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()))
+        );
+    }
+
+    #[test]
+    fn open_action_with_empty_url_logs_error_and_does_not_call_helper() {
+        let mut app = test_app();
+        app.screen = Screen::PullRequests;
+        // Insert a PR with an empty URL.
+        app.pull_requests.items = vec![PullRequestSummary {
+            index: 99,
+            title: "No URL".into(),
+            state: "open".into(),
+            author: "bot".into(),
+            url: "".into(),
+            head: "branch".into(),
+            base: "main".into(),
+            body: "".into(),
+            updated: "2026-05-29T00:00:00Z".into(),
+            labels: vec![],
+        }];
+        app.pull_requests.selected_item = 0;
+
+        // Dispatch OpenPrInBrowser directly (no OS call happens because the
+        // guard catches the empty URL before reaching the external helper).
+        app.update(Action::OpenPrInBrowser);
+
+        assert!(
+            app.status_message
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("error:"),
+            "status_message should start with 'error:'"
+        );
+        assert!(
+            app.logs.entries.iter().any(|e| e.contains("no URL")),
+            "log should mention missing URL"
+        );
+    }
+
+    #[test]
+    fn copy_action_with_empty_url_logs_error_and_does_not_call_helper() {
+        let mut app = test_app();
+        app.screen = Screen::PullRequests;
+        app.pull_requests.items = vec![PullRequestSummary {
+            index: 100,
+            title: "No URL either".into(),
+            state: "open".into(),
+            author: "bot".into(),
+            url: "  ".into(), // whitespace only — should be treated as empty
+            head: "branch".into(),
+            base: "main".into(),
+            body: "".into(),
+            updated: "2026-05-29T00:00:00Z".into(),
+            labels: vec![],
+        }];
+        app.pull_requests.selected_item = 0;
+
+        app.update(Action::CopyPrUrl);
+
+        assert!(
+            app.status_message
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("error:"),
+            "status_message should start with 'error:'"
+        );
+    }
+
+    #[test]
+    fn status_message_is_cleared_on_next_action() {
+        let mut app = pr_app_with_selected();
+        app.status_message = Some("opened https://example.com in browser".into());
+
+        // Any action clears the message.
+        app.update(Action::Tick);
+
+        assert!(app.status_message.is_none());
     }
 
     #[test]
