@@ -3,15 +3,15 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, List, ListItem, Padding, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Padding, Paragraph, Wrap},
 };
 
 use crate::colors;
 
 use crate::app::{App, JobRecord, Screen};
 use crate::generate::{
-    ExecutionPlan, FieldId, Focus, GeneratePhase, GenerateState, PromptView, RevsetSummary,
-    StaleCheckResult,
+    ExecutionPlan, FieldId, Focus, GeneratePhase, GenerateState, InputMode, PromptView,
+    RevsetSummary, StaleCheckResult,
 };
 use crate::prompt::PromptBuild;
 use crate::repo::{LlmStatus, TeaAuth, ToolStatus};
@@ -695,7 +695,11 @@ fn render_work(frame: &mut Frame, app: &mut App, area: Rect) {
             lines
         }
         Screen::Generate => {
-            let (lines, selected_range) = render_generate_fields(app, area);
+            let editing_text = app.focus() == Focus::Form
+                && app.input_mode() == InputMode::Editing
+                && !app.generate().selected_field().kind().is_picker();
+            let (lines, selected_range, editor_row_range) =
+                render_generate_fields(app, area, editing_text);
             let block = themed_block(
                 focused_title("PR Form", app.focus() == Focus::Form),
                 app.focus() == Focus::Form,
@@ -715,15 +719,26 @@ fn render_work(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
                 generate.form_scroll.clamp(content_height, viewport_height);
             }
+            let scroll_offset = app.generate().form_scroll.offset;
 
             let form = Paragraph::new(lines)
                 .block(block)
-                .scroll((
-                    app.generate().form_scroll.offset.min(u16::MAX as usize) as u16,
-                    0,
-                ))
+                .scroll((scroll_offset.min(u16::MAX as usize) as u16, 0))
                 .wrap(Wrap { trim: false });
             frame.render_widget(form, area);
+
+            // Overlay the TextArea widget for the editing field.
+            if editing_text && let Some((editor_start, editor_end)) = editor_row_range {
+                let selected_field_id = app.generate().selected_field();
+                if let Some(editor) = app.generate().form.field(selected_field_id).text_editor()
+                    && let Some(editor_rect) =
+                        compute_editor_rect(inner, editor_start, editor_end, scroll_offset)
+                {
+                    frame.render_widget(Clear, editor_rect);
+                    frame.render_widget(editor, editor_rect);
+                }
+            }
+
             return;
         }
         Screen::PullRequests => vec![
@@ -758,33 +773,50 @@ fn render_work(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(form, area);
 }
 
-fn render_generate_fields(app: &App, area: Rect) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
+#[allow(clippy::type_complexity)]
+fn render_generate_fields(
+    app: &App,
+    area: Rect,
+    editing_text: bool,
+) -> (
+    Vec<Line<'static>>,
+    Option<(usize, usize)>,
+    Option<(usize, usize)>,
+) {
     let total = FieldId::ALL.len();
     let last = total.saturating_sub(1);
     let sep_width = area.width.saturating_sub(6) as usize;
     let separator = format!("  {}  ", "─".repeat(sep_width));
     let mut lines = Vec::new();
     let mut selected_range = None;
+    let mut editor_row_range = None;
 
     for (index, field_id) in FieldId::ALL.iter().enumerate() {
         let start = lines.len();
-        let mut field_lines = render_generate_field(
+        let is_selected = index == app.generate().selected_field;
+        let is_focused = is_selected && app.focus() == Focus::Form;
+        let editing_this_field = is_selected && editing_text;
+        let (mut field_lines, edit_range) = render_generate_field(
             app.generate(),
             *field_id,
-            index == app.generate().selected_field,
-            index == app.generate().selected_field && app.focus() == Focus::Form,
+            is_selected,
+            is_focused,
             total,
+            editing_this_field,
         );
         lines.append(&mut field_lines);
-        if index == app.generate().selected_field {
+        if is_selected {
             selected_range = Some((start, lines.len()));
+            if let Some((rel_start, rel_end)) = edit_range {
+                editor_row_range = Some((start + rel_start, start + rel_end));
+            }
         }
         if index < last {
             lines.push(Line::from(separator.clone()).fg(colors::BORDER));
         }
     }
 
-    (lines, selected_range)
+    (lines, selected_range, editor_row_range)
 }
 
 fn generate_work_title(phase: GeneratePhase) -> &'static str {
@@ -973,26 +1005,22 @@ fn render_help(frame: &mut Frame, app: &App, area: Rect) {
             " q ".bold().fg(colors::ACCENT),
             "quit ".fg(colors::MUTED),
         ]),
-        Screen::Generate if app.input_mode() == crate::generate::InputMode::Editing => {
-            Line::from(vec![
-                " typing ".bold().fg(colors::ACCENT),
-                "edit field ".fg(colors::MUTED),
-                " Enter ".bold().fg(colors::ACCENT),
-                "save single-line / newline description ".fg(colors::MUTED),
-                " Ctrl+S ".bold().fg(colors::ACCENT),
-                "commit description ".fg(colors::MUTED),
-                " Esc ".bold().fg(colors::ACCENT),
-                "cancel ".fg(colors::MUTED),
-            ])
-        }
-        Screen::Generate if app.input_mode() == crate::generate::InputMode::Confirm => {
-            Line::from(vec![
-                " Enter ".bold().fg(colors::ACCENT),
-                "execute ".fg(colors::MUTED),
-                " Esc ".bold().fg(colors::ACCENT),
-                "cancel ".fg(colors::MUTED),
-            ])
-        }
+        Screen::Generate if app.input_mode() == InputMode::Editing => Line::from(vec![
+            " cursor ".bold().fg(colors::ACCENT),
+            "editing active ".fg(colors::MUTED),
+            " Enter ".bold().fg(colors::ACCENT),
+            "save single-line / newline description ".fg(colors::MUTED),
+            " Ctrl+S ".bold().fg(colors::ACCENT),
+            "commit description ".fg(colors::MUTED),
+            " Esc ".bold().fg(colors::ACCENT),
+            "cancel ".fg(colors::MUTED),
+        ]),
+        Screen::Generate if app.input_mode() == InputMode::Confirm => Line::from(vec![
+            " Enter ".bold().fg(colors::ACCENT),
+            "execute ".fg(colors::MUTED),
+            " Esc ".bold().fg(colors::ACCENT),
+            "cancel ".fg(colors::MUTED),
+        ]),
         Screen::Generate if app.generate().phase == GeneratePhase::CheckingFreshness => {
             Line::from(vec![
                 " Esc ".bold().fg(colors::ACCENT),
@@ -1259,13 +1287,19 @@ fn render_prompt_text(prompt: &PromptBuild) -> Vec<Line<'static>> {
     lines
 }
 
+/// Returns the rendered lines for a single form field, plus an optional
+/// `(relative_start, relative_end)` range indicating which rows within the
+/// returned slice are blank placeholders reserved for the TextArea widget
+/// overlay.  The range is `Some(...)` only when `editing` is true and the
+/// field is a text field.
 fn render_generate_field(
     generate: &GenerateState,
     field_id: FieldId,
     selected: bool,
     focused: bool,
     total_fields: usize,
-) -> Vec<Line<'static>> {
+    editing: bool,
+) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
     let field = generate.form.field(field_id);
     let label = field_id.label();
     let value = field.display_value().to_string();
@@ -1279,11 +1313,26 @@ fn render_generate_field(
     } else {
         String::new()
     };
+
+    // When actively editing a text field, the value is rendered by the
+    // TextArea widget overlay, not inline.  The header omits the value for
+    // single-line fields and blank placeholder rows are inserted for the
+    // editor widget to overdraw.
+    let editing_text = editing && !is_picker;
+
     let header = if is_multiline {
         if error_count > 0 {
             format!("{marker} {label} ({error_count} errors){index_suffix}")
         } else {
             format!("{marker} {label}{index_suffix}")
+        }
+    } else if editing_text {
+        // Single-line text field being edited: omit value from header so the
+        // textarea widget below the header row shows the live value.
+        if error_count > 0 {
+            format!("{marker} {label}: ({error_count} errors){index_suffix}")
+        } else {
+            format!("{marker} {label}:{index_suffix}")
         }
     } else if error_count > 0 {
         format!("{marker} {label}: {value} ({error_count} errors){index_suffix}")
@@ -1298,7 +1347,22 @@ fn render_generate_field(
         lines.push(Line::from(header.fg(colors::MUTED)));
     }
 
-    if is_multiline {
+    let mut edit_range: Option<(usize, usize)> = None;
+
+    if editing_text {
+        // Insert blank placeholder rows that will be overdrawn by the
+        // TextArea widget.  The range is relative to the start of `lines`.
+        let placeholder_count = if is_multiline {
+            DESCRIPTION_FIELD_DISPLAY_LINES
+        } else {
+            1
+        };
+        let rel_start = lines.len();
+        for _ in 0..placeholder_count {
+            lines.push(Line::from(""));
+        }
+        edit_range = Some((rel_start, rel_start + placeholder_count));
+    } else if is_multiline {
         let field_lines = bounded_multiline_field_lines(&value, DESCRIPTION_FIELD_DISPLAY_LINES);
         if field_lines.is_empty() {
             lines.push(Line::from("    (empty)").fg(colors::MUTED));
@@ -1368,7 +1432,7 @@ fn render_generate_field(
         lines.push(Line::from(format!("    - {error}")).fg(colors::BAD));
     }
 
-    lines
+    (lines, edit_range)
 }
 
 fn bounded_multiline_field_lines(value: &str, max_lines: usize) -> Vec<&str> {
@@ -1376,6 +1440,46 @@ fn bounded_multiline_field_lines(value: &str, max_lines: usize) -> Vec<&str> {
         return Vec::new();
     }
     value.lines().take(max_lines).collect()
+}
+
+/// Compute the sub-Rect within `inner` that corresponds to the placeholder
+/// rows `[editor_start, editor_end)` in the content, after applying
+/// `scroll_offset`.  Returns `None` when the editor rows are entirely
+/// outside the visible viewport.
+fn compute_editor_rect(
+    inner: Rect,
+    editor_start: usize,
+    editor_end: usize,
+    scroll_offset: usize,
+) -> Option<Rect> {
+    let viewport_height = inner.height as usize;
+    if viewport_height == 0 || editor_end <= scroll_offset {
+        return None;
+    }
+
+    // Row in the viewport (0-indexed) where the editor area begins.
+    let vis_start = editor_start.saturating_sub(scroll_offset);
+    let vis_end = editor_end.saturating_sub(scroll_offset);
+
+    if vis_start >= viewport_height {
+        return None;
+    }
+
+    let clamped_start = vis_start.min(viewport_height - 1);
+    let clamped_end = vis_end.min(viewport_height);
+    if clamped_end <= clamped_start {
+        return None;
+    }
+
+    let y = inner.y + clamped_start as u16;
+    let height = (clamped_end - clamped_start) as u16;
+
+    Some(Rect {
+        x: inner.x,
+        y,
+        width: inner.width,
+        height,
+    })
 }
 
 fn render_generate_preview(app: &App) -> Vec<Line<'static>> {
@@ -1766,9 +1870,10 @@ fn render_recent_logs(
 #[cfg(test)]
 mod tests {
     use super::{
-        bounded_multiline_field_lines, compact_diff_stat, is_jj_default_description,
-        truncate_chars, wrap_chars, wrapped_content_height,
+        bounded_multiline_field_lines, compact_diff_stat, compute_editor_rect,
+        is_jj_default_description, truncate_chars, wrap_chars, wrapped_content_height,
     };
+    use ratatui::layout::Rect;
     use ratatui::text::{Line, Span};
 
     #[test]
@@ -1878,5 +1983,61 @@ mod tests {
     #[test]
     fn bounded_multiline_field_lines_hides_empty_description() {
         assert!(bounded_multiline_field_lines(" \n ", 6).is_empty());
+    }
+
+    fn inner(x: u16, y: u16, width: u16, height: u16) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn compute_editor_rect_no_scroll_single_row_in_viewport() {
+        // Editor rows 1..2 (1 row), no scroll, viewport height 10.
+        let rect = compute_editor_rect(inner(2, 3, 30, 10), 1, 2, 0);
+        let r = rect.expect("should be Some");
+        assert_eq!(r.y, 3 + 1); // inner.y + vis_start
+        assert_eq!(r.height, 1);
+        assert_eq!(r.x, 2);
+        assert_eq!(r.width, 30);
+    }
+
+    #[test]
+    fn compute_editor_rect_multiline_no_scroll() {
+        // Editor rows 1..7 (6 rows = DESCRIPTION_FIELD_DISPLAY_LINES), no scroll.
+        let rect = compute_editor_rect(inner(0, 0, 40, 20), 1, 7, 0);
+        let r = rect.expect("should be Some");
+        assert_eq!(r.y, 1);
+        assert_eq!(r.height, 6);
+    }
+
+    #[test]
+    fn compute_editor_rect_scrolled_partially_visible() {
+        // Editor rows 3..9 with scroll offset 5: visible rows 0..4 of viewport.
+        // vis_start = 3 - 5 = 0 (clamped), vis_end = 9 - 5 = 4.
+        let rect = compute_editor_rect(inner(0, 0, 40, 10), 3, 9, 5);
+        let r = rect.expect("should be Some");
+        assert_eq!(r.y, 0);
+        assert_eq!(r.height, 4);
+    }
+
+    #[test]
+    fn compute_editor_rect_entirely_above_viewport_returns_none() {
+        // Editor rows 0..2 with scroll offset 5: entirely scrolled past.
+        assert!(compute_editor_rect(inner(0, 0, 40, 10), 0, 2, 5).is_none());
+    }
+
+    #[test]
+    fn compute_editor_rect_entirely_below_viewport_returns_none() {
+        // Editor rows 15..17 with viewport height 10 and no scroll.
+        assert!(compute_editor_rect(inner(0, 0, 40, 10), 15, 17, 0).is_none());
+    }
+
+    #[test]
+    fn compute_editor_rect_zero_height_viewport_returns_none() {
+        assert!(compute_editor_rect(inner(0, 0, 40, 0), 0, 1, 0).is_none());
     }
 }
