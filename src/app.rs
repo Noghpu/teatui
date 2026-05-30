@@ -425,6 +425,40 @@ pub struct App {
     pub status_message: Option<String>,
 }
 
+/// Pane-local key dispatch for the Generate screen in Normal input mode.
+///
+/// Returns `Some(action)` when the key is consumed by a pane-local rule.
+/// Returns `None` for keys that should fall through to the global match
+/// (arrows, j/k, Tab, Shift+Tab, Esc, q, Ctrl+C, Enter, etc.).
+fn dispatch_generate_normal(focus: Focus, key: KeyEvent) -> Option<Action> {
+    match (focus, key.code) {
+        // Menu pane: r refreshes the revset list.
+        (Focus::Menu, KeyCode::Char('r')) => Some(Action::Refresh),
+        // Menu pane: g / p / i / c are no-ops when Menu is focused.
+        (
+            Focus::Menu,
+            KeyCode::Char('g') | KeyCode::Char('p') | KeyCode::Char('i') | KeyCode::Char('c'),
+        ) => Some(Action::Tick),
+
+        // Form pane: g runs generate, i begins editing.
+        (Focus::Form, KeyCode::Char('g')) => Some(Action::Generate),
+        (Focus::Form, KeyCode::Char('i')) => Some(Action::Edit),
+        // Form pane: p / c / r are no-ops when Form is focused.
+        (Focus::Form, KeyCode::Char('p') | KeyCode::Char('c') | KeyCode::Char('r')) => {
+            Some(Action::Tick)
+        }
+
+        // Preview pane: p toggles the prompt view, g regenerates.
+        (Focus::Preview, KeyCode::Char('p')) => Some(Action::TogglePromptView),
+        (Focus::Preview, KeyCode::Char('g')) => Some(Action::Generate),
+        // Preview pane: i / r are no-ops when Preview is focused.
+        (Focus::Preview, KeyCode::Char('i') | KeyCode::Char('r')) => Some(Action::Tick),
+
+        // All other keys (global navigation, Enter, Esc, q, Tab, …) fall through.
+        _ => None,
+    }
+}
+
 impl App {
     pub fn new(config: crate::config::Config, bg_tx: UnboundedSender<BackgroundEvent>) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -510,17 +544,25 @@ impl App {
                         _ => Action::Tick,
                     };
                 }
-                GeneratePhase::DraftReady => {
-                    if matches!(key.code, KeyCode::Char('c')) {
-                        return Action::ConfirmExecution;
-                    }
+                GeneratePhase::DraftReady
+                    if matches!(key.code, KeyCode::Char('c')) && self.focus == Focus::Preview =>
+                {
+                    return Action::ConfirmExecution;
                 }
-                GeneratePhase::Failed => {
-                    if matches!(key.code, KeyCode::Char('c')) {
-                        return Action::ConfirmExecution;
-                    }
+                GeneratePhase::Failed
+                    if matches!(key.code, KeyCode::Char('c')) && self.focus == Focus::Preview =>
+                {
+                    return Action::ConfirmExecution;
                 }
                 _ => {}
+            }
+
+            // Pane-local dispatch for Generate / Normal mode.
+            // Keys that belong to a specific pane are silently ignored when
+            // a different pane is focused.  Truly global keys (Tab, Shift+Tab,
+            // Esc, q, Ctrl+C, arrows/j/k) fall through to the global match.
+            if let Some(action) = dispatch_generate_normal(self.focus, key) {
+                return action;
             }
         }
 
@@ -1832,6 +1874,7 @@ mod tests {
         let mut app = test_app();
         app.screen = Screen::Generate;
         app.generate.phase = GeneratePhase::DraftReady;
+        app.focus = Focus::Preview;
 
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty())),
@@ -1899,6 +1942,7 @@ mod tests {
         let mut app = test_app();
         app.screen = Screen::Generate;
         app.generate.phase = GeneratePhase::Failed;
+        app.focus = Focus::Preview;
 
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty())),
@@ -2108,6 +2152,57 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // Pane-local keymap tests (Generate screen)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn p_is_noop_outside_preview_focus() {
+        // 'p' should be a no-op (Tick) when any non-Preview pane is focused.
+        let mut app = test_app();
+        app.screen = Screen::Generate;
+
+        app.focus = Focus::Menu;
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::empty())),
+            Action::Tick,
+            "'p' must be a no-op on Menu pane"
+        );
+
+        app.focus = Focus::Form;
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::empty())),
+            Action::Tick,
+            "'p' must be a no-op on Form pane"
+        );
+    }
+
+    #[test]
+    fn global_keys_work_from_all_generate_panes() {
+        // Tab, Esc, q, arrows must work regardless of which pane is focused.
+        for focus in [Focus::Menu, Focus::Form, Focus::Preview] {
+            let mut app = test_app();
+            app.screen = Screen::Generate;
+            app.focus = focus;
+
+            assert_eq!(
+                app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty())),
+                Action::FocusNext,
+                "Tab must work from {focus:?}"
+            );
+            assert_eq!(
+                app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())),
+                Action::Back,
+                "Esc must work from {focus:?}"
+            );
+            assert_eq!(
+                app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty())),
+                Action::Quit,
+                "'q' must work from {focus:?}"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // PR comment modal tests
     // -------------------------------------------------------------------------
 
@@ -2289,18 +2384,20 @@ mod tests {
 
     #[test]
     fn generate_pr_c_confirm_behavior_not_regressed() {
-        // DraftReady phase: 'c' maps to ConfirmExecution, not OpenCommentModal.
+        // DraftReady phase: 'c' maps to ConfirmExecution only when Preview is focused.
         let mut app = test_app();
         app.screen = Screen::Generate;
         app.generate.phase = GeneratePhase::DraftReady;
+        app.focus = Focus::Preview;
 
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty())),
             Action::ConfirmExecution
         );
 
-        // Failed phase: 'c' maps to ConfirmExecution.
+        // Failed phase: 'c' maps to ConfirmExecution only when Preview is focused.
         app.generate.phase = GeneratePhase::Failed;
+        app.focus = Focus::Preview;
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty())),
             Action::ConfirmExecution
