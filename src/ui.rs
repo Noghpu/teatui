@@ -10,13 +10,13 @@ use ratatui::{
 
 use crate::colors;
 
-use crate::app::{App, JobRecord, PrCommentPhase, Screen};
+use crate::app::{App, JobRecord, Screen};
 use crate::generate::{
     ExecutionPlan, FieldId, Focus, GeneratePhase, GenerateState, InputMode, PickerOptionView,
     PromptView, RevsetSummary, StaleCheckResult,
 };
 use crate::prompt::PromptBuild;
-use crate::pull_requests::PullRequestSummary;
+use crate::pull_requests::{PrCommentPhase, PullRequestLoadStatus, PullRequestSummary};
 use crate::repo::{LlmStatus, TeaAuth, ToolStatus};
 
 const DESCRIPTION_FIELD_DISPLAY_LINES: usize = 6;
@@ -291,10 +291,10 @@ fn render_pull_request_menu(app: &App) -> (Vec<ListItem<'static>>, &'static str)
     if visible.is_empty() {
         let mut items = Vec::new();
         let message = match state.load_status {
-            crate::app::PullRequestLoadStatus::Loading if state.items.is_empty() => {
+            PullRequestLoadStatus::Loading if state.items.is_empty() => {
                 "Loading open pull requests..."
             }
-            crate::app::PullRequestLoadStatus::Failed if state.items.is_empty() => state
+            PullRequestLoadStatus::Failed if state.items.is_empty() => state
                 .load_error
                 .as_deref()
                 .unwrap_or("No open pull requests"),
@@ -893,7 +893,7 @@ fn render_pull_request_work<'a>(app: &'a App) -> Vec<Line<'a>> {
                 _ => {}
             }
         }
-        None if state.load_status == crate::app::PullRequestLoadStatus::Loading => {
+        None if state.load_status == PullRequestLoadStatus::Loading => {
             lines.push(Line::from(""));
             lines.push(Line::from("Loading open pull requests...").fg(colors::ACCENT));
         }
@@ -901,9 +901,7 @@ fn render_pull_request_work<'a>(app: &'a App) -> Vec<Line<'a>> {
             lines.push(Line::from(""));
             lines.push(Line::from("No pull requests match the current filter.").fg(colors::MUTED));
         }
-        None if visible.is_empty()
-            && state.load_status != crate::app::PullRequestLoadStatus::Failed =>
-        {
+        None if visible.is_empty() && state.load_status != PullRequestLoadStatus::Failed => {
             lines.push(Line::from(""));
             lines.push(Line::from("No open pull requests found.".fg(colors::MUTED)));
         }
@@ -962,7 +960,7 @@ fn render_pull_request_preview(app: &App) -> Vec<Line<'static>> {
                 }
             }
         }
-        None if state.load_status == crate::app::PullRequestLoadStatus::Loading => {
+        None if state.load_status == PullRequestLoadStatus::Loading => {
             lines.push(Line::from(""));
             lines.push(Line::from("Loading open pull requests...").fg(colors::ACCENT));
         }
@@ -970,7 +968,7 @@ fn render_pull_request_preview(app: &App) -> Vec<Line<'static>> {
             lines.push(Line::from(""));
             lines.push(Line::from("No pull requests match the current filter.").fg(colors::MUTED));
         }
-        None if state.load_status == crate::app::PullRequestLoadStatus::Failed => {
+        None if state.load_status == PullRequestLoadStatus::Failed => {
             lines.push(Line::from(""));
             lines.push(
                 Line::from(
