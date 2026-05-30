@@ -15,11 +15,11 @@ use crate::event::{
 use crate::external;
 use crate::generate::{
     ExecutionPlan, Focus, GeneratePhase, GenerateState, InputMode, PrForm, RevsetSummary,
-    StaleCheckResult, TextFieldState, validate_for_execution,
+    StaleCheckResult, validate_for_execution,
 };
 use crate::jj;
 use crate::llm::LlmClient;
-use crate::pull_requests::PullRequestSummary;
+use crate::pull_requests::{PrCommentPhase, PullRequestState};
 use crate::repo::{self, RepoState};
 use crate::repo_options::{self, RepoOptions, RepoOptionsResult};
 use crate::tea;
@@ -107,15 +107,6 @@ impl JobRegistry {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PrCommentPhase {
-    #[default]
-    Idle,
-    Editing,
-    Submitting,
-    Failed,
-}
-
 #[derive(Debug, Default, Clone)]
 pub struct LandingState {
     pub selected_entry: usize,
@@ -125,276 +116,6 @@ pub struct LandingState {
 pub struct ListState {
     pub selected_item: usize,
     pub preview_scroll: crate::generate::ScrollState,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PullRequestLoadStatus {
-    #[default]
-    Idle,
-    Loading,
-    Ready,
-    Failed,
-}
-
-impl PullRequestLoadStatus {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Loading => "loading",
-            Self::Ready => "ready",
-            Self::Failed => "failed",
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct PullRequestState {
-    pub items: Vec<PullRequestSummary>,
-    pub selected_item: usize,
-    pub filter: TextFieldState,
-    pub load_status: PullRequestLoadStatus,
-    pub load_error: Option<String>,
-    pub preview_scroll: crate::generate::ScrollState,
-    pub next_request_id: u64,
-    pub active_request_id: Option<u64>,
-    pub comment_phase: PrCommentPhase,
-    pub comment_buffer: String,
-    pub comment_cursor: usize,
-    pub comment_error: Option<String>,
-}
-
-impl Default for PullRequestState {
-    fn default() -> Self {
-        Self {
-            items: Vec::new(),
-            selected_item: 0,
-            filter: TextFieldState::new(""),
-            load_status: PullRequestLoadStatus::Idle,
-            load_error: None,
-            preview_scroll: crate::generate::ScrollState::default(),
-            next_request_id: 1,
-            active_request_id: None,
-            comment_phase: PrCommentPhase::Idle,
-            comment_buffer: String::new(),
-            comment_cursor: 0,
-            comment_error: None,
-        }
-    }
-}
-
-impl PullRequestState {
-    pub fn begin_load(&mut self) -> u64 {
-        let request_id = self.next_request_id;
-        self.next_request_id = self.next_request_id.saturating_add(1);
-        self.active_request_id = Some(request_id);
-        self.load_status = PullRequestLoadStatus::Loading;
-        self.load_error = None;
-        request_id
-    }
-
-    pub fn is_loading(&self) -> bool {
-        self.active_request_id.is_some()
-    }
-
-    pub fn load_status_label(&self) -> &'static str {
-        self.load_status.label()
-    }
-
-    pub fn begin_filter_edit(&mut self) {
-        self.filter.begin_edit();
-    }
-
-    pub fn input_filter(&mut self, key: crossterm::event::KeyEvent) {
-        self.filter.input(key);
-        self.clamp_selection();
-    }
-
-    pub fn commit_filter(&mut self) {
-        self.filter.commit();
-        self.clamp_selection();
-    }
-
-    pub fn cancel_filter(&mut self) {
-        self.filter.cancel();
-        self.clamp_selection();
-    }
-
-    pub fn reset_filter_editor_viewport(&mut self) {
-        self.filter.reset_editor_viewport();
-    }
-
-    pub fn selected_visible_index(&self) -> usize {
-        self.selected_item
-    }
-
-    pub fn visible_items(&self) -> Vec<(usize, &PullRequestSummary)> {
-        let filter = self.filter.display_value().trim().to_lowercase();
-        self.items
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| pull_request_matches_filter(item, &filter))
-            .collect()
-    }
-
-    pub fn selected_item(&self) -> Option<&PullRequestSummary> {
-        self.visible_items()
-            .get(self.selected_item)
-            .map(|(_, item)| *item)
-    }
-
-    pub fn visible_count(&self) -> usize {
-        self.visible_items().len()
-    }
-
-    pub fn move_selected_up(&mut self) {
-        if self.visible_count() > 0 {
-            self.selected_item = self.selected_item.saturating_sub(1);
-        }
-    }
-
-    pub fn move_selected_down(&mut self) {
-        let visible = self.visible_count();
-        if visible > 0 {
-            self.selected_item = (self.selected_item + 1).min(visible.saturating_sub(1));
-        }
-    }
-
-    pub fn set_items(&mut self, items: Vec<PullRequestSummary>) {
-        self.items = items;
-        self.load_status = PullRequestLoadStatus::Ready;
-        self.load_error = None;
-        self.clamp_selection();
-    }
-
-    pub fn fail_load(&mut self, message: String) {
-        self.load_status = PullRequestLoadStatus::Failed;
-        self.load_error = Some(message);
-        self.active_request_id = None;
-        self.clamp_selection();
-    }
-
-    pub fn complete_load(&mut self, request_id: u64, items: Vec<PullRequestSummary>) -> bool {
-        if self.active_request_id != Some(request_id) {
-            return false;
-        }
-
-        self.active_request_id = None;
-        self.set_items(items);
-        true
-    }
-
-    pub fn fail_request(&mut self, request_id: u64, message: String) -> bool {
-        if self.active_request_id != Some(request_id) {
-            return false;
-        }
-
-        self.fail_load(message);
-        true
-    }
-
-    pub fn open_comment_modal(&mut self) {
-        self.comment_phase = PrCommentPhase::Editing;
-        self.comment_error = None;
-    }
-
-    pub fn close_comment_modal(&mut self) {
-        self.comment_phase = PrCommentPhase::Idle;
-        self.comment_buffer.clear();
-        self.comment_cursor = 0;
-        self.comment_error = None;
-    }
-
-    pub fn comment_input_key(&mut self, key: crossterm::event::KeyEvent) {
-        use crossterm::event::KeyCode;
-        match key.code {
-            KeyCode::Char(ch) => {
-                self.comment_buffer.insert(self.comment_cursor, ch);
-                self.comment_cursor += ch.len_utf8();
-            }
-            KeyCode::Backspace if self.comment_cursor > 0 => {
-                let prev = self
-                    .comment_buffer
-                    .char_indices()
-                    .rev()
-                    .find(|(i, _)| *i < self.comment_cursor)
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                self.comment_buffer.drain(prev..self.comment_cursor);
-                self.comment_cursor = prev;
-            }
-            KeyCode::Delete if self.comment_cursor < self.comment_buffer.len() => {
-                let next = self.comment_buffer[self.comment_cursor..]
-                    .char_indices()
-                    .nth(1)
-                    .map(|(i, _)| self.comment_cursor + i)
-                    .unwrap_or(self.comment_buffer.len());
-                self.comment_buffer.drain(self.comment_cursor..next);
-            }
-            KeyCode::Left => {
-                self.comment_cursor = self
-                    .comment_buffer
-                    .char_indices()
-                    .rev()
-                    .find(|(i, _)| *i < self.comment_cursor)
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-            }
-            KeyCode::Right => {
-                self.comment_cursor = self.comment_buffer[self.comment_cursor..]
-                    .char_indices()
-                    .nth(1)
-                    .map(|(i, _)| self.comment_cursor + i)
-                    .unwrap_or(self.comment_buffer.len());
-            }
-            KeyCode::Home => {
-                self.comment_cursor = 0;
-            }
-            KeyCode::End => {
-                self.comment_cursor = self.comment_buffer.len();
-            }
-            _ => {}
-        }
-    }
-
-    fn clamp_selection(&mut self) {
-        let visible = self.visible_count();
-        if visible == 0 {
-            self.selected_item = 0;
-        } else {
-            self.selected_item = self.selected_item.min(visible - 1);
-        }
-    }
-}
-
-fn pull_request_matches_filter(item: &PullRequestSummary, filter: &str) -> bool {
-    if filter.is_empty() {
-        return true;
-    }
-
-    let mut haystack = String::new();
-    haystack.push_str(&item.index.to_string());
-    haystack.push(' ');
-    haystack.push_str(&item.title);
-    haystack.push(' ');
-    haystack.push_str(&item.state);
-    haystack.push(' ');
-    haystack.push_str(&item.author);
-    haystack.push(' ');
-    haystack.push_str(&item.head);
-    haystack.push(' ');
-    haystack.push_str(&item.base);
-    haystack.push(' ');
-    haystack.push_str(&item.updated);
-    haystack.push(' ');
-    haystack.push_str(&item.url);
-    haystack.push(' ');
-    haystack.push_str(&item.body);
-    for label in &item.labels {
-        haystack.push(' ');
-        haystack.push_str(label);
-    }
-
-    haystack.to_lowercase().contains(filter)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -538,18 +259,8 @@ impl App {
                         _ => Action::Tick,
                     };
                 }
-                GeneratePhase::Executing => {
-                    return match key.code {
-                        KeyCode::Esc => Action::Tick,
-                        _ => Action::Tick,
-                    };
-                }
-                GeneratePhase::DraftReady
-                    if matches!(key.code, KeyCode::Char('c')) && self.focus == Focus::Preview =>
-                {
-                    return Action::ConfirmExecution;
-                }
-                GeneratePhase::Failed
+                GeneratePhase::Executing => return Action::Tick,
+                GeneratePhase::DraftReady | GeneratePhase::Failed
                     if matches!(key.code, KeyCode::Char('c')) && self.focus == Focus::Preview =>
                 {
                     return Action::ConfirmExecution;
@@ -566,33 +277,16 @@ impl App {
             }
         }
 
-        // PR comment shortcut: 'c' opens comment modal when a PR is selected.
-        if self.screen == Screen::PullRequests
-            && matches!(key.code, KeyCode::Char('c'))
-            && self.pull_requests.selected_item().is_some()
-            && self.pull_requests.comment_phase == PrCommentPhase::Idle
-        {
-            return Action::OpenCommentModal;
-        }
-
-        // PR open-in-browser shortcut: 'o' opens the selected PR URL.
-        if self.screen == Screen::PullRequests
-            && self.input_mode == InputMode::Normal
-            && self.pull_requests.comment_phase == PrCommentPhase::Idle
-            && matches!(key.code, KeyCode::Char('o'))
-            && self.pull_requests.selected_item().is_some()
-        {
-            return Action::OpenPrInBrowser;
-        }
-
-        // PR yank-URL shortcut: 'y' copies the selected PR URL.
-        if self.screen == Screen::PullRequests
-            && self.input_mode == InputMode::Normal
-            && self.pull_requests.comment_phase == PrCommentPhase::Idle
-            && matches!(key.code, KeyCode::Char('y'))
-            && self.pull_requests.selected_item().is_some()
-        {
-            return Action::CopyPrUrl;
+        // PR list shortcuts: c/o/y act on the selected PR. The comment-modal
+        // early return above ensures we only land here when the modal is idle,
+        // and the Editing early return ensures input_mode is not Editing.
+        if self.screen == Screen::PullRequests && self.pull_requests.selected_item().is_some() {
+            match key.code {
+                KeyCode::Char('c') => return Action::OpenCommentModal,
+                KeyCode::Char('o') => return Action::OpenPrInBrowser,
+                KeyCode::Char('y') => return Action::CopyPrUrl,
+                _ => {}
+            }
         }
 
         match key.code {
@@ -933,60 +627,47 @@ impl App {
         self.pull_requests.close_comment_modal();
     }
 
-    fn open_selected_pr_in_browser(&mut self) {
+    fn notify(&mut self, msg: String) {
+        self.log(msg.clone());
+        self.status_message = Some(msg);
+    }
+
+    fn act_on_selected_pr_url(
+        &mut self,
+        action: impl FnOnce(&str) -> Result<(), String>,
+        success: impl FnOnce(&str) -> String,
+    ) {
         if self.screen != Screen::PullRequests {
             return;
         }
-        let Some(pr) = self.pull_requests.selected_item() else {
+        let Some(url) = self
+            .pull_requests
+            .selected_item()
+            .map(|pr| pr.url.trim().to_string())
+        else {
             return;
         };
-        let url = pr.url.trim().to_string();
         if url.is_empty() {
-            let msg = "error: PR has no URL".to_string();
-            self.log(msg.clone());
-            self.status_message = Some(msg);
+            self.notify("error: PR has no URL".into());
             return;
         }
-        match external::open_in_browser(&url) {
-            Ok(()) => {
-                let msg = format!("opened {url} in browser");
-                self.log(msg.clone());
-                self.status_message = Some(msg);
-            }
-            Err(e) => {
-                let msg = format!("error: {e}");
-                self.log(msg.clone());
-                self.status_message = Some(msg);
-            }
-        }
+        let msg = match action(&url) {
+            Ok(()) => success(&url),
+            Err(e) => format!("error: {e}"),
+        };
+        self.notify(msg);
+    }
+
+    fn open_selected_pr_in_browser(&mut self) {
+        self.act_on_selected_pr_url(external::open_in_browser, |url| {
+            format!("opened {url} in browser")
+        });
     }
 
     fn copy_selected_pr_url(&mut self) {
-        if self.screen != Screen::PullRequests {
-            return;
-        }
-        let Some(pr) = self.pull_requests.selected_item() else {
-            return;
-        };
-        let url = pr.url.trim().to_string();
-        if url.is_empty() {
-            let msg = "error: PR has no URL".to_string();
-            self.log(msg.clone());
-            self.status_message = Some(msg);
-            return;
-        }
-        match external::copy_to_clipboard(&url) {
-            Ok(()) => {
-                let msg = format!("copied {url} to clipboard");
-                self.log(msg.clone());
-                self.status_message = Some(msg);
-            }
-            Err(e) => {
-                let msg = format!("error: {e}");
-                self.log(msg.clone());
-                self.status_message = Some(msg);
-            }
-        }
+        self.act_on_selected_pr_url(external::copy_to_clipboard, |url| {
+            format!("copied {url} to clipboard")
+        });
     }
 
     fn submit_comment(&mut self) {
@@ -1705,6 +1386,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::generate::FieldId;
+    use crate::pull_requests::{PullRequestLoadStatus, PullRequestSummary};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc::unbounded_channel;
 
@@ -2613,38 +2295,5 @@ mod tests {
         app.update(Action::Tick);
 
         assert!(app.status_message.is_none());
-    }
-
-    #[test]
-    fn comment_buffer_editing_inserts_and_moves_cursor() {
-        let mut state = PullRequestState {
-            comment_phase: PrCommentPhase::Editing,
-            ..PullRequestState::default()
-        };
-
-        state.comment_input_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
-        state.comment_input_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::empty()));
-        state.comment_input_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty()));
-
-        assert_eq!(state.comment_buffer, "abc");
-        assert_eq!(state.comment_cursor, 3);
-
-        state.comment_input_key(KeyEvent::new(KeyCode::Left, KeyModifiers::empty()));
-        assert_eq!(state.comment_cursor, 2);
-
-        state.comment_input_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
-        assert_eq!(state.comment_buffer, "ac");
-        assert_eq!(state.comment_cursor, 1);
-
-        state.comment_input_key(KeyEvent::new(KeyCode::Home, KeyModifiers::empty()));
-        assert_eq!(state.comment_cursor, 0);
-
-        // Delete at cursor 0 removes 'a'.
-        state.comment_input_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()));
-        assert_eq!(state.comment_buffer, "c");
-        assert_eq!(state.comment_cursor, 0);
-
-        state.comment_input_key(KeyEvent::new(KeyCode::End, KeyModifiers::empty()));
-        assert_eq!(state.comment_cursor, 1);
     }
 }
