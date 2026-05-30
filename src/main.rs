@@ -1,46 +1,54 @@
+use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
+
 use clap::Parser;
 use color_eyre::eyre::Result;
-use tokio::sync::mpsc;
 
 use teatui::app::App;
 use teatui::config::Config;
-use teatui::event::EventHandler;
 use teatui::logging::init_logging;
-use teatui::tui::Tui;
+use teatui::runtime::Runtime;
+use teatui::terminal::Terminal;
 
 #[derive(Parser)]
 #[command(name = "teatui")]
 #[command(about = "Generate Gitea PRs from jj repos with tea and an LLM")]
 struct Cli {
-    /// Config file path
     #[arg(short, long)]
-    config: Option<std::path::PathBuf>,
-
-    /// Enable debug logging
+    config: Option<PathBuf>,
     #[arg(short, long)]
     debug: bool,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     color_eyre::install()?;
-
     let cli = Cli::parse();
 
     let config = Config::load(cli.config.as_deref())?;
-    init_logging(&config, cli.debug)?;
+    init_logging(cli.debug)?;
+    tracing::info!(target: "teatui::lifecycle", "starting teatui");
 
-    tracing::info!("Starting application");
+    thread::Builder::new()
+        .name("teatui-heartbeat".into())
+        .spawn(|| {
+            let mut tick: u64 = 0;
+            loop {
+                thread::sleep(Duration::from_secs(1));
+                tick += 1;
+                tracing::info!(target: "teatui::heartbeat", tick, "alive");
+            }
+        })
+        .expect("failed to spawn heartbeat thread");
 
-    let (bg_tx, bg_rx) = mpsc::unbounded_channel();
-    let events = EventHandler::new(config.tick_rate, bg_rx);
-    let mut app = App::new(config, bg_tx);
-    app.refresh();
+    let mut terminal = Terminal::enter()?;
+    let runtime = Runtime::new(|submitter| App::new(config, submitter));
+    let result = runtime.run(&mut terminal);
+    drop(terminal);
 
-    let mut tui = Tui::new()?;
-    tui.enter()?;
-    let result = app.run(&mut tui, events).await;
-    tui.exit()?;
-
+    match &result {
+        Ok(()) => tracing::info!(target: "teatui::lifecycle", "exiting teatui"),
+        Err(err) => tracing::error!(target: "teatui::lifecycle", error = %err, "exit with error"),
+    }
     result
 }
