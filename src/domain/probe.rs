@@ -79,9 +79,21 @@ fn run_version_check(binary: &str) -> ToolStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceInfo {
-    Inside { root: PathBuf },
+    Inside {
+        root: PathBuf,
+        remote: Option<RemoteInfo>,
+    },
     Outside,
-    Errored { message: String },
+    Errored {
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteInfo {
+    pub host: String,
+    pub owner: String,
+    pub repo: String,
 }
 
 pub struct WorkspaceProbe {
@@ -102,8 +114,12 @@ impl Job for WorkspaceProbe {
         {
             Ok(out) if out.status.success() => {
                 let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let remote = origin_remote_url(&self.jj_binary)
+                    .as_deref()
+                    .and_then(parse_remote_info);
                 WorkspaceInfo::Inside {
                     root: PathBuf::from(root),
+                    remote,
                 }
             }
             Ok(_) => WorkspaceInfo::Outside,
@@ -116,6 +132,46 @@ impl Job for WorkspaceProbe {
         };
         JobOutcome::Done(Box::new(result))
     }
+}
+
+fn origin_remote_url(jj_binary: &str) -> Option<String> {
+    let out = Command::new(jj_binary)
+        .args(["git", "remote", "list"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    stdout.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        let name = parts.next()?;
+        let url = parts.next()?;
+        (name == "origin").then(|| url.to_string())
+    })
+}
+
+fn parse_remote_info(url: &str) -> Option<RemoteInfo> {
+    let normalized = url
+        .trim()
+        .trim_end_matches(".git")
+        .replace(':', "/")
+        .replace("git@", "");
+    let without_scheme = normalized
+        .strip_prefix("https://")
+        .or_else(|| normalized.strip_prefix("http://"))
+        .or(Some(normalized.as_str()))?;
+    let parts: Vec<&str> = without_scheme
+        .split('/')
+        .filter(|p| !p.is_empty())
+        .collect();
+    let host = parts.first()?.to_string();
+    let owner = parts.get(parts.len().checked_sub(2)?)?.to_string();
+    let repo = parts.last()?.to_string();
+    Some(RemoteInfo { host, owner, repo })
 }
 
 // =========================== Tea auth =======================================
@@ -198,9 +254,12 @@ impl Job for LlmHealthProbe {
     }
     fn run(self: Box<Self>) -> JobOutcome {
         let url = format!("{}/api/tags", self.base_url.trim_end_matches('/'));
-        let agent = ureq::AgentBuilder::new().timeout(self.timeout).build();
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(self.timeout))
+            .build();
+        let agent = ureq::Agent::new_with_config(config);
         let result = match agent.get(&url).call() {
-            Ok(resp) => match resp.into_json::<TagsResponse>() {
+            Ok(mut resp) => match resp.body_mut().read_json::<TagsResponse>() {
                 Ok(tags) => LlmHealth::Available {
                     models: tags.models.into_iter().map(|m| m.name).collect(),
                 },
@@ -322,6 +381,141 @@ fn parse_revsets(stdout: &str) -> Vec<RevsetSummary> {
             })
         })
         .collect()
+}
+
+// ======================== Base bookmarks ===================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseBookmark {
+    pub name: String,
+    pub remote: Option<String>,
+    pub is_remote: bool,
+}
+
+pub type BaseBookmarks = Vec<BaseBookmark>;
+
+pub struct BaseBookmarksProbe {
+    pub jj_binary: String,
+}
+
+impl Job for BaseBookmarksProbe {
+    fn name(&self) -> &'static str {
+        "probe.base_bookmarks"
+    }
+
+    fn run(self: Box<Self>) -> JobOutcome {
+        const TEMPLATE: &str = r#"name() ++ "\t" ++ remote().name() ++ "\n""#;
+        let bookmarks = match Command::new(&self.jj_binary)
+            .args([
+                "--no-pager",
+                "bookmark",
+                "list",
+                "--all-remotes",
+                "-T",
+                TEMPLATE,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                parse_base_bookmarks(&stdout)
+            }
+            _ => Vec::new(),
+        };
+        JobOutcome::Done(Box::new(bookmarks))
+    }
+}
+
+fn parse_base_bookmarks(stdout: &str) -> BaseBookmarks {
+    stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|line| {
+            let mut parts = line.splitn(2, '\t');
+            let name = parts.next()?.trim().trim_end_matches('@').to_string();
+            let remote = parts
+                .next()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            Some(BaseBookmark {
+                is_remote: remote.is_some() || name.contains('@'),
+                name,
+                remote,
+            })
+        })
+        .collect()
+}
+
+// ======================== Repo options =====================================
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepoOptions {
+    pub labels: Vec<String>,
+    pub assignees: Vec<String>,
+    pub milestones: Vec<String>,
+}
+
+pub struct RepoOptionsProbe {
+    pub tea_binary: String,
+    pub owner: String,
+    pub repo: String,
+}
+
+impl Job for RepoOptionsProbe {
+    fn name(&self) -> &'static str {
+        "probe.repo_options"
+    }
+
+    fn run(self: Box<Self>) -> JobOutcome {
+        let labels = tea_names(
+            &self.tea_binary,
+            &format!("repos/{}/{}/labels", self.owner, self.repo),
+        );
+        let assignees = tea_names(
+            &self.tea_binary,
+            &format!("repos/{}/{}/collaborators", self.owner, self.repo),
+        );
+        let milestones = tea_names(
+            &self.tea_binary,
+            &format!("repos/{}/{}/milestones", self.owner, self.repo),
+        );
+        JobOutcome::Done(Box::new(RepoOptions {
+            labels,
+            assignees,
+            milestones,
+        }))
+    }
+}
+
+fn tea_names(binary: &str, path: &str) -> Vec<String> {
+    let Ok(out) = Command::new(binary)
+        .args(["api", path])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    serde_json::from_slice::<Vec<NameItem>>(&out.stdout)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|item| item.name.or(item.login).or(item.title))
+        .collect()
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct NameItem {
+    name: Option<String>,
+    login: Option<String>,
+    title: Option<String>,
 }
 
 #[cfg(test)]

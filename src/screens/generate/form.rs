@@ -1,0 +1,720 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui_textarea::TextArea;
+
+use crate::domain::{BaseBookmark, RepoOptions, Revsets, StatusStore};
+
+impl std::fmt::Debug for TextFieldState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TextFieldState")
+            .field("initial", &self.initial)
+            .field("value", &self.value)
+            .field("buffer", &self.buffer)
+            .field("dirty", &self.dirty)
+            .field("errors", &self.errors)
+            .field("multiline", &self.multiline)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InputMode {
+    #[default]
+    Normal,
+    Editing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FieldId {
+    #[default]
+    Head,
+    BranchName,
+    Base,
+    Title,
+    Description,
+    Labels,
+    Assignees,
+    Milestone,
+}
+
+impl FieldId {
+    pub const ALL: [FieldId; 8] = [
+        FieldId::Head,
+        FieldId::BranchName,
+        FieldId::Base,
+        FieldId::Title,
+        FieldId::Description,
+        FieldId::Labels,
+        FieldId::Assignees,
+        FieldId::Milestone,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FieldId::Head => "head",
+            FieldId::BranchName => "branch",
+            FieldId::Base => "base",
+            FieldId::Title => "title",
+            FieldId::Description => "description",
+            FieldId::Labels => "labels",
+            FieldId::Assignees => "assignees",
+            FieldId::Milestone => "milestone",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ALL[(idx + 1).min(Self::ALL.len() - 1)]
+    }
+
+    pub fn prev(self) -> Self {
+        let idx = Self::ALL.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ALL[idx.saturating_sub(1)]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldKind {
+    Text { multiline: bool },
+    Picker { multi_select: bool, optional: bool },
+}
+
+#[derive(Debug, Clone)]
+pub enum FieldState {
+    Text(Box<TextFieldState>),
+    Picker(PickerFieldState),
+}
+
+impl FieldState {
+    pub fn kind(&self) -> FieldKind {
+        match self {
+            FieldState::Text(t) => FieldKind::Text {
+                multiline: t.multiline,
+            },
+            FieldState::Picker(p) => FieldKind::Picker {
+                multi_select: p.multi_select,
+                optional: p.optional,
+            },
+        }
+    }
+
+    pub fn value(&self) -> &str {
+        match self {
+            FieldState::Text(t) => &t.value,
+            FieldState::Picker(p) => &p.value,
+        }
+    }
+
+    pub fn values(&self) -> Vec<String> {
+        match self {
+            FieldState::Text(t) => vec![t.value.clone()],
+            FieldState::Picker(p) => p.committed.clone(),
+        }
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        match self {
+            FieldState::Text(t) => t.dirty,
+            FieldState::Picker(p) => p.dirty,
+        }
+    }
+
+    pub fn errors(&self) -> &[String] {
+        match self {
+            FieldState::Text(t) => &t.errors,
+            FieldState::Picker(p) => &p.errors,
+        }
+    }
+
+    pub fn set_value(&mut self, value: String) {
+        match self {
+            FieldState::Text(t) => t.set_value(value),
+            FieldState::Picker(p) => p.set_values(if value.is_empty() {
+                Vec::new()
+            } else {
+                vec![value]
+            }),
+        }
+    }
+
+    pub fn set_values(&mut self, values: Vec<String>) {
+        match self {
+            FieldState::Text(t) => t.set_value(values.join(", ")),
+            FieldState::Picker(p) => p.set_values(values),
+        }
+    }
+
+    pub fn begin_edit(&mut self) {
+        match self {
+            FieldState::Text(t) => t.begin_edit(),
+            FieldState::Picker(p) => p.begin_edit(),
+        }
+    }
+
+    pub fn commit(&mut self) {
+        match self {
+            FieldState::Text(t) => t.commit(),
+            FieldState::Picker(p) => p.commit(),
+        }
+    }
+
+    pub fn cancel(&mut self) {
+        match self {
+            FieldState::Text(t) => t.cancel(),
+            FieldState::Picker(p) => p.cancel(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct TextFieldState {
+    initial: String,
+    pub value: String,
+    pub buffer: String,
+    pub editor: TextArea<'static>,
+    pub dirty: bool,
+    pub errors: Vec<String>,
+    pub multiline: bool,
+}
+
+impl TextFieldState {
+    pub fn new(value: String, multiline: bool) -> Self {
+        let editor = text_area_from(&value);
+        Self {
+            initial: value.clone(),
+            value: value.clone(),
+            buffer: value,
+            editor,
+            dirty: false,
+            errors: Vec::new(),
+            multiline,
+        }
+    }
+
+    pub fn set_value(&mut self, value: String) {
+        self.initial = value.clone();
+        self.value = value.clone();
+        self.buffer = value.clone();
+        self.editor = text_area_from(&value);
+        self.dirty = false;
+        self.errors.clear();
+    }
+
+    pub fn begin_edit(&mut self) {
+        self.buffer = self.value.clone();
+        self.editor = text_area_from(&self.buffer);
+    }
+
+    pub fn commit(&mut self) {
+        self.buffer = self.editor.lines().join("\n");
+        self.value = self.buffer.clone();
+        self.dirty = self.value != self.initial;
+    }
+
+    pub fn cancel(&mut self) {
+        self.buffer = self.value.clone();
+        self.editor = text_area_from(&self.buffer);
+    }
+
+    pub fn input(&mut self, key: KeyEvent) {
+        if !self.multiline && key.code == KeyCode::Enter {
+            return;
+        }
+        self.editor.input(key);
+        self.buffer = self.editor.lines().join("\n");
+    }
+}
+
+fn text_area_from(value: &str) -> TextArea<'static> {
+    let lines: Vec<String> = if value.is_empty() {
+        vec![String::new()]
+    } else {
+        value.lines().map(str::to_string).collect()
+    };
+    TextArea::new(lines)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerOption {
+    pub label: String,
+    pub value: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PickerFieldState {
+    initial: Vec<String>,
+    committed: Vec<String>,
+    draft: Vec<String>,
+    pub value: String,
+    pub options: Vec<PickerOption>,
+    pub filter: String,
+    pub highlighted: usize,
+    pub multi_select: bool,
+    pub optional: bool,
+    pub editing: bool,
+    pub errors: Vec<String>,
+    pub dirty: bool,
+}
+
+impl PickerFieldState {
+    pub fn new(
+        committed: Vec<String>,
+        multi_select: bool,
+        optional: bool,
+        options: Vec<PickerOption>,
+    ) -> Self {
+        let value = committed.join(", ");
+        Self {
+            initial: committed.clone(),
+            committed: committed.clone(),
+            draft: committed,
+            value,
+            options,
+            filter: String::new(),
+            highlighted: 0,
+            multi_select,
+            optional,
+            editing: false,
+            errors: Vec::new(),
+            dirty: false,
+        }
+    }
+
+    pub fn set_values(&mut self, values: Vec<String>) {
+        self.initial = values.clone();
+        self.committed = values.clone();
+        self.draft = values;
+        self.value = self.committed.join(", ");
+        self.filter.clear();
+        self.highlighted = 0;
+        self.editing = false;
+        self.dirty = false;
+        self.errors.clear();
+    }
+
+    pub fn set_options(&mut self, options: Vec<PickerOption>) {
+        self.options = options;
+        self.highlighted = self
+            .highlighted
+            .min(self.visible_options().len().saturating_sub(1));
+    }
+
+    pub fn begin_edit(&mut self) {
+        self.draft = self.committed.clone();
+        self.filter.clear();
+        self.highlighted = 0;
+        self.editing = true;
+    }
+
+    pub fn commit(&mut self) {
+        if !self.multi_select
+            && let Some(option) = self.visible_options().get(self.highlighted)
+        {
+            self.draft = vec![option.value.clone()];
+        }
+        self.committed = self.draft.clone();
+        self.value = self.committed.join(", ");
+        self.dirty = self.committed != self.initial;
+        self.editing = false;
+    }
+
+    pub fn cancel(&mut self) {
+        self.draft = self.committed.clone();
+        self.filter.clear();
+        self.highlighted = 0;
+        self.editing = false;
+    }
+
+    pub fn visible_options(&self) -> Vec<&PickerOption> {
+        let filter = self.filter.to_lowercase();
+        self.options
+            .iter()
+            .filter(|option| {
+                filter.is_empty()
+                    || option.label.to_lowercase().contains(&filter)
+                    || option.value.to_lowercase().contains(&filter)
+            })
+            .collect()
+    }
+
+    pub fn move_highlight(&mut self, delta: isize) {
+        let count = self.visible_options().len();
+        if count == 0 {
+            self.highlighted = 0;
+            return;
+        }
+        let next = self.highlighted.saturating_add_signed(delta);
+        self.highlighted = next.min(count - 1);
+    }
+
+    pub fn toggle_highlighted(&mut self) {
+        if !self.multi_select {
+            return;
+        }
+        let Some(value) = self
+            .visible_options()
+            .get(self.highlighted)
+            .map(|o| o.value.clone())
+        else {
+            return;
+        };
+        if let Some(pos) = self.draft.iter().position(|v| v == &value) {
+            self.draft.remove(pos);
+        } else {
+            self.draft.push(value);
+        }
+    }
+
+    pub fn draft_contains(&self, value: &str) -> bool {
+        self.draft.iter().any(|v| v == value)
+    }
+
+    pub fn input_filter(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char(c)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                self.filter.push(c);
+                self.highlighted = 0;
+            }
+            KeyCode::Backspace => {
+                self.filter.pop();
+                self.highlighted = 0;
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PrForm {
+    pub head: FieldState,
+    pub branch_name: FieldState,
+    pub base: FieldState,
+    pub title: FieldState,
+    pub description: FieldState,
+    pub labels: FieldState,
+    pub assignees: FieldState,
+    pub milestone: FieldState,
+}
+
+impl Default for PrForm {
+    fn default() -> Self {
+        Self {
+            head: picker(false, false),
+            branch_name: text("", false),
+            base: picker(false, false),
+            title: text("", false),
+            description: text("", true),
+            labels: picker(true, true),
+            assignees: picker(true, true),
+            milestone: picker(false, true),
+        }
+    }
+}
+
+impl PrForm {
+    pub fn new(default_base: String) -> Self {
+        let mut form = Self::default();
+        form.base.set_value(default_base);
+        form
+    }
+
+    pub fn field(&self, id: FieldId) -> &FieldState {
+        match id {
+            FieldId::Head => &self.head,
+            FieldId::BranchName => &self.branch_name,
+            FieldId::Base => &self.base,
+            FieldId::Title => &self.title,
+            FieldId::Description => &self.description,
+            FieldId::Labels => &self.labels,
+            FieldId::Assignees => &self.assignees,
+            FieldId::Milestone => &self.milestone,
+        }
+    }
+
+    pub fn field_mut(&mut self, id: FieldId) -> &mut FieldState {
+        match id {
+            FieldId::Head => &mut self.head,
+            FieldId::BranchName => &mut self.branch_name,
+            FieldId::Base => &mut self.base,
+            FieldId::Title => &mut self.title,
+            FieldId::Description => &mut self.description,
+            FieldId::Labels => &mut self.labels,
+            FieldId::Assignees => &mut self.assignees,
+            FieldId::Milestone => &mut self.milestone,
+        }
+    }
+
+    pub fn head(&self) -> &str {
+        self.head.value()
+    }
+
+    pub fn branch(&self) -> &str {
+        self.branch_name.value()
+    }
+
+    pub fn base(&self) -> &str {
+        self.base.value()
+    }
+
+    pub fn title(&self) -> &str {
+        self.title.value()
+    }
+
+    pub fn description(&self) -> &str {
+        self.description.value()
+    }
+
+    pub fn labels(&self) -> Vec<String> {
+        self.labels.values()
+    }
+
+    pub fn assignees(&self) -> Vec<String> {
+        self.assignees.values()
+    }
+
+    pub fn milestone(&self) -> &str {
+        self.milestone.value()
+    }
+
+    pub fn validate(&mut self) -> bool {
+        for id in FieldId::ALL {
+            match self.field_mut(id) {
+                FieldState::Text(t) => t.errors.clear(),
+                FieldState::Picker(p) => p.errors.clear(),
+            }
+        }
+        self.require(FieldId::Head);
+        self.require(FieldId::BranchName);
+        self.require(FieldId::Base);
+        self.require(FieldId::Title);
+        if self.description().trim().is_empty()
+            && let FieldState::Text(t) = self.field_mut(FieldId::Description)
+        {
+            t.errors.push("warning: empty".into());
+        }
+        FieldId::ALL
+            .into_iter()
+            .filter(|id| *id != FieldId::Description)
+            .all(|id| self.field(id).errors().is_empty())
+    }
+
+    fn require(&mut self, id: FieldId) {
+        if self.field(id).value().trim().is_empty() {
+            match self.field_mut(id) {
+                FieldState::Text(t) => t.errors.push("required".into()),
+                FieldState::Picker(p) => p.errors.push("required".into()),
+            }
+        }
+    }
+
+    pub fn sync_options(&mut self, status: &StatusStore) {
+        if let Some(Revsets::Loaded(items)) = status.revsets.value() {
+            set_picker_options(
+                &mut self.head,
+                items
+                    .iter()
+                    .map(|item| PickerOption {
+                        label: format!("{} {}", item.change_id, item.description),
+                        value: item.change_id.clone(),
+                        enabled: true,
+                    })
+                    .collect(),
+            );
+        }
+        if let Some(bookmarks) = status.base_bookmarks.value() {
+            let current_base = self.base.value().to_string();
+            set_picker_options(
+                &mut self.base,
+                bookmarks
+                    .iter()
+                    .map(base_bookmark_option)
+                    .chain(option_from_current(&current_base))
+                    .collect(),
+            );
+        }
+        if let Some(options) = status.repo_options.value() {
+            sync_repo_options(self, options);
+        }
+    }
+}
+
+fn sync_repo_options(form: &mut PrForm, options: &RepoOptions) {
+    set_picker_options(
+        &mut form.labels,
+        options
+            .labels
+            .iter()
+            .map(String::as_str)
+            .map(option)
+            .collect(),
+    );
+    set_picker_options(
+        &mut form.assignees,
+        options
+            .assignees
+            .iter()
+            .map(String::as_str)
+            .map(option)
+            .collect(),
+    );
+    set_picker_options(
+        &mut form.milestone,
+        options
+            .milestones
+            .iter()
+            .map(String::as_str)
+            .map(option)
+            .collect(),
+    );
+}
+
+fn text(value: &str, multiline: bool) -> FieldState {
+    FieldState::Text(Box::new(TextFieldState::new(value.to_string(), multiline)))
+}
+
+fn picker(multi_select: bool, optional: bool) -> FieldState {
+    FieldState::Picker(PickerFieldState::new(
+        Vec::new(),
+        multi_select,
+        optional,
+        Vec::new(),
+    ))
+}
+
+fn set_picker_options(field: &mut FieldState, options: Vec<PickerOption>) {
+    if let FieldState::Picker(p) = field {
+        p.set_options(options);
+    }
+}
+
+fn option(value: &str) -> PickerOption {
+    PickerOption {
+        label: value.to_string(),
+        value: value.to_string(),
+        enabled: true,
+    }
+}
+
+fn base_bookmark_option(bookmark: &BaseBookmark) -> PickerOption {
+    PickerOption {
+        label: bookmark.name.clone(),
+        value: bookmark.name.clone(),
+        enabled: true,
+    }
+}
+
+fn option_from_current(value: &str) -> impl Iterator<Item = PickerOption> {
+    let value = value.to_string();
+    (!value.is_empty())
+        .then(|| PickerOption {
+            label: value.clone(),
+            value,
+            enabled: true,
+        })
+        .into_iter()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn text_commit_and_cancel_track_value_and_dirty() {
+        let mut t = TextFieldState::new("old".into(), false);
+        t.begin_edit();
+        t.input(key(KeyCode::End));
+        t.input(key(KeyCode::Char('!')));
+        t.commit();
+        assert_eq!(t.value, "old!");
+        assert!(t.dirty);
+        t.begin_edit();
+        t.input(key(KeyCode::Char('?')));
+        t.cancel();
+        assert_eq!(t.value, "old!");
+        assert_eq!(t.buffer, "old!");
+    }
+
+    #[test]
+    fn multiline_text_accepts_enter_before_commit() {
+        let mut t = TextFieldState::new("one".into(), true);
+        t.begin_edit();
+        t.input(key(KeyCode::End));
+        t.input(key(KeyCode::Enter));
+        t.input(key(KeyCode::Char('2')));
+        t.commit();
+        assert_eq!(t.value, "one\n2");
+    }
+
+    #[test]
+    fn picker_filters_and_toggles_multi_select() {
+        let mut p = PickerFieldState::new(
+            Vec::new(),
+            true,
+            true,
+            vec![
+                PickerOption {
+                    label: "bug".into(),
+                    value: "bug".into(),
+                    enabled: true,
+                },
+                PickerOption {
+                    label: "feature".into(),
+                    value: "feature".into(),
+                    enabled: true,
+                },
+            ],
+        );
+        p.begin_edit();
+        p.input_filter(key(KeyCode::Char('f')));
+        assert_eq!(p.visible_options()[0].value, "feature");
+        p.toggle_highlighted();
+        p.commit();
+        assert_eq!(p.value, "feature");
+    }
+
+    #[test]
+    fn picker_single_select_enter_commits_highlighted() {
+        let mut p = PickerFieldState::new(
+            Vec::new(),
+            false,
+            false,
+            vec![
+                PickerOption {
+                    label: "main".into(),
+                    value: "main".into(),
+                    enabled: true,
+                },
+                PickerOption {
+                    label: "trunk".into(),
+                    value: "trunk".into(),
+                    enabled: true,
+                },
+            ],
+        );
+        p.begin_edit();
+        p.move_highlight(1);
+        p.commit();
+        assert_eq!(p.value, "trunk");
+    }
+
+    #[test]
+    fn form_validation_flags_required_fields() {
+        let mut form = PrForm::default();
+        assert!(!form.validate());
+        assert_eq!(
+            form.field(FieldId::Head).errors(),
+            &["required".to_string()]
+        );
+        form.head.set_value("abcd".into());
+        form.branch_name.set_value("branch".into());
+        form.base.set_value("main".into());
+        form.title.set_value("Title".into());
+        assert!(form.validate());
+    }
+}

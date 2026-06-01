@@ -15,7 +15,7 @@ phase whose status is not `done`.
 
 ## Status
 
-- **Current phase:** 0 (Strip + scaffold) — in progress.
+- **Current phase:** 7 (Form editing) — done.
 - **Branch / working tree:** uncommitted changes on `HEAD`. Use `jj
   --no-pager st` to inspect.
 
@@ -292,26 +292,24 @@ Surprises:
 - Building `GenerateState` literals from tests required `screens::generate::PrForm` to be public-accessible — it already was. No additional API exposure needed; the screen module's public surface is exactly what tests need.
 - `TestBackend::new(120, 30)` + `Terminal::new(backend)` + `terminal.draw(|frame| ...)` is the same shape ratatui uses in its own examples. No special test fixtures needed.
 
-## Status — rewrite complete
+## Status — rewrite complete through Phase 7
 
-All six planned phases done. Final state:
+The original six planned phases plus Phase 7 are done. Final state:
 
 - `src/{main,lib,config,logging,terminal,input,app}.rs` + `src/runtime/{mod,cache,jobs}.rs` + `src/domain/{mod,probe,status_store,context,prompt,llm,execute,bookmark}.rs` + `src/screens/{mod,landing,generate,status}.rs`.
-- 36 unit tests + 18 render smoke tests.
+- 41 unit tests + 22 render smoke tests.
 - `just verify` clean: fmt, check, clippy `-D warnings`, tests.
 - No Tokio, no Reqwest, no `windows-sys`, no `cfg(windows)` paths.
 - Kitty keyboard enhancement flags negotiated on entry → instant Esc on supporting terminals.
 
 ### Known gaps / next moves
 
-1. **Form editing.** Re-implementing per the prior UX (see Phase 7 plan below).
-2. **Stale-check before execute.** If the user takes >some-threshold between LLM draft and `x`, the underlying revset may have changed. The old code re-ran the revset probe just before execution. Worth adding when editing lands.
-3. **Multi-revset selection.** Currently we pick a single revset to PR. Multi-select (the old space/comma UX) would let a user PR a stacked range.
-4. **PR management pass.** See the "Deferred" section above. List / detail / comment / browser-open flow against `tea pr list`.
-5. **Linux interactive verification.** The dev host is Windows; smoke tests pass there but the snappiness wins only materialise on Linux. Recommend running the binary on Linux (kitty / wezterm / foot terminal) and confirming instant-Esc + no input swallowing.
-6. **`reqwest` (or `ureq` 3.x) migration**: ureq 2.x still relies on its own root-cert store; if we end up wanting HTTPS endpoints with system trust, revisit.
+1. **Stale-check before execute.** If the user takes >some-threshold between LLM draft and `x`, the underlying revset may have changed. The old code re-ran the revset probe just before execution. Worth adding next.
+2. **Multi-revset selection.** Currently we pick a single revset to PR. Multi-select (the old space/comma UX) would let a user PR a stacked range.
+3. **PR management pass.** See the "Deferred" section above. List / detail / comment / browser-open flow against `tea pr list`.
+4. **Linux interactive verification.** The dev host is Windows; smoke tests pass there but the snappiness wins only materialise on Linux. Recommend running the binary on Linux (kitty / wezterm / foot terminal) and confirming instant-Esc + no input swallowing.
 
-## Phase 7 — Form editing (planned)
+## Phase 7 — Form editing
 
 Goal: bring back the form editing UX from the pre-rewrite code (read out
 of jj revision `mslxvzxn` for reference). Every field on the Generate
@@ -517,3 +515,19 @@ Sizing: roughly the same as phase 3+4 combined. Three sub-steps:
 
 Each sub-step ends green on `just verify` and gets a post-mortem
 entry. Phase 8 (stale-check) becomes feasible immediately after 7c.
+
+### Phase 7 — Form editing
+
+- **Status:** done. `just verify` green (41 unit + 22 render smoke = **63 tests**).
+- Added `screens::generate::form` with `InputMode`, `FieldId`, text fields backed by `ratatui-textarea`, picker fields with `initial / committed / draft`, and `PrForm::validate`.
+- Added `screens::generate::input` so Generate screen input dispatch stays separate from rendering. Normal mode keeps pane navigation on Tab/BackTab and field navigation on Up/Down or j/k in the Form pane. Editing mode handles text commit/cancel, multiline Ctrl+S or Alt+Enter, picker filter/highlight/toggle/commit.
+- Generate form now renders all eight fields, dirty markers, validation messages, inline text editing, and centered picker modals. Footer hints are mode-aware.
+- Boot probes now include `BaseBookmarksProbe`. `WorkspaceProbe` also derives origin remote owner/repo when possible and schedules `RepoOptionsProbe` for labels, collaborators, and milestones. Picker options sync into an open Generate screen whenever source data lands.
+- `ExecutePrJob` builds from field values and passes optional fields to tea using verified current flags: `--labels`, `--assignees`, and `--milestone`.
+- User-requested dependency bump completed in the same slice: direct deps are pinned to current published versions, including `ureq 3.3.0`, `opener 0.8.4`, and `ratatui-textarea 0.9.1`. HTTP call sites were migrated to ureq 3's `Agent::config_builder`, `send_json(&body)`, and `body_mut().read_json()` APIs.
+
+Surprises / things to remember:
+
+- `tea pr create --help` uses plural `--labels` / `--assignees`, not the singular names in the Phase 7 sketch.
+- `cargo update --dry-run --verbose` still reports `generic-array 0.14.7` behind latest, but it is transitive and constrained upstream.
+- The repo is still Linux-only by design, but Windows-target transitive crates can appear while compiling on the Windows dev host through cross-platform dependencies.

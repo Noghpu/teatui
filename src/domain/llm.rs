@@ -51,8 +51,11 @@ fn call_ollama(job: LlmGenerateJob) -> LlmResult {
         "options": options,
     });
 
-    let agent = ureq::AgentBuilder::new().timeout(job.timeout).build();
-    let response = match agent.post(&url).send_json(body) {
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(job.timeout))
+        .build();
+    let agent = ureq::Agent::new_with_config(config);
+    let mut response = match agent.post(&url).send_json(&body) {
         Ok(r) => r,
         Err(e) => {
             return LlmResult::Errored {
@@ -60,7 +63,7 @@ fn call_ollama(job: LlmGenerateJob) -> LlmResult {
             };
         }
     };
-    let parsed: GenerateResponse = match response.into_json() {
+    let parsed: GenerateResponse = match response.body_mut().read_json() {
         Ok(p) => p,
         Err(e) => {
             return LlmResult::Errored {

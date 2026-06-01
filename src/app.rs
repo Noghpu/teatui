@@ -6,9 +6,10 @@ use ratatui::Frame;
 
 use crate::config::Config;
 use crate::domain::{
-    ContextJob, ContextResult, ExecutePrJob, ExecuteResult, LlmGenerateJob, LlmHealth,
-    LlmHealthProbe, LlmResult, RevsetProbe, Revsets, StatusStore, TeaAuthProbe, TeaAuthStatus,
-    VersionKind, VersionProbe, VersionResult, WorkspaceInfo, WorkspaceProbe, build_prompt, slugify,
+    BaseBookmarks, BaseBookmarksProbe, ContextJob, ContextResult, ExecutePrJob, ExecuteResult,
+    LlmGenerateJob, LlmHealth, LlmHealthProbe, LlmResult, RepoOptions, RepoOptionsProbe,
+    RevsetProbe, Revsets, StatusStore, TeaAuthProbe, TeaAuthStatus, VersionKind, VersionProbe,
+    VersionResult, WorkspaceInfo, WorkspaceProbe, build_prompt, slugify,
 };
 use crate::input::InputEvent;
 use crate::runtime::{JobEvent, JobOutcomeEvent, JobSubmitter};
@@ -57,6 +58,9 @@ impl App {
         submitter.submit(RevsetProbe {
             jj_binary: config.commands.jj.clone(),
             revset: "mutable()".into(),
+        });
+        submitter.submit(BaseBookmarksProbe {
+            jj_binary: config.commands.jj.clone(),
         });
 
         Self {
@@ -112,8 +116,9 @@ impl App {
                         if let Some(Revsets::Loaded(items)) = self.status.revsets.value()
                             && let Some(first) = items.first()
                         {
-                            state.form.head = first.change_id.clone();
+                            state.form.head.set_value(first.change_id.clone());
                         }
+                        state.ensure_field_options_synced(&self.status);
                         Screen::Generate(Box::new(state))
                     }
                 };
@@ -131,7 +136,7 @@ impl App {
         let Screen::Generate(state) = &mut self.screen else {
             return;
         };
-        if state.form.head.is_empty() {
+        if state.form.head().is_empty() {
             tracing::warn!(target: "teatui::generate", "ignored: no head");
             return;
         }
@@ -142,7 +147,7 @@ impl App {
         state.last_action = None;
         state.phase = GeneratePhase::Collecting;
         self.dirty = true;
-        let head = state.form.head.clone();
+        let head = state.form.head().to_string();
         self.submitter.submit(ContextJob {
             jj_binary: self.config.commands.jj.clone(),
             revset: head.clone(),
@@ -164,10 +169,9 @@ impl App {
                 return;
             }
         };
-        let form = state.form.clone();
-        if form.head.is_empty() || form.branch.is_empty() || form.title.is_empty() {
+        if !state.form.validate() {
             state.phase = GeneratePhase::Failed {
-                message: "missing head, branch, or title".into(),
+                message: "form has validation errors".into(),
             };
             self.dirty = true;
             return;
@@ -175,11 +179,14 @@ impl App {
         let job = ExecutePrJob {
             jj_binary: self.config.commands.jj.clone(),
             tea_binary: self.config.commands.tea.clone(),
-            change_id: form.head,
-            bookmark: form.branch,
-            base: form.base,
-            title: form.title,
-            description: form.description,
+            change_id: state.form.head().to_string(),
+            bookmark: state.form.branch().to_string(),
+            base: state.form.base().to_string(),
+            title: state.form.title().to_string(),
+            description: state.form.description().to_string(),
+            labels: state.form.labels(),
+            assignees: state.form.assignees(),
+            milestone: state.form.milestone().to_string(),
         };
         state.phase = GeneratePhase::Executing { draft };
         state.last_action = None;
@@ -249,7 +256,20 @@ impl App {
         };
         let any = match any.downcast::<WorkspaceInfo>() {
             Ok(b) => {
-                self.status.set_workspace(*b);
+                let workspace = *b;
+                if let WorkspaceInfo::Inside {
+                    remote: Some(remote),
+                    ..
+                } = &workspace
+                {
+                    self.status.mark_repo_options_loading();
+                    self.submitter.submit(RepoOptionsProbe {
+                        tea_binary: self.config.commands.tea.clone(),
+                        owner: remote.owner.clone(),
+                        repo: remote.repo.clone(),
+                    });
+                }
+                self.status.set_workspace(workspace);
                 self.dirty = true;
                 return;
             }
@@ -274,6 +294,25 @@ impl App {
         let any = match any.downcast::<Revsets>() {
             Ok(b) => {
                 self.status.set_revsets(*b);
+                self.sync_generate_options();
+                self.dirty = true;
+                return;
+            }
+            Err(a) => a,
+        };
+        let any = match any.downcast::<BaseBookmarks>() {
+            Ok(b) => {
+                self.status.set_base_bookmarks(*b);
+                self.sync_generate_options();
+                self.dirty = true;
+                return;
+            }
+            Err(a) => a,
+        };
+        let any = match any.downcast::<RepoOptions>() {
+            Ok(b) => {
+                self.status.set_repo_options(*b);
+                self.sync_generate_options();
                 self.dirty = true;
                 return;
             }
@@ -352,12 +391,12 @@ impl App {
         };
         match result {
             LlmResult::Ready(draft) => {
-                state.form.title = draft.title.clone();
-                state.form.description = draft.description.clone();
-                if state.form.branch.is_empty() {
+                state.form.title.set_value(draft.title.clone());
+                state.form.description.set_value(draft.description.clone());
+                if state.form.branch().is_empty() {
                     let slug = slugify(&draft.title);
                     if !slug.is_empty() {
-                        state.form.branch = slug;
+                        state.form.branch_name.set_value(slug);
                     }
                 }
                 state.phase = GeneratePhase::DraftReady { draft, prompt };
@@ -397,6 +436,12 @@ impl App {
         match &self.screen {
             Screen::Landing(state) => screens::landing::render(state, &self.status, frame, area),
             Screen::Generate(state) => screens::generate::render(state, &self.status, frame, area),
+        }
+    }
+
+    fn sync_generate_options(&mut self) {
+        if let Screen::Generate(state) = &mut self.screen {
+            state.ensure_field_options_synced(&self.status);
         }
     }
 }
