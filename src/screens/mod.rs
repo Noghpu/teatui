@@ -1,6 +1,6 @@
 pub mod generate;
 pub mod landing;
-pub mod status;
+pub mod theme;
 
 pub use generate::GenerateState;
 pub use landing::LandingState;
@@ -35,6 +35,8 @@ pub enum Transition {
     CopyUrl,
     /// User asked to open the completed PR URL in the browser.
     OpenUrl,
+    /// User asked to refresh the revset list.
+    RefreshRevsets,
 }
 
 pub enum NewScreen {

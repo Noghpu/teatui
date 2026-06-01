@@ -12,9 +12,9 @@ pub use execute::{ExecutePrJob, ExecuteResult, ExecuteStep};
 pub use llm::{GeneratedDraft, LlmGenerateJob, LlmResult};
 pub use probe::{
     BaseBookmark, BaseBookmarks, BaseBookmarksProbe, LlmHealth, LlmHealthProbe, RemoteInfo,
-    RepoOptions, RepoOptionsProbe, RevsetProbe, RevsetSummary, Revsets, TeaAuthProbe,
-    TeaAuthStatus, ToolStatus, VersionKind, VersionProbe, VersionResult, WorkspaceInfo,
-    WorkspaceProbe,
+    RepoOptions, RepoOptionsProbe, RevsetProbe, RevsetStats, RevsetStatsProbe, RevsetSummary,
+    Revsets, TeaAuthProbe, TeaAuthStatus, ToolStatus, VersionKind, VersionProbe, VersionResult,
+    WorkspaceInfo, WorkspaceProbe,
 };
 pub use prompt::{PromptBuild, PromptManifest, PromptSection, build_prompt};
 pub use status_store::StatusStore;
