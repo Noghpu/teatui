@@ -24,6 +24,13 @@ impl<T> Cached<T> {
         }
     }
 
+    pub fn value_mut(&mut self) -> Option<&mut T> {
+        match self {
+            Cached::Ready(v) | Cached::Stale { value: v, .. } => Some(v),
+            Cached::Unknown | Cached::Loading => None,
+        }
+    }
+
     pub fn is_refreshing(&self) -> bool {
         matches!(
             self,

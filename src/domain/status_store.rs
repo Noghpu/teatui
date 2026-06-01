@@ -1,8 +1,8 @@
 use crate::runtime::Cached;
 
 use super::probe::{
-    BaseBookmarks, LlmHealth, RepoOptions, Revsets, TeaAuthStatus, ToolStatus, VersionKind,
-    VersionResult, WorkspaceInfo,
+    BaseBookmarks, LlmHealth, RepoOptions, RevsetStats, Revsets, TeaAuthStatus, ToolStatus,
+    VersionKind, VersionResult, WorkspaceInfo,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -62,6 +62,26 @@ impl StatusStore {
         self.revsets.set(revsets);
     }
 
+    /// Merge deferred diff-stat results into the existing revset list.
+    /// Stats are matched by `change_id`; rows that are no longer in the
+    /// list (e.g. revset changed between probe and stats fetch) are
+    /// silently dropped.
+    pub fn merge_revset_stats(&mut self, stats: RevsetStats) {
+        let lookup: std::collections::HashMap<&str, &str> = stats
+            .0
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let Some(Revsets::Loaded(items)) = self.revsets.value_mut() else {
+            return;
+        };
+        for item in items.iter_mut() {
+            if let Some(s) = lookup.get(item.change_id.as_str()) {
+                item.stats = (*s).to_string();
+            }
+        }
+    }
+
     pub fn set_base_bookmarks(&mut self, bookmarks: BaseBookmarks) {
         self.base_bookmarks.set(bookmarks);
     }
@@ -100,5 +120,53 @@ mod tests {
         let mut store = StatusStore::new();
         store.mark_all_loading();
         assert!(matches!(store.revsets, Cached::Loading));
+    }
+
+    #[test]
+    fn merge_revset_stats_fills_matching_change_ids_only() {
+        use crate::domain::probe::{RevsetStats, RevsetSummary, Revsets};
+        let mut store = StatusStore::new();
+        store.set_revsets(Revsets::Loaded(vec![
+            RevsetSummary {
+                label: "trunk()..aaaa".into(),
+                change_id: "aaaa".into(),
+                commit_id: "1111".into(),
+                bookmarks: vec![],
+                description: "first".into(),
+                description_body: String::new(),
+                author: String::new(),
+                stats: String::new(),
+                commit_count: 1,
+                commit_ids: vec!["1111".into()],
+                change_ids: vec!["aaaa".into()],
+                recent_log: vec![],
+                warnings: vec![],
+            },
+            RevsetSummary {
+                label: "trunk()..bbbb".into(),
+                change_id: "bbbb".into(),
+                commit_id: "2222".into(),
+                bookmarks: vec![],
+                description: "second".into(),
+                description_body: String::new(),
+                author: String::new(),
+                stats: String::new(),
+                commit_count: 1,
+                commit_ids: vec!["2222".into()],
+                change_ids: vec!["bbbb".into()],
+                recent_log: vec![],
+                warnings: vec![],
+            },
+        ]));
+        store.merge_revset_stats(RevsetStats(vec![
+            ("aaaa".into(), "1 file changed, 5 insertions(+)".into()),
+            ("cccc".into(), "should be ignored — no matching row".into()),
+        ]));
+        let items = match store.revsets.value() {
+            Some(Revsets::Loaded(v)) => v,
+            _ => panic!("expected loaded revsets"),
+        };
+        assert_eq!(items[0].stats, "1 file changed, 5 insertions(+)");
+        assert_eq!(items[1].stats, "", "rows without matching stats stay empty");
     }
 }

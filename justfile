@@ -9,6 +9,12 @@ build-linux:
 build-windows:
     cargo build --release --target x86_64-pc-windows-msvc
 
+wsl-build:
+    powershell -NoLogo -ExecutionPolicy Bypass -File .\scripts\wsl-build.ps1
+
+wsl-run *ARGS:
+    powershell -NoLogo -ExecutionPolicy Bypass -File .\scripts\wsl-run.ps1 {{ARGS}}
+
 fmt:
     cargo fmt --check
 
@@ -22,6 +28,9 @@ test:
     cargo test --all-targets --all-features
 
 verify: fmt check clippy test
+
+snapshots:
+    cargo run --quiet --bin ui-snapshots --
 
 # Opt-in live smoke helper.
 # Required gate: TEATUI_SMOKE_LIVE=1.

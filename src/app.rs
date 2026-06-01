@@ -8,8 +8,8 @@ use crate::config::Config;
 use crate::domain::{
     BaseBookmarks, BaseBookmarksProbe, ContextJob, ContextResult, ExecutePrJob, ExecuteResult,
     LlmGenerateJob, LlmHealth, LlmHealthProbe, LlmResult, RepoOptions, RepoOptionsProbe,
-    RevsetProbe, Revsets, StatusStore, TeaAuthProbe, TeaAuthStatus, VersionKind, VersionProbe,
-    VersionResult, WorkspaceInfo, WorkspaceProbe, build_prompt, slugify,
+    RevsetProbe, RevsetStats, RevsetStatsProbe, Revsets, StatusStore, TeaAuthProbe, TeaAuthStatus,
+    VersionKind, VersionProbe, VersionResult, WorkspaceInfo, WorkspaceProbe, build_prompt, slugify,
 };
 use crate::input::InputEvent;
 use crate::runtime::{JobEvent, JobOutcomeEvent, JobSubmitter};
@@ -57,7 +57,7 @@ impl App {
         });
         submitter.submit(RevsetProbe {
             jj_binary: config.commands.jj.clone(),
-            revset: "mutable()".into(),
+            revset: "trunk()..@".into(),
         });
         submitter.submit(BaseBookmarksProbe {
             jj_binary: config.commands.jj.clone(),
@@ -129,6 +129,14 @@ impl App {
             Transition::Execute => self.start_execution(),
             Transition::CopyUrl => self.copy_done_url(),
             Transition::OpenUrl => self.open_done_url(),
+            Transition::RefreshRevsets => {
+                self.status.revsets.mark_loading();
+                self.submitter.submit(RevsetProbe {
+                    jj_binary: self.config.commands.jj.clone(),
+                    revset: "trunk()..@".into(),
+                });
+                self.dirty = true;
+            }
         }
     }
 
@@ -162,10 +170,10 @@ impl App {
         };
         let phase = std::mem::replace(&mut state.phase, GeneratePhase::Idle);
         let draft = match phase {
-            GeneratePhase::DraftReady { draft, .. } => draft,
+            GeneratePhase::Confirming { draft, .. } => draft,
             other => {
                 state.phase = other;
-                tracing::debug!(target: "teatui::execute", "ignored: not in DraftReady");
+                tracing::debug!(target: "teatui::execute", "ignored: not confirming");
                 return;
             }
         };
@@ -295,6 +303,31 @@ impl App {
             Ok(b) => {
                 self.status.set_revsets(*b);
                 self.sync_generate_options();
+                // If the user opened PR-gen before revsets loaded, the
+                // form's `head` field is still empty. Now that the list
+                // is in, snap it to the currently-selected revset so the
+                // Form pane reflects the visible Changes-pane cursor.
+                if let Screen::Generate(state) = &mut self.screen
+                    && state.form.head().is_empty()
+                {
+                    screens::generate::update_head_from_selection(state, &self.status);
+                }
+                // Kick off the deferred stats fetch. This is a heavier
+                // jj subprocess (~1.4s on this workspace) that we keep
+                // off the first-paint path; results merge in via the
+                // RevsetStats handler below.
+                self.submitter.submit(RevsetStatsProbe {
+                    jj_binary: self.config.commands.jj.clone(),
+                    revset: "trunk()..@".into(),
+                });
+                self.dirty = true;
+                return;
+            }
+            Err(a) => a,
+        };
+        let any = match any.downcast::<RevsetStats>() {
+            Ok(b) => {
+                self.status.merge_revset_stats(*b);
                 self.dirty = true;
                 return;
             }

@@ -14,11 +14,17 @@ use teatui::domain::{
     WorkspaceInfo, build_prompt,
 };
 use teatui::runtime::Cached;
-use teatui::screens::generate::{FieldId, GeneratePhase, GenerateState, InputMode, Pane};
+use teatui::screens::generate::{
+    CommandPreview, FieldId, GeneratePhase, GenerateState, InputMode, Pane,
+};
 use teatui::screens::{self, LandingState};
 
 fn term() -> Terminal<TestBackend> {
     Terminal::new(TestBackend::new(120, 30)).expect("terminal")
+}
+
+fn small_term() -> Terminal<TestBackend> {
+    Terminal::new(TestBackend::new(80, 24)).expect("terminal")
 }
 
 fn draw_landing(state: &LandingState, status: &StatusStore) {
@@ -30,8 +36,26 @@ fn draw_landing(state: &LandingState, status: &StatusStore) {
     .expect("draw");
 }
 
+fn draw_landing_small(state: &LandingState, status: &StatusStore) {
+    let mut t = small_term();
+    t.draw(|frame| {
+        let area = frame.area();
+        screens::landing::render(state, status, frame, area);
+    })
+    .expect("draw");
+}
+
 fn draw_generate(state: &GenerateState, status: &StatusStore) {
     let mut t = term();
+    t.draw(|frame| {
+        let area = frame.area();
+        screens::generate::render(state, status, frame, area);
+    })
+    .expect("draw");
+}
+
+fn draw_generate_small(state: &GenerateState, status: &StatusStore) {
+    let mut t = small_term();
     t.draw(|frame| {
         let area = frame.area();
         screens::generate::render(state, status, frame, area);
@@ -75,11 +99,19 @@ fn populated_status() -> StatusStore {
 
 fn sample_revset(change_id: &str, desc: &str) -> RevsetSummary {
     RevsetSummary {
+        label: format!("trunk()..{change_id}"),
         change_id: change_id.into(),
         commit_id: "deadbeef".into(),
         bookmarks: vec![],
         description: desc.into(),
-        author: "alice".into(),
+        description_body: "Body line".into(),
+        author: String::new(),
+        stats: "1 file changed, 2 insertions(+), 1 deletion(-)".into(),
+        commit_count: 1,
+        commit_ids: vec!["deadbeef".into()],
+        change_ids: vec![change_id.into()],
+        recent_log: vec![format!("deadbeef {desc}")],
+        warnings: vec![],
     }
 }
 
@@ -106,6 +138,14 @@ fn sample_draft() -> GeneratedDraft {
     GeneratedDraft {
         title: "Add foo to bar".into(),
         description: "Implements foo.\n\nDetails follow.".into(),
+    }
+}
+
+fn sample_commands() -> CommandPreview {
+    CommandPreview {
+        bookmark: "jj --no-pager bookmark set --allow-backwards add-foo -r abcd".into(),
+        push: "jj --no-pager git push --bookmark add-foo".into(),
+        create: "tea pr create --base main --head add-foo --title \"Add foo\"".into(),
     }
 }
 
@@ -162,8 +202,13 @@ fn landing_with_missing_tools_renders() {
 
 #[test]
 fn landing_with_selected_quit_renders() {
-    let state = LandingState { selected: 1 };
+    let state = LandingState { selected: 3 };
     draw_landing(&state, &populated_status());
+}
+
+#[test]
+fn landing_small_terminal_renders() {
+    draw_landing_small(&LandingState::default(), &populated_status());
 }
 
 // ============================== Generate ====================================
@@ -177,6 +222,9 @@ fn generate_with(phase: GeneratePhase) -> GenerateState {
     GenerateState {
         pane: Pane::Menu,
         revset_selected: 0,
+        scroll_menu: std::cell::Cell::new(0),
+        scroll_form: std::cell::Cell::new(0),
+        scroll_preview: 0,
         input_mode: InputMode::Normal,
         field_focus: FieldId::Head,
         form,
@@ -221,6 +269,18 @@ fn generate_draft_ready_renders() {
 }
 
 #[test]
+fn generate_confirming_renders() {
+    draw_generate(
+        &generate_with(GeneratePhase::Confirming {
+            draft: sample_draft(),
+            prompt: sample_prompt(),
+            commands: sample_commands(),
+        }),
+        &populated_status(),
+    );
+}
+
+#[test]
 fn generate_executing_renders() {
     draw_generate(
         &generate_with(GeneratePhase::Executing {
@@ -228,6 +288,38 @@ fn generate_executing_renders() {
         }),
         &populated_status(),
     );
+}
+
+#[test]
+fn generate_small_terminal_each_phase_renders() {
+    for phase in [
+        GeneratePhase::Idle,
+        GeneratePhase::Collecting,
+        GeneratePhase::Generating {
+            context: sample_context(),
+            prompt: sample_prompt(),
+        },
+        GeneratePhase::DraftReady {
+            draft: sample_draft(),
+            prompt: sample_prompt(),
+        },
+        GeneratePhase::Confirming {
+            draft: sample_draft(),
+            prompt: sample_prompt(),
+            commands: sample_commands(),
+        },
+        GeneratePhase::Executing {
+            draft: sample_draft(),
+        },
+        GeneratePhase::Done {
+            url: "https://gitea.example.com/o/r/pulls/1".into(),
+        },
+        GeneratePhase::Failed {
+            message: "ollama unreachable".into(),
+        },
+    ] {
+        draw_generate_small(&generate_with(phase), &populated_status());
+    }
 }
 
 #[test]

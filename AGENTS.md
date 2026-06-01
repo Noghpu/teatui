@@ -34,6 +34,10 @@ Command runner is `just`:
 - `just clippy`: lint Rust (`-D warnings`).
 - `just test`: run all tests (unit + render smoke).
 - `just verify`: run all handoff checks.
+- `just snapshots`: render deterministic visual UI artifacts to
+  `target/ui-snapshots/` (`.svg`, `.txt`, and `index.html`). Use this after
+  UI changes so agents can inspect actual rendered screens and catch layout
+  bugs visually, not only through smoke tests.
 
 ## Architecture at a glance
 

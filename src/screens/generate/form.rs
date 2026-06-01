@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_textarea::TextArea;
 
-use crate::domain::{BaseBookmark, RepoOptions, Revsets, StatusStore};
+use crate::domain::{RepoOptions, Revsets, StatusStore};
 
 impl std::fmt::Debug for TextFieldState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -516,21 +516,23 @@ impl PrForm {
                 items
                     .iter()
                     .map(|item| PickerOption {
-                        label: format!("{} {}", item.change_id, item.description),
+                        label: revset_option_label(item),
                         value: item.change_id.clone(),
                         enabled: true,
                     })
                     .collect(),
             );
         }
-        if let Some(bookmarks) = status.base_bookmarks.value() {
-            let current_base = self.base.value().to_string();
+        if let Some(Revsets::Loaded(items)) = status.revsets.value() {
             set_picker_options(
                 &mut self.base,
-                bookmarks
+                items
                     .iter()
-                    .map(base_bookmark_option)
-                    .chain(option_from_current(&current_base))
+                    .map(|item| PickerOption {
+                        label: revset_option_label(item),
+                        value: item.change_id.clone(),
+                        enabled: true,
+                    })
                     .collect(),
             );
         }
@@ -589,31 +591,24 @@ fn set_picker_options(field: &mut FieldState, options: Vec<PickerOption>) {
     }
 }
 
+fn revset_option_label(item: &crate::domain::RevsetSummary) -> String {
+    if let Some(bookmark) = item.bookmarks.first()
+        && !bookmark.is_empty()
+    {
+        return bookmark.clone();
+    }
+    if !item.description.trim().is_empty() {
+        return item.description.clone();
+    }
+    item.change_id.clone()
+}
+
 fn option(value: &str) -> PickerOption {
     PickerOption {
         label: value.to_string(),
         value: value.to_string(),
         enabled: true,
     }
-}
-
-fn base_bookmark_option(bookmark: &BaseBookmark) -> PickerOption {
-    PickerOption {
-        label: bookmark.name.clone(),
-        value: bookmark.name.clone(),
-        enabled: true,
-    }
-}
-
-fn option_from_current(value: &str) -> impl Iterator<Item = PickerOption> {
-    let value = value.to_string();
-    (!value.is_empty())
-        .then(|| PickerOption {
-            label: value.clone(),
-            value,
-            enabled: true,
-        })
-        .into_iter()
 }
 
 #[cfg(test)]
