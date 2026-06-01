@@ -531,3 +531,18 @@ Surprises / things to remember:
 - `tea pr create --help` uses plural `--labels` / `--assignees`, not the singular names in the Phase 7 sketch.
 - `cargo update --dry-run --verbose` still reports `generic-array 0.14.7` behind latest, but it is transitive and constrained upstream.
 - The repo is still Linux-only by design, but Windows-target transitive crates can appear while compiling on the Windows dev host through cross-platform dependencies.
+
+### Phase 8 — UI/UX rebuild pass
+
+- **Status:** done. `just verify` green (44 unit + 25 render smoke = **69 tests**).
+- Added `screens::theme`, a shared Catppuccin Mocha-inspired presentation layer with semantic colors, rounded/padded pane blocks, modal blocks, status badges, selection markers, key-footer helpers, and common text styles. Screens now consume those helpers instead of scattering raw cyan/dark-gray styling.
+- Rebuilt Landing from the post-rewrite debug list into an operational dashboard: action pane, repo header, readiness pane, selected-action preview, setup blockers, and a compact footer. Only real entries are shown (`Generate PR`, `Quit`); deferred PR/issue management remains absent rather than advertised.
+- Polished Generate rendering around the existing three-pane state model: themed root/pane/modal blocks, accent selection markers, themed validation/error/success states, mode-aware footer, and clearer draft/review copy.
+- Added `GeneratePhase::Confirming { draft, prompt, commands }`. Pressing `x` from `DraftReady` now opens a command review preview; execution only starts from `Confirming` via `x` or `Enter`. `Esc` returns from confirmation to the draft instead of leaving Generate.
+- Added confirmation input tests plus render smoke coverage for the new phase and an 80x24 small-terminal floor for Landing and every Generate phase.
+
+Surprises / things to remember:
+
+- The shared theme module is intentionally screen-local (`screens::theme`) rather than a resurrected monolithic `ui.rs`; it should stay presentation-only.
+- The command preview is display-only and uses the current form values. `ExecutePrJob` remains the source of actual argv construction.
+- `just fmt` is a format check in this repo. Use `cargo fmt` to apply formatting, then `just verify` for handoff.

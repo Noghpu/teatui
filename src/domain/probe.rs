@@ -290,11 +290,19 @@ struct TagModel {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevsetSummary {
+    pub label: String,
     pub change_id: String,
     pub commit_id: String,
     pub bookmarks: Vec<String>,
     pub description: String,
+    pub description_body: String,
     pub author: String,
+    pub stats: String,
+    pub commit_count: usize,
+    pub commit_ids: Vec<String>,
+    pub change_ids: Vec<String>,
+    pub recent_log: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -312,7 +320,7 @@ impl Default for RevsetProbe {
     fn default() -> Self {
         Self {
             jj_binary: "jj".into(),
-            revset: "mutable()".into(),
+            revset: "trunk()..@".into(),
         }
     }
 }
@@ -322,7 +330,17 @@ impl Job for RevsetProbe {
         "probe.revsets"
     }
     fn run(self: Box<Self>) -> JobOutcome {
-        const TEMPLATE: &str = r#"change_id.short() ++ "\t" ++ commit_id.short() ++ "\t" ++ bookmarks.map(|b| b.name()).join(",") ++ "\t" ++ description.first_line() ++ "\t" ++ author.name() ++ "\n""#;
+        // Fast list-only probe — no diff computation. Stats are
+        // populated incrementally by `RevsetStatsProbe`, which fires
+        // after this one completes (see `App::absorb_payload`). Splits
+        // the first paint of the Changes pane (~0.6s) from the heavier
+        // stats fill-in (~1.4s, deferred).
+        //
+        // Each record starts with `\x1E`, then `commit|change|bookmarks|
+        // description` (description body lines joined by `\x1F`), then
+        // `\x1D\n` to mark end-of-record. The parser tolerates a missing
+        // diff-stat block — we always read records that way.
+        const TEMPLATE: &str = r#""\x1E" ++ commit_id.short() ++ "|" ++ change_id.short() ++ "|" ++ bookmarks.map(|b| b.name()).join(",") ++ "|" ++ description.lines().join("\x1F") ++ "\x1D\n""#;
         let result = match Command::new(&self.jj_binary)
             .args([
                 "--no-pager",
@@ -340,7 +358,8 @@ impl Job for RevsetProbe {
         {
             Ok(out) if out.status.success() => {
                 let stdout = String::from_utf8_lossy(&out.stdout);
-                Revsets::Loaded(parse_revsets(&stdout))
+                let summaries = parse_revset_log_with_stats(&stdout);
+                Revsets::Loaded(summaries)
             }
             Ok(out) => Revsets::Errored {
                 message: String::from_utf8_lossy(&out.stderr).trim().to_string(),
@@ -356,31 +375,150 @@ impl Job for RevsetProbe {
     }
 }
 
-fn parse_revsets(stdout: &str) -> Vec<RevsetSummary> {
-    stdout
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|line| {
-            let mut fields = line.splitn(5, '\t');
-            let change_id = fields.next()?.to_string();
-            let commit_id = fields.next()?.to_string();
-            let bookmarks_raw = fields.next()?;
-            let description = fields.next()?.to_string();
-            let author = fields.next().unwrap_or("").to_string();
-            let bookmarks = if bookmarks_raw.is_empty() {
-                Vec::new()
-            } else {
-                bookmarks_raw.split(',').map(|s| s.to_string()).collect()
-            };
-            Some(RevsetSummary {
-                change_id,
-                commit_id,
-                bookmarks,
-                description,
-                author,
-            })
-        })
-        .collect()
+/// Deferred diff-stat fetcher. Issues a single `jj log --stat` for the
+/// same revset, parses out the summary line for each change, and returns
+/// the result as `RevsetStats` keyed by `change_id`. Launched after
+/// `RevsetProbe` completes so the list paints first.
+pub struct RevsetStatsProbe {
+    pub jj_binary: String,
+    pub revset: String,
+}
+
+/// Per-change-id diff-stat summary lines, merged into existing
+/// `RevsetSummary` entries by `App::absorb_payload`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RevsetStats(pub Vec<(String, String)>);
+
+impl Job for RevsetStatsProbe {
+    fn name(&self) -> &'static str {
+        "probe.revset_stats"
+    }
+    fn run(self: Box<Self>) -> JobOutcome {
+        // Same template, with `--stat` so jj appends the diff block
+        // after each record. The summary line is what we keep.
+        const TEMPLATE: &str = r#""\x1E" ++ commit_id.short() ++ "|" ++ change_id.short() ++ "|" ++ bookmarks.map(|b| b.name()).join(",") ++ "|" ++ description.lines().join("\x1F") ++ "\x1D\n""#;
+        let result = match Command::new(&self.jj_binary)
+            .args([
+                "--no-pager",
+                "log",
+                "-r",
+                &self.revset,
+                "--no-graph",
+                "--stat",
+                "-T",
+                TEMPLATE,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let pairs = parse_revset_log_with_stats(&stdout)
+                    .into_iter()
+                    .map(|s| (s.change_id, s.stats))
+                    .collect();
+                RevsetStats(pairs)
+            }
+            // Failures fall through silently — first paint already
+            // succeeded; missing stats just leave rows without the
+            // compact "4f +188 -34" metadata line.
+            _ => RevsetStats::default(),
+        };
+        JobOutcome::Done(Box::new(result))
+    }
+}
+
+#[derive(Debug)]
+struct ParsedRevsetEntry {
+    commit_id: String,
+    change_id: String,
+    bookmarks: Vec<String>,
+    description: String,
+    description_body: String,
+}
+
+fn parse_revset_log_entry(line: &str) -> Option<ParsedRevsetEntry> {
+    let mut fields = line.splitn(4, '|');
+    let commit_id = fields.next()?.to_string();
+    let change_id = fields.next()?.to_string();
+    let bookmarks_raw = fields.next().unwrap_or("");
+    let description_raw = fields.next().unwrap_or("");
+
+    let bookmarks = if bookmarks_raw.is_empty() {
+        Vec::new()
+    } else {
+        bookmarks_raw.split(',').map(str::to_string).collect()
+    };
+    let mut description_lines = description_raw.split('\x1F');
+    let description = description_lines.next().unwrap_or("").to_string();
+    let description_body = description_lines.collect::<Vec<_>>().join("\n");
+
+    Some(ParsedRevsetEntry {
+        commit_id,
+        change_id,
+        bookmarks,
+        description,
+        description_body,
+    })
+}
+
+/// Parse the combined `jj log --stat` output produced by the template
+/// in `RevsetProbe`. Each record starts with `\x1E`, holds metadata up
+/// to `\x1D`, then jj's `--stat` block (file lines + summary) until the
+/// next record. We discard the per-file lines and keep the summary.
+fn parse_revset_log_with_stats(stdout: &str) -> Vec<RevsetSummary> {
+    let mut out = Vec::new();
+    for record in stdout.split('\x1E').skip(1) {
+        let Some((meta_part, stat_part)) = record.split_once('\x1D') else {
+            continue;
+        };
+        let Some(entry) = parse_revset_log_entry(meta_part.trim_end_matches('\n')) else {
+            continue;
+        };
+        let stats = extract_diff_stat_summary(stat_part);
+        out.push(summary_from_entry(entry, stats));
+    }
+    out
+}
+
+/// Pull the "N files changed, X insertions(+), Y deletions(-)" line
+/// from a jj `--stat` block.
+fn extract_diff_stat_summary(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty() && l.contains("file") && l.contains("changed"))
+        .unwrap_or("")
+        .to_string()
+}
+
+fn summary_from_entry(entry: ParsedRevsetEntry, stats: String) -> RevsetSummary {
+    let label = format!("trunk()..{}", entry.change_id);
+    let recent_log = vec![format!(
+        "{} {}",
+        entry.commit_id,
+        non_empty_or(&entry.description, "(no description set)")
+    )];
+    RevsetSummary {
+        label,
+        change_id: entry.change_id.clone(),
+        commit_id: entry.commit_id.clone(),
+        bookmarks: entry.bookmarks,
+        description: entry.description,
+        description_body: entry.description_body,
+        author: String::new(),
+        stats,
+        commit_count: 1,
+        commit_ids: vec![entry.commit_id],
+        change_ids: vec![entry.change_id],
+        recent_log,
+        warnings: Vec::new(),
+    }
+}
+
+fn non_empty_or<'a>(value: &'a str, fallback: &'a str) -> &'a str {
+    if value.is_empty() { fallback } else { value }
 }
 
 // ======================== Base bookmarks ===================================
@@ -545,24 +683,45 @@ mod tests {
 
     #[test]
     fn parses_revsets_with_bookmarks_and_empty_bookmarks() {
-        let raw = "abcd1234\tdeadbeef\tfeature/foo,bar\tFirst line of desc\tAlice\nef567890\tcafebabe\t\tAnother change\tBob\n";
-        let revsets = parse_revsets(raw);
+        let raw = "\x1Edeadbeef|abcd1234|feature/foo,bar|First line of desc\x1FBody line\x1D\nsrc/foo.rs | 10 ++++++\n1 file changed, 8 insertions(+), 2 deletions(-)\n\x1Eef567890|cafebabe||Another change\x1D\n0 files changed, 0 insertions(+), 0 deletions(-)\n";
+        let revsets = parse_revset_log_with_stats(raw);
         assert_eq!(revsets.len(), 2);
         assert_eq!(revsets[0].change_id, "abcd1234");
+        assert_eq!(revsets[0].commit_id, "deadbeef");
         assert_eq!(
             revsets[0].bookmarks,
             vec!["feature/foo".to_string(), "bar".to_string()]
         );
         assert_eq!(revsets[0].description, "First line of desc");
-        assert_eq!(revsets[0].author, "Alice");
+        assert_eq!(revsets[0].description_body, "Body line");
+        assert_eq!(revsets[0].label, "trunk()..abcd1234");
+        assert_eq!(revsets[0].commit_ids, vec!["deadbeef".to_string()]);
+        assert_eq!(revsets[0].change_ids, vec!["abcd1234".to_string()]);
+        assert_eq!(
+            revsets[0].stats,
+            "1 file changed, 8 insertions(+), 2 deletions(-)"
+        );
         assert!(revsets[1].bookmarks.is_empty());
-        assert_eq!(revsets[1].author, "Bob");
+        assert_eq!(
+            revsets[1].stats,
+            "0 files changed, 0 insertions(+), 0 deletions(-)"
+        );
+        assert_eq!(revsets[1].author, "");
     }
 
     #[test]
-    fn parses_revsets_ignores_blank_lines() {
-        let raw = "abcd\tef01\t\tdesc\tA\n\n\n";
-        let revsets = parse_revsets(raw);
+    fn parses_revsets_handles_empty_input() {
+        let revsets = parse_revset_log_with_stats("");
+        assert!(revsets.is_empty());
+    }
+
+    #[test]
+    fn parses_revsets_handles_entry_without_stats() {
+        // Defensive: if jj ever drops the summary line, the entry still
+        // parses with an empty `stats` rather than being dropped.
+        let raw = "\x1Eabc123|change1||desc\x1D\n";
+        let revsets = parse_revset_log_with_stats(raw);
         assert_eq!(revsets.len(), 1);
+        assert_eq!(revsets[0].stats, "");
     }
 }
