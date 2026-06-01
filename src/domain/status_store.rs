@@ -1,7 +1,8 @@
 use crate::runtime::Cached;
 
 use super::probe::{
-    LlmHealth, Revsets, TeaAuthStatus, ToolStatus, VersionKind, VersionResult, WorkspaceInfo,
+    BaseBookmarks, LlmHealth, RepoOptions, Revsets, TeaAuthStatus, ToolStatus, VersionKind,
+    VersionResult, WorkspaceInfo,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -13,6 +14,8 @@ pub struct StatusStore {
     pub tea_auth: Cached<TeaAuthStatus>,
     pub llm: Cached<LlmHealth>,
     pub revsets: Cached<Revsets>,
+    pub base_bookmarks: Cached<BaseBookmarks>,
+    pub repo_options: Cached<RepoOptions>,
 }
 
 impl StatusStore {
@@ -31,6 +34,7 @@ impl StatusStore {
         self.tea_auth.mark_loading();
         self.llm.mark_loading();
         self.revsets.mark_loading();
+        self.base_bookmarks.mark_loading();
     }
 
     pub fn set_version(&mut self, result: VersionResult) {
@@ -56,6 +60,18 @@ impl StatusStore {
 
     pub fn set_revsets(&mut self, revsets: Revsets) {
         self.revsets.set(revsets);
+    }
+
+    pub fn set_base_bookmarks(&mut self, bookmarks: BaseBookmarks) {
+        self.base_bookmarks.set(bookmarks);
+    }
+
+    pub fn mark_repo_options_loading(&mut self) {
+        self.repo_options.mark_loading();
+    }
+
+    pub fn set_repo_options(&mut self, options: RepoOptions) {
+        self.repo_options.set(options);
     }
 }
 

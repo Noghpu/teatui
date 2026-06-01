@@ -31,7 +31,7 @@ pub fn render_tool(c: &Cached<ToolStatus>) -> String {
 
 pub fn render_workspace(c: &Cached<WorkspaceInfo>) -> String {
     render_cached(c, |w| match w {
-        WorkspaceInfo::Inside { root } => format!("inside {}", root.display()),
+        WorkspaceInfo::Inside { root, .. } => format!("inside {}", root.display()),
         WorkspaceInfo::Outside => "outside any jj workspace".to_string(),
         WorkspaceInfo::Errored { message } => format!("error: {message}"),
     })

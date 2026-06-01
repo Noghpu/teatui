@@ -14,7 +14,7 @@ use teatui::domain::{
     WorkspaceInfo, build_prompt,
 };
 use teatui::runtime::Cached;
-use teatui::screens::generate::{GeneratePhase, GenerateState, Pane};
+use teatui::screens::generate::{FieldId, GeneratePhase, GenerateState, InputMode, Pane};
 use teatui::screens::{self, LandingState};
 
 fn term() -> Terminal<TestBackend> {
@@ -61,6 +61,7 @@ fn populated_status() -> StatusStore {
     });
     s.set_workspace(WorkspaceInfo::Inside {
         root: PathBuf::from("/home/user/proj"),
+        remote: None,
     });
     s.set_tea_auth(TeaAuthStatus::Configured {
         logins: vec!["gitea".into()],
@@ -168,17 +169,17 @@ fn landing_with_selected_quit_renders() {
 // ============================== Generate ====================================
 
 fn generate_with(phase: GeneratePhase) -> GenerateState {
+    let mut form = teatui::screens::generate::PrForm::new("main".into());
+    form.head.set_value("abcd".into());
+    form.branch_name.set_value("add-foo".into());
+    form.title.set_value("Add foo".into());
+    form.description.set_value("Implements foo.".into());
     GenerateState {
         pane: Pane::Menu,
         revset_selected: 0,
-        form: teatui::screens::generate::PrForm {
-            head: "abcd".into(),
-            branch: "add-foo".into(),
-            base: "main".into(),
-            title: "Add foo".into(),
-            description: "Implements foo.".into(),
-            ..Default::default()
-        },
+        input_mode: InputMode::Normal,
+        field_focus: FieldId::Head,
+        form,
         phase,
         last_action: None,
     }
@@ -288,6 +289,48 @@ fn generate_each_pane_focus_renders() {
         s.pane = pane;
         draw_generate(&s, &populated_status());
     }
+}
+
+#[test]
+fn generate_each_field_focus_renders() {
+    for field_focus in FieldId::ALL {
+        let mut s = generate_with(GeneratePhase::Idle);
+        s.pane = Pane::Form;
+        s.field_focus = field_focus;
+        draw_generate(&s, &populated_status());
+    }
+}
+
+#[test]
+fn generate_editing_single_line_renders() {
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.pane = Pane::Form;
+    s.field_focus = FieldId::Title;
+    s.input_mode = InputMode::Editing;
+    s.form.title.begin_edit();
+    draw_generate(&s, &populated_status());
+}
+
+#[test]
+fn generate_editing_multiline_renders() {
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.pane = Pane::Form;
+    s.field_focus = FieldId::Description;
+    s.input_mode = InputMode::Editing;
+    s.form.description.begin_edit();
+    draw_generate(&s, &populated_status());
+}
+
+#[test]
+fn generate_editing_picker_modal_renders() {
+    let status = populated_status();
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.ensure_field_options_synced(&status);
+    s.pane = Pane::Form;
+    s.field_focus = FieldId::Head;
+    s.input_mode = InputMode::Editing;
+    s.form.head.begin_edit();
+    draw_generate(&s, &status);
 }
 
 // ============================== Build path ==================================

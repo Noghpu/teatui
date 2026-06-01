@@ -33,6 +33,9 @@ pub struct ExecutePrJob {
     pub base: String,
     pub title: String,
     pub description: String,
+    pub labels: Vec<String>,
+    pub assignees: Vec<String>,
+    pub milestone: String,
 }
 
 impl Job for ExecutePrJob {
@@ -77,7 +80,7 @@ fn run_execute(job: ExecutePrJob) -> ExecuteResult {
     }
 
     // Step 3: create the PR via tea.
-    let tea_args = vec![
+    let mut tea_args = vec![
         "pr".to_string(),
         "create".to_string(),
         "--base".to_string(),
@@ -89,6 +92,18 @@ fn run_execute(job: ExecutePrJob) -> ExecuteResult {
         "--description".to_string(),
         job.description.clone(),
     ];
+    if !job.labels.is_empty() {
+        tea_args.push("--labels".to_string());
+        tea_args.push(job.labels.join(","));
+    }
+    if !job.assignees.is_empty() {
+        tea_args.push("--assignees".to_string());
+        tea_args.push(job.assignees.join(","));
+    }
+    if !job.milestone.is_empty() {
+        tea_args.push("--milestone".to_string());
+        tea_args.push(job.milestone.clone());
+    }
     let stdout = match tea(&job.tea_binary, &tea_args) {
         Ok(out) => out,
         Err(message) => {
