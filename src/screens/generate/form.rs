@@ -1,7 +1,12 @@
+use std::cell::Cell;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_textarea::TextArea;
 
 use crate::domain::{RepoOptions, Revsets, StatusStore};
+
+pub const HEAD_BEHIND_BASE_WARNING: &str = "head is older than base";
+pub const BASE_AHEAD_OF_HEAD_WARNING: &str = "base is newer than head";
 
 impl std::fmt::Debug for TextFieldState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -249,6 +254,9 @@ pub struct PickerFieldState {
     pub options: Vec<PickerOption>,
     pub filter: String,
     pub highlighted: usize,
+    /// Top index of the scrolled option window. A `Cell` so render can keep it
+    /// in sync with `highlighted` without a mutable borrow; edge-clamped there.
+    pub scroll: Cell<usize>,
     pub multi_select: bool,
     pub optional: bool,
     pub editing: bool,
@@ -272,6 +280,7 @@ impl PickerFieldState {
             options,
             filter: String::new(),
             highlighted: 0,
+            scroll: Cell::new(0),
             multi_select,
             optional,
             editing: false,
@@ -540,6 +549,47 @@ impl PrForm {
             sync_repo_options(self, options);
         }
     }
+
+    pub fn relative_order_warning(&self, id: FieldId) -> Option<&'static str> {
+        let head = self.picker_option_index(FieldId::Head, self.head())?;
+        let base = self.picker_option_index(FieldId::Base, self.base())?;
+        if head <= base {
+            return None;
+        }
+        match id {
+            FieldId::Head => Some(HEAD_BEHIND_BASE_WARNING),
+            FieldId::Base => Some(BASE_AHEAD_OF_HEAD_WARNING),
+            _ => None,
+        }
+    }
+
+    pub fn picker_option_warning(&self, id: FieldId, option_value: &str) -> Option<&'static str> {
+        let option = self.picker_option_index(id, option_value)?;
+        match id {
+            FieldId::Head => {
+                let base = self.picker_option_index(FieldId::Base, self.base())?;
+                (option > base).then_some(HEAD_BEHIND_BASE_WARNING)
+            }
+            FieldId::Base => {
+                let head = self.picker_option_index(FieldId::Head, self.head())?;
+                (option < head).then_some(BASE_AHEAD_OF_HEAD_WARNING)
+            }
+            _ => None,
+        }
+    }
+
+    fn picker_option_index(&self, id: FieldId, value: &str) -> Option<usize> {
+        if value.is_empty() {
+            return None;
+        }
+        let FieldState::Picker(picker) = self.field(id) else {
+            return None;
+        };
+        picker
+            .options
+            .iter()
+            .position(|option| option.value == value)
+    }
 }
 
 fn sync_repo_options(form: &mut PrForm, options: &RepoOptions) {
@@ -617,6 +667,38 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn revset(change_id: &str) -> crate::domain::RevsetSummary {
+        crate::domain::RevsetSummary {
+            label: format!("trunk()..{change_id}"),
+            change_id: change_id.to_string(),
+            commit_id: format!("{change_id}-commit"),
+            bookmarks: Vec::new(),
+            description: format!("Change {change_id}"),
+            description_body: String::new(),
+            author: String::new(),
+            stats: String::new(),
+            commit_count: 1,
+            commit_ids: vec![format!("{change_id}-commit")],
+            change_ids: vec![change_id.to_string()],
+            recent_log: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    fn ordered_form(head: &str, base: &str) -> PrForm {
+        let mut status = StatusStore::new();
+        status.set_revsets(Revsets::Loaded(vec![
+            revset("new"),
+            revset("base"),
+            revset("old"),
+        ]));
+        let mut form = PrForm::default();
+        form.sync_options(&status);
+        form.head.set_value(head.to_string());
+        form.base.set_value(base.to_string());
+        form
     }
 
     #[test]
@@ -711,5 +793,35 @@ mod tests {
         form.base.set_value("main".into());
         form.title.set_value("Title".into());
         assert!(form.validate());
+    }
+
+    #[test]
+    fn form_warns_when_head_is_older_than_base() {
+        let form = ordered_form("old", "base");
+
+        assert_eq!(
+            form.relative_order_warning(FieldId::Head),
+            Some(HEAD_BEHIND_BASE_WARNING)
+        );
+        assert_eq!(
+            form.relative_order_warning(FieldId::Base),
+            Some(BASE_AHEAD_OF_HEAD_WARNING)
+        );
+    }
+
+    #[test]
+    fn picker_options_warn_against_counterpart_order() {
+        let form = ordered_form("base", "base");
+
+        assert_eq!(
+            form.picker_option_warning(FieldId::Head, "old"),
+            Some(HEAD_BEHIND_BASE_WARNING)
+        );
+        assert_eq!(form.picker_option_warning(FieldId::Head, "new"), None);
+        assert_eq!(
+            form.picker_option_warning(FieldId::Base, "new"),
+            Some(BASE_AHEAD_OF_HEAD_WARNING)
+        );
+        assert_eq!(form.picker_option_warning(FieldId::Base, "old"), None);
     }
 }

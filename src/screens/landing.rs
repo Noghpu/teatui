@@ -54,6 +54,7 @@ pub fn on_key(state: &mut LandingState, key: KeyEvent) -> Transition {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match (key.code, ctrl) {
         (KeyCode::Char('q'), false) | (KeyCode::Char('c'), true) => Transition::Quit,
+        (KeyCode::Char('b'), false) => Transition::OpenBackendPicker,
         (KeyCode::Char('g'), false) => Transition::Navigate(NewScreen::Generate),
         (KeyCode::Char('p'), false) => {
             state.selected = 1;
@@ -292,6 +293,7 @@ fn render_status_bar(state: &LandingState, frame: &mut Frame, area: Rect) {
 fn render_help(frame: &mut Frame, area: Rect) {
     let hints = [
         theme::HelpHint::primary("Enter", "open"),
+        theme::HelpHint::new("b", "backend"),
         theme::HelpHint::new("q", "quit"),
     ];
     frame.render_widget(Paragraph::new(theme::help_line(&hints, area.width)), area);
