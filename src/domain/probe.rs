@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use crate::config::LlmApi;
 use crate::runtime::{Job, JobOutcome};
 
 // ============================== Version =====================================
@@ -243,35 +244,87 @@ pub enum LlmHealth {
     Unreachable { message: String },
 }
 
-pub struct LlmHealthProbe {
+/// Health probe for a single named backend. The result carries the
+/// backend `name` so the app can route it to the right row when probing
+/// several backends at once (the backend switcher fires one per backend).
+pub struct BackendHealthProbe {
+    pub name: String,
     pub base_url: String,
+    pub api: LlmApi,
+    pub api_key: Option<String>,
     pub timeout: Duration,
 }
 
-impl Job for LlmHealthProbe {
+/// An `LlmHealth` tagged with the backend it describes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendHealth {
+    pub name: String,
+    pub health: LlmHealth,
+}
+
+impl Job for BackendHealthProbe {
     fn name(&self) -> &'static str {
         "probe.llm.health"
     }
     fn run(self: Box<Self>) -> JobOutcome {
-        let url = format!("{}/api/tags", self.base_url.trim_end_matches('/'));
-        let config = ureq::Agent::config_builder()
-            .timeout_global(Some(self.timeout))
-            .build();
-        let agent = ureq::Agent::new_with_config(config);
-        let result = match agent.get(&url).call() {
-            Ok(mut resp) => match resp.body_mut().read_json::<TagsResponse>() {
-                Ok(tags) => LlmHealth::Available {
-                    models: tags.models.into_iter().map(|m| m.name).collect(),
-                },
+        let health = check_llm_health(
+            &self.base_url,
+            self.api,
+            self.api_key.as_deref(),
+            self.timeout,
+        );
+        JobOutcome::Done(Box::new(BackendHealth {
+            name: self.name,
+            health,
+        }))
+    }
+}
+
+/// Hit the backend's model-listing endpoint and classify the outcome as
+/// reachable (with the model list) or unreachable (with the transport /
+/// parse error). The endpoint and response shape depend on the protocol:
+/// Ollama serves `/api/tags`; OpenAI-compatible servers serve `/v1/models`.
+fn check_llm_health(
+    base_url: &str,
+    api: LlmApi,
+    api_key: Option<&str>,
+    timeout: Duration,
+) -> LlmHealth {
+    let base = base_url.trim_end_matches('/');
+    let url = match api {
+        LlmApi::Ollama => format!("{base}/api/tags"),
+        LlmApi::Openai => format!("{base}/v1/models"),
+    };
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .build();
+    let agent = ureq::Agent::new_with_config(config);
+    let mut request = agent.get(&url);
+    if let Some(key) = api_key {
+        request = request.header("Authorization", &format!("Bearer {key}"));
+    }
+    match request.call() {
+        Ok(mut resp) => {
+            let models = match api {
+                LlmApi::Ollama => resp
+                    .body_mut()
+                    .read_json::<TagsResponse>()
+                    .map(|t| t.models.into_iter().map(|m| m.name).collect()),
+                LlmApi::Openai => resp
+                    .body_mut()
+                    .read_json::<ModelsResponse>()
+                    .map(|m| m.data.into_iter().map(|x| x.id).collect()),
+            };
+            match models {
+                Ok(models) => LlmHealth::Available { models },
                 Err(e) => LlmHealth::Unreachable {
                     message: format!("invalid response: {e}"),
                 },
-            },
-            Err(e) => LlmHealth::Unreachable {
-                message: e.to_string(),
-            },
-        };
-        JobOutcome::Done(Box::new(result))
+            }
+        }
+        Err(e) => LlmHealth::Unreachable {
+            message: e.to_string(),
+        },
     }
 }
 
@@ -284,6 +337,18 @@ struct TagsResponse {
 #[derive(Debug, serde::Deserialize)]
 struct TagModel {
     name: String,
+}
+
+/// OpenAI `/v1/models` response: `{ "data": [ { "id": "..." }, ... ] }`.
+#[derive(Debug, serde::Deserialize)]
+struct ModelsResponse {
+    #[serde(default)]
+    data: Vec<ModelItem>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ModelItem {
+    id: String,
 }
 
 // =========================== Revsets ========================================

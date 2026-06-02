@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::runtime::Cached;
 
 use super::probe::{
@@ -12,7 +14,11 @@ pub struct StatusStore {
     pub tea: Cached<ToolStatus>,
     pub workspace: Cached<WorkspaceInfo>,
     pub tea_auth: Cached<TeaAuthStatus>,
+    /// Health of the *active* backend — drives the landing LLM chip.
     pub llm: Cached<LlmHealth>,
+    /// Health of every configured backend, keyed by name. Populated lazily
+    /// by the backend switcher, which probes all backends when opened.
+    pub backend_health: HashMap<String, Cached<LlmHealth>>,
     pub revsets: Cached<Revsets>,
     pub base_bookmarks: Cached<BaseBookmarks>,
     pub repo_options: Cached<RepoOptions>,
@@ -56,6 +62,26 @@ impl StatusStore {
 
     pub fn set_llm(&mut self, health: LlmHealth) {
         self.llm.set(health);
+    }
+
+    /// Mark a backend's health as in-flight before its probe is submitted.
+    /// Keeps any prior value as `Stale { refreshing }` so a known-good row
+    /// keeps its symbol while re-probing, rather than flashing to pending.
+    pub fn mark_backend_loading(&mut self, name: &str) {
+        self.backend_health
+            .entry(name.to_string())
+            .or_default()
+            .mark_loading();
+    }
+
+    pub fn set_backend_health(&mut self, name: String, health: LlmHealth) {
+        self.backend_health.entry(name).or_default().set(health);
+    }
+
+    /// Cached health for a single backend, if it has ever been probed.
+    /// `None` means "never probed" — the switcher renders that as pending.
+    pub fn backend_health(&self, name: &str) -> Option<&Cached<LlmHealth>> {
+        self.backend_health.get(name)
     }
 
     pub fn set_revsets(&mut self, revsets: Revsets) {

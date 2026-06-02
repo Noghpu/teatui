@@ -9,9 +9,9 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use teatui::domain::{
-    ContextBundle, GeneratedDraft, LlmHealth, PromptBuild, PromptManifest, PromptSection,
-    RevsetSummary, Revsets, StatusStore, TeaAuthStatus, ToolStatus, VersionKind, VersionResult,
-    WorkspaceInfo, build_prompt,
+    ChangeContext, ContextBundle, DiffContext, GeneratedDraft, LlmHealth, PromptBuild, PromptForm,
+    PromptManifest, PromptSection, RevsetSummary, Revsets, StatusStore, TeaAuthStatus, ToolStatus,
+    VersionKind, VersionResult, WorkspaceInfo, build_prompt,
 };
 use teatui::runtime::Cached;
 use teatui::screens::generate::{
@@ -115,6 +115,16 @@ fn sample_revset(change_id: &str, desc: &str) -> RevsetSummary {
     }
 }
 
+fn ordered_revset_status() -> StatusStore {
+    let mut status = populated_status();
+    status.set_revsets(Revsets::Loaded(vec![
+        sample_revset("new", "Newer change"),
+        sample_revset("base", "Base change"),
+        sample_revset("old", "Older change"),
+    ]));
+    status
+}
+
 fn sample_prompt() -> PromptBuild {
     PromptBuild {
         prompt: "PROMPT BODY".into(),
@@ -136,6 +146,8 @@ fn sample_prompt() -> PromptBuild {
 
 fn sample_draft() -> GeneratedDraft {
     GeneratedDraft {
+        pr_type: "feat".into(),
+        branch_slug: "add-foo-to-bar".into(),
         title: "Add foo to bar".into(),
         description: "Implements foo.\n\nDetails follow.".into(),
     }
@@ -151,12 +163,19 @@ fn sample_commands() -> CommandPreview {
 
 fn sample_context() -> ContextBundle {
     ContextBundle {
-        revset: "abcd".into(),
+        base: "main".into(),
+        head: "abcd".into(),
         status: "Working copy : abcd".into(),
-        log: "abcd Test".into(),
-        diff_stats: "1 file changed".into(),
-        diff: "@@ -1 +1 @@\n-old\n+new".into(),
-        diff_truncated: false,
+        changes: vec![ChangeContext {
+            subject: "feat: add foo".into(),
+            body: "Adds foo support.".into(),
+            diff_stat: "1 file changed".into(),
+        }],
+        aggregate: DiffContext {
+            diff_stat: "1 file changed".into(),
+            diff: "@@ -1 +1 @@\n-old\n+new".into(),
+            diff_truncated: false,
+        },
     }
 }
 
@@ -425,6 +444,104 @@ fn generate_editing_picker_modal_renders() {
     draw_generate(&s, &status);
 }
 
+#[test]
+fn generate_head_base_order_warning_renders() {
+    let status = ordered_revset_status();
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.ensure_field_options_synced(&status);
+    s.pane = Pane::Form;
+    s.field_focus = FieldId::Head;
+    s.form.head.set_value("old".into());
+    s.form.base.set_value("base".into());
+    draw_generate(&s, &status);
+}
+
+#[test]
+fn generate_picker_modal_with_discouraged_options_renders() {
+    let status = ordered_revset_status();
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.ensure_field_options_synced(&status);
+    s.pane = Pane::Form;
+    s.field_focus = FieldId::Head;
+    s.input_mode = InputMode::Editing;
+    s.form.head.set_value("new".into());
+    s.form.base.set_value("base".into());
+    s.form.head.begin_edit();
+    draw_generate(&s, &status);
+}
+
+// ========================== Backend switcher ================================
+
+fn sample_backends() -> Vec<teatui::config::LlmBackend> {
+    use teatui::config::LlmBackend;
+    vec![
+        LlmBackend {
+            name: "default".into(),
+            base_url: "http://localhost:11434".into(),
+            model: "qwen2.5-coder:latest".into(),
+            ..Default::default()
+        },
+        LlmBackend {
+            name: "fast".into(),
+            base_url: "http://localhost:11500".into(),
+            model: "codellama:7b".into(),
+            ..Default::default()
+        },
+        LlmBackend {
+            name: "cloud".into(),
+            base_url: "https://api.example.com".into(),
+            model: "gpt-4o-mini".into(),
+            ..Default::default()
+        },
+    ]
+}
+
+#[test]
+fn backend_picker_mixed_health_renders() {
+    use teatui::screens::backend_picker::{self, BackendPicker};
+
+    let backends = sample_backends();
+    let mut status = populated_status();
+    // One reachable (✓ normal), one unreachable (✗ warning), one still
+    // in-flight (◌ faded) to exercise all three row styles at once.
+    status.set_backend_health(
+        "default".into(),
+        LlmHealth::Available {
+            models: vec!["qwen2.5-coder".into()],
+        },
+    );
+    status.set_backend_health(
+        "fast".into(),
+        LlmHealth::Unreachable {
+            message: "connection refused".into(),
+        },
+    );
+    status.mark_backend_loading("cloud");
+
+    let picker = BackendPicker::new("default", &backends);
+    let mut t = term();
+    t.draw(|frame| {
+        let area = frame.area();
+        backend_picker::render(&picker, &backends, "default", &status, frame, area);
+    })
+    .expect("draw");
+}
+
+#[test]
+fn backend_picker_over_small_terminal_renders() {
+    use teatui::screens::backend_picker::{self, BackendPicker};
+
+    let backends = sample_backends();
+    let status = StatusStore::new(); // nothing probed yet — all pending
+    let picker = BackendPicker::new("missing", &backends);
+    let mut t = small_term();
+    t.draw(|frame| {
+        let area = frame.area();
+        backend_picker::render(&picker, &backends, "default", &status, frame, area);
+    })
+    .expect("draw");
+}
+
 // ============================== Build path ==================================
 
 #[test]
@@ -432,7 +549,16 @@ fn build_prompt_then_render_does_not_panic() {
     // Stitch the pure-logic prompt builder into a Draft-ready render so any
     // accidental divergence between the two surfaces here.
     let ctx = sample_context();
-    let prompt = build_prompt(&ctx);
+    let prompt = build_prompt(
+        &ctx,
+        &PromptForm {
+            head: "abcd".into(),
+            base: "main".into(),
+            branch: "add-foo".into(),
+            title: "Add foo".into(),
+            description: "Body".into(),
+        },
+    );
     let state = generate_with(GeneratePhase::DraftReady {
         draft: sample_draft(),
         prompt,
