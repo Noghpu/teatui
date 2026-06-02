@@ -14,9 +14,20 @@ pub fn on_key(state: &mut GenerateState, status: &StatusStore, key: KeyEvent) ->
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match (key.code, ctrl) {
         (KeyCode::Char('q'), false) | (KeyCode::Char('c'), true) => Transition::Quit,
+        (KeyCode::Char('b'), false) => Transition::OpenBackendPicker,
         (KeyCode::Esc, _) if matches!(state.phase, GeneratePhase::Confirming { .. }) => {
             state.cancel_confirmation();
             Transition::Dirty
+        }
+        // While a draft is being assembled, Esc stops it (rather than leaving
+        // the screen) so the user can fix the inputs and regenerate.
+        (KeyCode::Esc, _)
+            if matches!(
+                state.phase,
+                GeneratePhase::Collecting | GeneratePhase::Generating { .. }
+            ) =>
+        {
+            Transition::CancelGeneration
         }
         (KeyCode::Esc, _) => Transition::Navigate(NewScreen::Landing),
         (KeyCode::Right, _) | (KeyCode::Char('l'), false) => {
@@ -27,12 +38,11 @@ pub fn on_key(state: &mut GenerateState, status: &StatusStore, key: KeyEvent) ->
             state.pane = state.pane.prev();
             Transition::Dirty
         }
+        // Generation needs only the jj range (head/base), which `start_generation`
+        // guards. The form's title/branch/etc. are what the LLM fills in, so don't
+        // force the user to populate them first — an empty form is fine here.
         (KeyCode::Char('g'), false) if !state.is_in_progress() && state.pane != Pane::Menu => {
-            if state.form.validate() {
-                Transition::Generate
-            } else {
-                Transition::Dirty
-            }
+            Transition::Generate
         }
         (KeyCode::Char('x'), false)
             if matches!(state.phase, GeneratePhase::DraftReady { .. })
@@ -175,6 +185,8 @@ mod tests {
             form,
             phase: GeneratePhase::DraftReady {
                 draft: GeneratedDraft {
+                    pr_type: "feat".into(),
+                    branch_slug: "add-foo".into(),
                     title: "Add foo".into(),
                     description: "Body".into(),
                 },
@@ -216,5 +228,26 @@ mod tests {
         let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Enter));
 
         assert!(matches!(transition, Transition::Execute));
+    }
+
+    #[test]
+    fn esc_while_collecting_requests_cancel() {
+        let mut state = draft_state();
+        state.phase = GeneratePhase::Collecting;
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Esc));
+
+        assert!(matches!(transition, Transition::CancelGeneration));
+    }
+
+    #[test]
+    fn esc_when_idle_navigates_back() {
+        let mut state = draft_state();
+        state.phase = GeneratePhase::Idle;
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Esc));
+
+        assert!(matches!(
+            transition,
+            Transition::Navigate(NewScreen::Landing)
+        ));
     }
 }

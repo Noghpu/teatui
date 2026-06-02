@@ -6,9 +6,11 @@ use crate::input::{self, InputEvent};
 use crate::terminal::Terminal;
 
 pub mod cache;
+pub mod http;
 pub mod jobs;
 
 pub use cache::Cached;
+pub use http::CancelHandle;
 pub use jobs::{Job, JobEvent, JobId, JobOutcome, JobOutcomeEvent, JobSubmitter, Jobs};
 
 const WORKER_COUNT: usize = 4;

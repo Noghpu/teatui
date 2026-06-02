@@ -32,6 +32,12 @@ verify: fmt check clippy test
 snapshots:
     cargo run --quiet --bin ui-snapshots --
 
+# Live llama.cpp integration tests. NOT part of `just test` (the tests are
+# #[ignore]d). Starts a local llama.cpp server, runs them, then stops it.
+# See scripts/llama-integration.ps1 for env overrides.
+integration:
+    powershell -NoLogo -ExecutionPolicy Bypass -File .\scripts\llama-integration.ps1
+
 # Opt-in live smoke helper.
 # Required gate: TEATUI_SMOKE_LIVE=1.
 # Typical environment: TEATUI_SMOKE_MODEL, TEATUI_SMOKE_LLAMA_SERVER,

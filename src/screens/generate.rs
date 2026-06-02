@@ -292,7 +292,7 @@ pub fn render(state: &GenerateState, status: &StatusStore, frame: &mut Frame, ar
     if state.input_mode == InputMode::Editing
         && let FieldState::Picker(picker) = state.form.field(state.field_focus)
     {
-        render_picker_modal(state.field_focus, picker, frame, main);
+        render_picker_modal(state, picker, frame, main);
     }
 }
 
@@ -587,7 +587,7 @@ fn form_field_height(state: &GenerateState, id: FieldId, width: usize) -> u16 {
 }
 
 fn render_picker_modal(
-    id: FieldId,
+    state: &GenerateState,
     picker: &form::PickerFieldState,
     frame: &mut Frame,
     area: Rect,
@@ -602,6 +602,7 @@ fn render_picker_modal(
         height,
     );
     frame.render_widget(Clear, rect);
+    let id = state.field_focus;
     let block = theme::modal_block(id.label());
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
@@ -620,8 +621,23 @@ fn render_picker_modal(
     if visible.is_empty() {
         lines.push(placeholder_line("no options"));
     } else {
-        for (idx, option) in visible.into_iter().enumerate() {
+        // Two header lines (filter + blank) consume vertical space; the rest is
+        // the scrollable option list. Scroll naturally: hold the window steady
+        // and only move it when the highlight crosses the top or bottom edge.
+        let rows = (inner.height as usize).saturating_sub(lines.len()).max(1);
+        let max_offset = visible.len().saturating_sub(rows);
+        let cur = picker.scroll.get().min(max_offset);
+        let offset = if picker.highlighted < cur {
+            picker.highlighted
+        } else if picker.highlighted >= cur + rows {
+            picker.highlighted - rows + 1
+        } else {
+            cur
+        };
+        picker.scroll.set(offset);
+        for (idx, option) in visible.into_iter().enumerate().skip(offset).take(rows) {
             let focused = idx == picker.highlighted;
+            let warning = state.form.picker_option_warning(id, &option.value);
             let marker = if picker.multi_select {
                 if picker.draft_contains(&option.value) {
                     "[x] "
@@ -635,13 +651,21 @@ fn render_picker_modal(
             } else {
                 "  "
             };
-            let style = if focused {
+            let style = if warning.is_some() {
+                let style = theme::warning();
+                if focused {
+                    style.add_modifier(Modifier::BOLD)
+                } else {
+                    style
+                }
+            } else if focused {
                 theme::selected(true)
             } else {
                 theme::text()
             };
+            let suffix = warning.map_or(String::new(), |text| format!("  ({text})"));
             lines.push(Line::from(Span::styled(
-                format!("{marker}{}", option.label),
+                format!("{marker}{}{suffix}", option.label),
                 style,
             )));
         }
@@ -654,7 +678,10 @@ fn render_preview(state: &GenerateState, status: &StatusStore, frame: &mut Frame
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let mut lines = change_header_lines(state, status);
-    lines.extend(section_header(phase_title(&state.phase)));
+    // A single persistent `status:` heading replaces the old per-phase headings
+    // (`failed:`, `collecting context:`, …). Each phase body leads with its own
+    // status line, so the phase heading was redundant with the line below it.
+    lines.extend(section_header("status"));
     lines.extend(match &state.phase {
         GeneratePhase::Idle => preview_idle_lines(state, status),
         GeneratePhase::Collecting => preview_collecting_lines(state),
@@ -697,7 +724,7 @@ fn change_header_lines(state: &GenerateState, status: &StatusStore) -> Vec<Line<
         )));
         if !item.bookmarks.is_empty() {
             lines.push(Line::from(Span::styled(
-                item.bookmarks.join(", "),
+                format!("  {}", item.bookmarks.join(", ")),
                 theme::text(),
             )));
         }
@@ -712,7 +739,7 @@ fn change_header_lines(state: &GenerateState, status: &StatusStore) -> Vec<Line<
             fmt_or_dash(state.form.head()),
             theme::accent(),
         )));
-        lines.push(Line::from(Span::styled(hint.to_string(), theme::muted())));
+        lines.push(hint_line(hint));
     }
     lines.push(Line::from(""));
     lines.push(kv_line("base", fmt_or_dash(state.form.base())));
@@ -724,6 +751,7 @@ fn change_header_lines(state: &GenerateState, status: &StatusStore) -> Vec<Line<
 fn preview_idle_lines(state: &GenerateState, status: &StatusStore) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if let Some(item) = selected_revset(state, status) {
+        lines.push(status_line("Ready to generate."));
         if let Some(stat) = compact_diff_stat(&item.stats) {
             lines.push(kv_line("diff", stat));
         }
@@ -750,7 +778,7 @@ fn preview_idle_lines(state: &GenerateState, status: &StatusStore) -> Vec<Line<'
             )));
         }
     } else {
-        lines.push(hint_line("No change is selected."));
+        lines.push(status_line("No change selected."));
     }
     lines
 }
@@ -765,7 +793,8 @@ fn preview_collecting_lines(state: &GenerateState) -> Vec<Line<'static>> {
 fn preview_generating_lines(context: &ContextBundle, prompt: &PromptBuild) -> Vec<Line<'static>> {
     let mut lines = vec![
         status_line("Generating draft…"),
-        kv_line("context", context.revset.clone()),
+        kv_line("base", context.base.clone()),
+        kv_line("head", context.head.clone()),
         kv_line("prompt", fmt_bytes(prompt.manifest.total_bytes)),
     ];
     lines.extend(prompt_manifest_lines(prompt));
@@ -827,7 +856,7 @@ fn preview_executing_lines(draft: &GeneratedDraft) -> Vec<Line<'static>> {
 fn preview_done_lines(url: &str) -> Vec<Line<'static>> {
     vec![
         Line::from(Span::styled(
-            "Execution complete.",
+            "  Execution complete.",
             theme::success().add_modifier(Modifier::BOLD),
         )),
         kv_line("pr url", url.to_string()),
@@ -837,7 +866,7 @@ fn preview_done_lines(url: &str) -> Vec<Line<'static>> {
 fn preview_failed_lines(message: &str) -> Vec<Line<'static>> {
     vec![
         Line::from(Span::styled(
-            "failed",
+            "  failed",
             theme::error().add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::raw(format!("  {message}"))),
@@ -981,6 +1010,12 @@ fn field_lines(state: &GenerateState, id: FieldId, width: usize) -> Vec<Line<'st
                 format!("  {selected}"),
                 theme::text(),
             )));
+            if let Some(warning) = state.form.relative_order_warning(id) {
+                lines.push(Line::from(Span::styled(
+                    format!("  ! {warning}"),
+                    theme::warning(),
+                )));
+            }
             if editing {
                 lines.push(Line::from(Span::styled("  (editing…)", theme::muted())));
             } else if p.options.is_empty() {
@@ -1020,19 +1055,6 @@ fn selected_revset<'a>(
         return None;
     };
     items.get(state.revset_selected)
-}
-
-fn phase_title(phase: &GeneratePhase) -> &'static str {
-    match phase {
-        GeneratePhase::Idle => "draft",
-        GeneratePhase::Collecting => "collecting context",
-        GeneratePhase::Generating { .. } => "generating draft",
-        GeneratePhase::DraftReady { .. } => "draft review",
-        GeneratePhase::Confirming { .. } => "review commands",
-        GeneratePhase::Executing { .. } => "executing",
-        GeneratePhase::Done { .. } => "done",
-        GeneratePhase::Failed { .. } => "failed",
-    }
 }
 
 fn status_line(text: &str) -> Line<'static> {
@@ -1250,11 +1272,18 @@ fn render_help(state: &GenerateState, frame: &mut Frame, area: Rect) {
                 HelpHint::new("Esc", "cancel"),
             ],
         }
+    } else if matches!(
+        state.phase,
+        GeneratePhase::Collecting | GeneratePhase::Generating { .. }
+    ) {
+        // Esc aborts the in-flight generation regardless of which pane is focused.
+        vec![HelpHint::primary("Esc", "cancel")]
     } else {
         match (state.pane, &state.phase) {
             (Pane::Menu, _) => vec![
                 HelpHint::primary("Enter", "pick"),
                 HelpHint::new("r", "refresh"),
+                HelpHint::new("b", "backend"),
                 HelpHint::new("Esc", "back"),
             ],
             (Pane::Form, GeneratePhase::DraftReady { .. }) => vec![
@@ -1266,6 +1295,7 @@ fn render_help(state: &GenerateState, frame: &mut Frame, area: Rect) {
             (Pane::Form, _) => vec![
                 HelpHint::new("Enter/i", "edit"),
                 HelpHint::primary("g", "generate"),
+                HelpHint::new("b", "backend"),
                 HelpHint::new("Esc", "back"),
             ],
             (Pane::Preview, GeneratePhase::DraftReady { .. }) => vec![
@@ -1342,6 +1372,8 @@ mod tests {
         let state = generate_state(
             GeneratePhase::DraftReady {
                 draft: GeneratedDraft {
+                    pr_type: "feat".into(),
+                    branch_slug: "add-foo".into(),
                     title: "Add foo".into(),
                     description: "Body".into(),
                 },
@@ -1368,6 +1400,8 @@ mod tests {
         let state = generate_state(
             GeneratePhase::Confirming {
                 draft: GeneratedDraft {
+                    pr_type: "feat".into(),
+                    branch_slug: "add-foo".into(),
                     title: "Add foo".into(),
                     description: "Body".into(),
                 },

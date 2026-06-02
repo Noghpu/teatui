@@ -1,3 +1,4 @@
+pub mod backend_picker;
 pub mod generate;
 pub mod landing;
 pub mod theme;
@@ -29,6 +30,8 @@ pub enum Transition {
     Navigate(NewScreen),
     /// User requested PR generation for the currently-selected head.
     Generate,
+    /// User asked to abort an in-flight generation (context collection or LLM).
+    CancelGeneration,
     /// User requested PR execution from a ready draft.
     Execute,
     /// User asked to copy the completed PR URL to the clipboard.
@@ -37,6 +40,8 @@ pub enum Transition {
     OpenUrl,
     /// User asked to refresh the revset list.
     RefreshRevsets,
+    /// User asked to open the LLM backend switcher.
+    OpenBackendPicker,
 }
 
 pub enum NewScreen {

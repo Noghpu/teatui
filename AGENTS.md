@@ -39,6 +39,23 @@ Command runner is `just`:
   UI changes so agents can inspect actual rendered screens and catch layout
   bugs visually, not only through smoke tests.
 
+## UI gotchas
+
+**Scrolling on overflow.** Any list/pane that renders a variable number
+of lines into a fixed `Rect` MUST clamp to the available height and scroll
+to keep the focused/highlighted row visible. Pushing every item into a
+`Paragraph` silently truncates once content exceeds the area — the focused
+row can scroll off-screen with no indication. This has bitten us three
+times (Changes pane, Form pane, picker modal). When you add or edit a
+rendered list, compute visible rows from `inner.height` and clamp to it.
+
+Scroll *naturally*: persist the window's top offset (a `Cell<usize>` works
+in render) and move it only when the highlight crosses the top or bottom
+edge — never recompute the offset purely from the highlighted index, which
+pins the highlight to one edge and scrolls the whole list on every keypress.
+The pattern: `if hl < off { off = hl } else if hl >= off + rows { off = hl -
+rows + 1 }`, with `off` pre-clamped to `len - rows`.
+
 ## Architecture at a glance
 
 ```

@@ -8,9 +8,9 @@ use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
 
 use teatui::domain::{
-    BaseBookmark, ContextBundle, GeneratedDraft, LlmHealth, PromptBuild, PromptManifest,
-    PromptSection, RepoOptions, RevsetSummary, Revsets, StatusStore, TeaAuthStatus, ToolStatus,
-    VersionKind, VersionResult, WorkspaceInfo,
+    BaseBookmark, ChangeContext, ContextBundle, DiffContext, GeneratedDraft, LlmHealth,
+    PromptBuild, PromptManifest, PromptSection, RepoOptions, RevsetSummary, Revsets, StatusStore,
+    TeaAuthStatus, ToolStatus, VersionKind, VersionResult, WorkspaceInfo,
 };
 use teatui::screens::generate::{
     CommandPreview, FieldId, GeneratePhase, GenerateState, InputMode, Pane, PrForm,
@@ -39,6 +39,7 @@ enum SnapshotKind {
     GenerateConfirming,
     GeneratePickerModal,
     GenerateSmall,
+    BackendPicker,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -127,6 +128,12 @@ fn snapshot_specs() -> Vec<SnapshotSpec> {
             height: 24,
             kind: SnapshotKind::GenerateSmall,
         },
+        SnapshotSpec {
+            name: "backend-picker",
+            width: 120,
+            height: 30,
+            kind: SnapshotKind::BackendPicker,
+        },
     ]
 }
 
@@ -179,6 +186,8 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
         SnapshotKind::GeneratePickerModal => {
             let mut state = generate_with(GeneratePhase::Idle, Pane::Form, FieldId::Head);
             state.ensure_field_options_synced(&status);
+            state.form.base.set_value("zzzzzzzz".into());
+            state.form.head.set_value("yyyyyyyy".into());
             state.input_mode = InputMode::Editing;
             state.form.head.begin_edit();
             screens::generate::render(&state, &status, frame, frame.area());
@@ -194,6 +203,54 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
             );
             state.ensure_field_options_synced(&status);
             screens::generate::render(&state, &status, frame, frame.area());
+        }
+        SnapshotKind::BackendPicker => {
+            use teatui::config::LlmBackend;
+            use teatui::screens::backend_picker::{self, BackendPicker};
+
+            let backends = vec![
+                LlmBackend {
+                    name: "default".into(),
+                    base_url: "http://localhost:11434".into(),
+                    model: "qwen2.5-coder:latest".into(),
+                    ..Default::default()
+                },
+                LlmBackend {
+                    name: "fast".into(),
+                    base_url: "http://localhost:11500".into(),
+                    model: "codellama:7b".into(),
+                    ..Default::default()
+                },
+                LlmBackend {
+                    name: "cloud".into(),
+                    base_url: "https://api.example.com".into(),
+                    model: "gpt-4o-mini".into(),
+                    ..Default::default()
+                },
+            ];
+            // Behind the modal: the Generate screen, to show the backdrop.
+            let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
+            state.ensure_field_options_synced(&status);
+            screens::generate::render(&state, &status, frame, frame.area());
+
+            // Reachable / unreachable / pending, one of each.
+            let mut status = status.clone();
+            status.set_backend_health(
+                "default".into(),
+                LlmHealth::Available {
+                    models: vec!["qwen2.5-coder".into()],
+                },
+            );
+            status.set_backend_health(
+                "fast".into(),
+                LlmHealth::Unreachable {
+                    message: "connection refused".into(),
+                },
+            );
+            status.mark_backend_loading("cloud");
+
+            let picker = BackendPicker::new("default", &backends);
+            backend_picker::render(&picker, &backends, "default", &status, frame, frame.area());
         }
     })?;
     Ok(terminal.backend().buffer().clone())
@@ -347,6 +404,8 @@ fn sample_prompt() -> PromptBuild {
 
 fn sample_draft() -> GeneratedDraft {
     GeneratedDraft {
+        pr_type: "feat".into(),
+        branch_slug: "restore-pr-ui".into(),
         title: "Restore previous PR generation UI".into(),
         description: "Recreates the pre-rewrite PR generation pane layout and information order.\n\nThe implementation keeps cached domain data as the source for rendering."
             .into(),
@@ -365,12 +424,19 @@ fn sample_commands() -> CommandPreview {
 #[allow(dead_code)]
 fn sample_context() -> ContextBundle {
     ContextBundle {
-        revset: "zzzzzzzz".into(),
+        base: "main".into(),
+        head: "zzzzzzzz".into(),
         status: "Working copy : zzzzzzzz".into(),
-        log: "9f4c2a1b Restore previous PR generation UI".into(),
-        diff_stats: "4 files changed, 188 insertions(+), 34 deletions(-)".into(),
-        diff: "@@ -1 +1 @@\n-old\n+new".into(),
-        diff_truncated: false,
+        changes: vec![ChangeContext {
+            subject: "feat: restore previous PR generation UI".into(),
+            body: "Restores the prior Generate screen layout.".into(),
+            diff_stat: "4 files changed, 188 insertions(+), 34 deletions(-)".into(),
+        }],
+        aggregate: DiffContext {
+            diff_stat: "4 files changed, 188 insertions(+), 34 deletions(-)".into(),
+            diff: "@@ -1 +1 @@\n-old\n+new".into(),
+            diff_truncated: false,
+        },
     }
 }
 
