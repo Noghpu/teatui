@@ -26,6 +26,10 @@ pub struct DiffContext {
     pub diff_stat: String,
     pub diff: String,
     pub diff_truncated: bool,
+    /// The full diff was intentionally not collected (the backend's
+    /// `diff_budget_bytes` is 0). `diff` is empty and the prompt adapts to lean
+    /// on commit messages and `diff_stat` instead. Distinct from an empty diff.
+    pub diff_omitted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,76 +68,144 @@ fn collect(jj: &str, base: &str, head: &str, budget: usize) -> Result<ContextBun
     // `jj status` describes the live working copy. It's relevant only when head is
     // the working copy (`@`); for any other head it leaks files outside base..head
     // and just adds noise the model may mistake for part of the change.
+    //
+    // It also doubles as this batch's *snapshotter*: jj snapshots the working
+    // copy (a tree scan + repo write-lock) at the start of every command unless
+    // `--ignore-working-copy` is passed. Running `status` first records a fresh
+    // `@`, so the read-only calls below can skip their own redundant snapshots.
+    // When head isn't `@` the range never touches the working copy, so skipping
+    // the snapshot entirely is correct too.
     let status = if head.trim() == "@" {
         run_jj(jj, &["status"])?
     } else {
         String::new()
     };
-    let changes = collect_changes(jj, &revset)?;
-    let aggregate = collect_diff_context(jj, &revset, budget)?;
+
+    // With the snapshot taken (or unneeded), the remaining reads are independent
+    // and side-effect free. Each is dominated by ~0.8s of jj process-spawn
+    // latency, so we overlap them on threads and pay that latency once instead
+    // of in series. `thread::scope` joins every worker before returning, so
+    // borrowing `jj`/`revset` across threads is sound. A `budget` of 0 skips the
+    // full diff entirely (the adapted, diff-free prompt), so its read isn't spawned.
+    let revset: &str = &revset;
+    let (changes, diff_stat, diff_git) = std::thread::scope(|s| {
+        let changes = s.spawn(move || collect_changes(jj, revset));
+        let diff_stat = s.spawn(move || collect_diff_stat(jj, revset));
+        let diff_git = (budget > 0).then(|| s.spawn(move || collect_diff_git(jj, revset)));
+        (
+            join_read(changes, "changes"),
+            join_read(diff_stat, "diff --stat"),
+            diff_git.map(|handle| join_read(handle, "diff --git")),
+        )
+    });
+
+    let aggregate = match diff_git {
+        Some(diff_git) => {
+            let (diff, diff_truncated) = truncate_to_byte_budget(&diff_git?, budget);
+            DiffContext {
+                diff_stat: diff_stat?,
+                diff,
+                diff_truncated,
+                diff_omitted: false,
+            }
+        }
+        None => DiffContext {
+            diff_stat: diff_stat?,
+            diff: String::new(),
+            diff_truncated: false,
+            diff_omitted: true,
+        },
+    };
     Ok(ContextBundle {
         base: base.to_string(),
         head: head.to_string(),
         status,
-        changes,
+        changes: changes?,
         aggregate,
     })
 }
 
+/// Join a scoped read worker, mapping a thread panic to a context error so a
+/// crashed jj read fails generation cleanly instead of unwinding the job.
+fn join_read<T>(
+    handle: std::thread::ScopedJoinHandle<'_, Result<T, String>>,
+    label: &str,
+) -> Result<T, String> {
+    handle
+        .join()
+        .unwrap_or_else(|_| Err(format!("context: {label} worker panicked")))
+}
+
 fn collect_changes(jj: &str, revset: &str) -> Result<Vec<ChangeContext>, String> {
+    // One `jj log --stat` call carries every change's metadata *and* its
+    // per-change diff stat: jj appends the `--stat` block after each record's
+    // `\x1D` marker. This replaces an N+1 fan-out (one `jj diff --stat` per
+    // change) whose cost was dominated by ~0.8s of process-spawn overhead per
+    // change — ~20s on a 26-deep stack. Only the per-change stat is kept here;
+    // the full hunks live in the aggregate diff.
     const TEMPLATE: &str =
         r#""\x1E" ++ change_id ++ "\x1F" ++ description.lines().join("\x1F") ++ "\x1D\n""#;
-    let raw = run_jj(jj, &["log", "-r", revset, "--no-graph", "-T", TEMPLATE])?;
-    let entries = parse_change_log(&raw);
-    let mut changes = Vec::with_capacity(entries.len());
-    for entry in entries.into_iter().rev() {
-        // Only the per-change stat — the full hunks live in the aggregate diff.
-        let diff_stat = run_jj(jj, &["diff", "-r", &entry.change_id, "--stat"])?;
-        changes.push(ChangeContext {
-            subject: entry.subject,
-            body: entry.body,
-            diff_stat,
-        });
-    }
+    let raw = run_jj(
+        jj,
+        &[
+            "--ignore-working-copy",
+            "log",
+            "-r",
+            revset,
+            "--no-graph",
+            "--stat",
+            "-T",
+            TEMPLATE,
+        ],
+    )?;
+    let mut changes = parse_change_log(&raw);
+    // jj logs newest-first; reverse to the oldest-to-newest journey the prompt
+    // narrates.
+    changes.reverse();
     Ok(changes)
 }
 
-fn collect_diff_context(jj: &str, revset: &str, budget: usize) -> Result<DiffContext, String> {
-    let diff_stat = run_jj(jj, &["diff", "-r", revset, "--stat"])?;
-    // `--git` emits standard unified-diff format: more compact than jj's default
-    // line-numbered color-words output, and the format LLMs parse most reliably.
-    let diff_raw = run_jj(jj, &["diff", "-r", revset, "--git"])?;
-    let (diff, diff_truncated) = truncate_to_byte_budget(&diff_raw, budget);
-    Ok(DiffContext {
-        diff_stat,
-        diff,
-        diff_truncated,
-    })
+/// Aggregate diff stat for the whole range. `--ignore-working-copy`: the
+/// snapshot was already taken by `jj status` in `collect` (or is unneeded when
+/// head isn't `@`), so this is a pure read.
+fn collect_diff_stat(jj: &str, revset: &str) -> Result<String, String> {
+    run_jj(
+        jj,
+        &["--ignore-working-copy", "diff", "-r", revset, "--stat"],
+    )
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ParsedChangeLog {
-    change_id: String,
-    subject: String,
-    body: String,
+/// Full aggregate diff. `--git` emits standard unified-diff format: more compact
+/// than jj's default line-numbered color-words output, and the format LLMs parse
+/// most reliably.
+fn collect_diff_git(jj: &str, revset: &str) -> Result<String, String> {
+    run_jj(
+        jj,
+        &["--ignore-working-copy", "diff", "-r", revset, "--git"],
+    )
 }
 
-fn parse_change_log(raw: &str) -> Vec<ParsedChangeLog> {
+/// Parse the combined `jj log --stat` output. Each record starts with `\x1E`,
+/// holds `change_id`, the subject, and body lines (all `\x1F`-separated) up to
+/// a `\x1D` marker, then jj's `--stat` block until the next record. The
+/// change_id is consumed only to guard against empty records — it's
+/// deliberately kept out of the context shape sent to the model.
+fn parse_change_log(raw: &str) -> Vec<ChangeContext> {
     raw.split('\x1E')
         .skip(1)
         .filter_map(|record| {
-            let (meta, _) = record.split_once('\x1D')?;
+            let (meta, stat) = record.split_once('\x1D')?;
             let mut fields = meta.split('\x1F');
-            let change_id = fields.next()?.trim().to_string();
-            let subject = fields.next().unwrap_or("").trim().to_string();
-            let body = fields.collect::<Vec<_>>().join("\n").trim().to_string();
+            let change_id = fields.next()?.trim();
             if change_id.is_empty() {
                 return None;
             }
-            Some(ParsedChangeLog {
-                change_id,
+            let subject = fields.next().unwrap_or("").trim().to_string();
+            let body = fields.collect::<Vec<_>>().join("\n").trim().to_string();
+            Some(ChangeContext {
                 subject,
                 body,
+                diff_stat: stat.trim().to_string(),
             })
         })
         .collect()
@@ -230,23 +302,29 @@ mod tests {
     }
 
     #[test]
-    fn parses_change_log_without_exposing_ids_in_context_shape() {
-        let raw = "\x1Eabc\x1Ffeat: add thing\x1Fbody text\x1D\n\x1Edef\x1Ffix: repair\x1F\x1D\n";
+    fn parses_change_log_with_inline_stats_and_hides_ids() {
+        let raw = "\x1Eabc\x1Ffeat: add thing\x1Fbody text\x1D\n2 files changed, 5 insertions(+)\n\x1Edef\x1Ffix: repair\x1F\x1D\n1 file changed, 1 deletion(-)\n";
         let changes = parse_change_log(raw);
         assert_eq!(
             changes,
             vec![
-                ParsedChangeLog {
-                    change_id: "abc".into(),
+                ChangeContext {
                     subject: "feat: add thing".into(),
                     body: "body text".into(),
+                    diff_stat: "2 files changed, 5 insertions(+)".into(),
                 },
-                ParsedChangeLog {
-                    change_id: "def".into(),
+                ChangeContext {
                     subject: "fix: repair".into(),
                     body: String::new(),
+                    diff_stat: "1 file changed, 1 deletion(-)".into(),
                 },
             ]
         );
+    }
+
+    #[test]
+    fn parse_change_log_skips_records_without_change_id() {
+        let raw = "\x1E\x1Ffeat: ghost\x1F\x1D\n0 files changed\n";
+        assert!(parse_change_log(raw).is_empty());
     }
 }

@@ -461,10 +461,16 @@ impl Job for RevsetStatsProbe {
     fn run(self: Box<Self>) -> JobOutcome {
         // Same template, with `--stat` so jj appends the diff block
         // after each record. The summary line is what we keep.
+        //
+        // `--ignore-working-copy`: this probe is dispatched only after
+        // `RevsetProbe` completes (see `App::absorb_payload`), which already
+        // snapshotted `@`. Skipping a second snapshot here avoids redundant
+        // work and the repo write-lock it would take.
         const TEMPLATE: &str = r#""\x1E" ++ commit_id.short() ++ "|" ++ change_id.short() ++ "|" ++ bookmarks.map(|b| b.name()).join(",") ++ "|" ++ description.lines().join("\x1F") ++ "\x1D\n""#;
         let result = match Command::new(&self.jj_binary)
             .args([
                 "--no-pager",
+                "--ignore-working-copy",
                 "log",
                 "-r",
                 &self.revset,
@@ -607,10 +613,13 @@ impl Job for BaseBookmarksProbe {
     }
 
     fn run(self: Box<Self>) -> JobOutcome {
+        // `--ignore-working-copy`: bookmark listing reads only repo refs and
+        // never depends on the working-copy snapshot, so we skip taking one.
         const TEMPLATE: &str = r#"name() ++ "\t" ++ remote().name() ++ "\n""#;
         let bookmarks = match Command::new(&self.jj_binary)
             .args([
                 "--no-pager",
+                "--ignore-working-copy",
                 "bookmark",
                 "list",
                 "--all-remotes",
