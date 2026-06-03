@@ -44,8 +44,8 @@ pub enum FieldId {
 impl FieldId {
     pub const ALL: [FieldId; 8] = [
         FieldId::Head,
-        FieldId::BranchName,
         FieldId::Base,
+        FieldId::BranchName,
         FieldId::Title,
         FieldId::Description,
         FieldId::Labels,
@@ -74,6 +74,11 @@ impl FieldId {
     pub fn prev(self) -> Self {
         let idx = Self::ALL.iter().position(|f| *f == self).unwrap_or(0);
         Self::ALL[idx.saturating_sub(1)]
+    }
+
+    /// Position in `ALL` — used to index the per-field history and snapshot.
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|f| *f == self).unwrap_or(0)
     }
 }
 
@@ -311,7 +316,13 @@ impl PickerFieldState {
     pub fn begin_edit(&mut self) {
         self.draft = self.committed.clone();
         self.filter.clear();
-        self.highlighted = 0;
+        // Open on the current selection rather than the top of the list. The
+        // filter was just cleared, so `visible_options` is `options` in order.
+        self.highlighted = self
+            .committed
+            .first()
+            .and_then(|value| self.options.iter().position(|o| &o.value == value))
+            .unwrap_or(0);
         self.editing = true;
     }
 
@@ -395,6 +406,49 @@ impl PickerFieldState {
     }
 }
 
+/// Undo/redo stacks for one value. `record` saves the prior value and drops the
+/// redo tail (a fresh change invalidates pending redos); `undo`/`redo` shuttle a
+/// value between the two stacks, returning the one to apply.
+#[derive(Debug, Clone, Default)]
+struct History<T> {
+    undo: Vec<T>,
+    redo: Vec<T>,
+}
+
+impl<T> History<T> {
+    fn record(&mut self, prev: T) {
+        self.undo.push(prev);
+        self.redo.clear();
+    }
+
+    fn undo(&mut self, current: T) -> Option<T> {
+        let prev = self.undo.pop()?;
+        self.redo.push(current);
+        Some(prev)
+    }
+
+    fn redo(&mut self, current: T) -> Option<T> {
+        let next = self.redo.pop()?;
+        self.undo.push(current);
+        Some(next)
+    }
+}
+
+/// The committed values of every field in `FieldId::ALL` order — the unit of
+/// whole-form undo/redo.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct FormSnapshot([Vec<String>; 8]);
+
+/// Whole-form and per-field undo/redo history for a [`PrForm`]. Recorded
+/// through [`PrForm::edit`] so a single edit (e.g. the LLM overwriting several
+/// fields at once) is one whole-form undo while still being undoable field by
+/// field.
+#[derive(Debug, Clone, Default)]
+struct FormHistory {
+    form: History<FormSnapshot>,
+    fields: [History<Vec<String>>; 8],
+}
+
 #[derive(Debug, Clone)]
 pub struct PrForm {
     pub head: FieldState,
@@ -405,6 +459,11 @@ pub struct PrForm {
     pub labels: FieldState,
     pub assignees: FieldState,
     pub milestone: FieldState,
+    /// Configured default base (e.g. `main@origin`). Surfaced as the last
+    /// option in the base picker so the immutable trunk boundary — which the
+    /// `trunk()..@` change list excludes — is still selectable.
+    default_base: String,
+    history: FormHistory,
 }
 
 impl Default for PrForm {
@@ -418,6 +477,8 @@ impl Default for PrForm {
             labels: picker(true, true),
             assignees: picker(true, true),
             milestone: picker(false, true),
+            default_base: String::new(),
+            history: FormHistory::default(),
         }
     }
 }
@@ -425,7 +486,8 @@ impl Default for PrForm {
 impl PrForm {
     pub fn new(default_base: String) -> Self {
         let mut form = Self::default();
-        form.base.set_value(default_base);
+        form.base.set_value(default_base.clone());
+        form.default_base = default_base;
         form
     }
 
@@ -452,6 +514,86 @@ impl PrForm {
             FieldId::Labels => &mut self.labels,
             FieldId::Assignees => &mut self.assignees,
             FieldId::Milestone => &mut self.milestone,
+        }
+    }
+
+    /// Run a mutation of the form and record it so it can be undone. The
+    /// pre-edit snapshot is pushed to the whole-form history, and every field
+    /// that changed pushes its prior value to that field's history — so one
+    /// edit is a single `u` undo yet still reversible field by field with `U`.
+    pub fn edit<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let before = self.snapshot();
+        let result = f(self);
+        let after = self.snapshot();
+        if before != after {
+            for id in FieldId::ALL {
+                let i = id.index();
+                if before.0[i] != after.0[i] {
+                    self.history.fields[i].record(before.0[i].clone());
+                }
+            }
+            self.history.form.record(before);
+        }
+        result
+    }
+
+    /// Undo the most recent [`edit`](Self::edit), restoring every field to its
+    /// pre-edit value. Returns `false` when there is nothing to undo.
+    pub fn undo(&mut self) -> bool {
+        let current = self.snapshot();
+        let Some(prev) = self.history.form.undo(current) else {
+            return false;
+        };
+        self.restore(&prev);
+        true
+    }
+
+    /// Redo the most recently undone whole-form edit.
+    pub fn redo(&mut self) -> bool {
+        let current = self.snapshot();
+        let Some(next) = self.history.form.redo(current) else {
+            return false;
+        };
+        self.restore(&next);
+        true
+    }
+
+    /// Undo the most recent change to a single field, leaving the others alone.
+    pub fn undo_field(&mut self, id: FieldId) -> bool {
+        let i = id.index();
+        let current = self.field(id).values();
+        let Some(prev) = self.history.fields[i].undo(current) else {
+            return false;
+        };
+        self.field_mut(id).set_values(prev);
+        true
+    }
+
+    /// Redo the most recently undone change to a single field.
+    pub fn redo_field(&mut self, id: FieldId) -> bool {
+        let i = id.index();
+        let current = self.field(id).values();
+        let Some(next) = self.history.fields[i].redo(current) else {
+            return false;
+        };
+        self.field_mut(id).set_values(next);
+        true
+    }
+
+    fn snapshot(&self) -> FormSnapshot {
+        let mut snap = FormSnapshot::default();
+        for id in FieldId::ALL {
+            snap.0[id.index()] = self.field(id).values();
+        }
+        snap
+    }
+
+    fn restore(&mut self, snap: &FormSnapshot) {
+        for id in FieldId::ALL {
+            let values = &snap.0[id.index()];
+            if self.field(id).values() != *values {
+                self.field_mut(id).set_values(values.clone());
+            }
         }
     }
 
@@ -525,7 +667,7 @@ impl PrForm {
                 items
                     .iter()
                     .map(|item| PickerOption {
-                        label: revset_option_label(item),
+                        label: super::revset_primary(item),
                         value: item.change_id.clone(),
                         enabled: true,
                     })
@@ -533,17 +675,28 @@ impl PrForm {
             );
         }
         if let Some(Revsets::Loaded(items)) = status.revsets.value() {
-            set_picker_options(
-                &mut self.base,
-                items
-                    .iter()
-                    .map(|item| PickerOption {
-                        label: revset_option_label(item),
-                        value: item.change_id.clone(),
-                        enabled: true,
-                    })
-                    .collect(),
-            );
+            // The change list is `trunk()..@`, which excludes the trunk
+            // boundary itself. Append the configured default base (a remote
+            // ref like `main@origin`) as the oldest selectable base so the
+            // immutable trunk is reachable from the picker. It goes last
+            // because it is the oldest ancestor — keeping the list ordered
+            // newest→oldest so the head/base relative-order warning holds.
+            let mut options: Vec<PickerOption> = items
+                .iter()
+                .map(|item| PickerOption {
+                    label: super::revset_primary(item),
+                    value: item.change_id.clone(),
+                    enabled: true,
+                })
+                .collect();
+            if !self.default_base.is_empty() {
+                options.push(PickerOption {
+                    label: self.default_base.clone(),
+                    value: self.default_base.clone(),
+                    enabled: true,
+                });
+            }
+            set_picker_options(&mut self.base, options);
         }
         if let Some(options) = status.repo_options.value() {
             sync_repo_options(self, options);
@@ -641,18 +794,6 @@ fn set_picker_options(field: &mut FieldState, options: Vec<PickerOption>) {
     }
 }
 
-fn revset_option_label(item: &crate::domain::RevsetSummary) -> String {
-    if let Some(bookmark) = item.bookmarks.first()
-        && !bookmark.is_empty()
-    {
-        return bookmark.clone();
-    }
-    if !item.description.trim().is_empty() {
-        return item.description.clone();
-    }
-    item.change_id.clone()
-}
-
 fn option(value: &str) -> PickerOption {
     PickerOption {
         label: value.to_string(),
@@ -699,6 +840,25 @@ mod tests {
         form.head.set_value(head.to_string());
         form.base.set_value(base.to_string());
         form
+    }
+
+    #[test]
+    fn base_picker_includes_default_base_as_oldest_option() {
+        let mut status = StatusStore::new();
+        status.set_revsets(Revsets::Loaded(vec![revset("new"), revset("old")]));
+        let mut form = PrForm::new("main@origin".into());
+        form.sync_options(&status);
+        let FieldState::Picker(base) = &form.base else {
+            panic!("base is a picker");
+        };
+        let values: Vec<&str> = base.options.iter().map(|o| o.value.as_str()).collect();
+        assert_eq!(values, ["new", "old", "main@origin"]);
+        // The head picker stays scoped to the changes — no trunk boundary.
+        let FieldState::Picker(head) = &form.head else {
+            panic!("head is a picker");
+        };
+        let head_values: Vec<&str> = head.options.iter().map(|o| o.value.as_str()).collect();
+        assert_eq!(head_values, ["new", "old"]);
     }
 
     #[test]
@@ -807,6 +967,75 @@ mod tests {
             form.relative_order_warning(FieldId::Base),
             Some(BASE_AHEAD_OF_HEAD_WARNING)
         );
+    }
+
+    #[test]
+    fn undo_restores_the_form_before_an_edit() {
+        let mut form = PrForm::default();
+        form.edit(|f| f.title.set_value("manual hints".into()));
+        // The LLM overwrites several fields at once.
+        form.edit(|f| {
+            f.title.set_value("LLM title".into());
+            f.description.set_value("LLM body".into());
+        });
+        assert_eq!(form.title(), "LLM title");
+
+        // One whole-form undo reverts the entire overwrite.
+        assert!(form.undo());
+        assert_eq!(form.title(), "manual hints");
+        assert_eq!(form.description(), "");
+
+        // Redo reapplies it.
+        assert!(form.redo());
+        assert_eq!(form.title(), "LLM title");
+        assert_eq!(form.description(), "LLM body");
+    }
+
+    #[test]
+    fn undo_field_reverts_only_the_highlighted_field() {
+        let mut form = PrForm::default();
+        form.edit(|f| {
+            f.title.set_value("manual title".into());
+            f.description.set_value("manual body".into());
+        });
+        form.edit(|f| {
+            f.title.set_value("llm title".into());
+            f.description.set_value("llm body".into());
+        });
+
+        assert!(form.undo_field(FieldId::Title));
+        assert_eq!(form.title(), "manual title");
+        // The other field the same edit touched is left alone.
+        assert_eq!(form.description(), "llm body");
+
+        assert!(form.redo_field(FieldId::Title));
+        assert_eq!(form.title(), "llm title");
+    }
+
+    #[test]
+    fn undo_redo_report_nothing_to_do() {
+        let mut form = PrForm::default();
+        assert!(!form.undo());
+        assert!(!form.redo());
+        assert!(!form.undo_field(FieldId::Title));
+        assert!(!form.redo_field(FieldId::Title));
+
+        // A no-op edit records no history.
+        form.edit(|_| {});
+        assert!(!form.undo());
+    }
+
+    #[test]
+    fn a_fresh_edit_clears_the_redo_tail() {
+        let mut form = PrForm::default();
+        form.edit(|f| f.title.set_value("one".into()));
+        assert!(form.undo());
+        assert_eq!(form.title(), "");
+
+        // Editing again instead of redoing drops the pending redo.
+        form.edit(|f| f.title.set_value("two".into()));
+        assert!(!form.redo());
+        assert_eq!(form.title(), "two");
     }
 
     #[test]
