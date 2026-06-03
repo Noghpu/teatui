@@ -7,10 +7,10 @@ use ratatui::Frame;
 use crate::config::Config;
 use crate::domain::{
     BackendHealth, BackendHealthProbe, BaseBookmarks, BaseBookmarksProbe, ContextJob,
-    ContextResult, ExecutePrJob, ExecuteResult, GeneratedDraft, LlmGenerateJob, LlmResult,
-    PromptForm, RepoOptions, RepoOptionsProbe, RevsetProbe, RevsetStats, RevsetStatsProbe, Revsets,
-    StatusStore, TeaAuthProbe, TeaAuthStatus, VersionKind, VersionProbe, VersionResult,
-    WorkspaceInfo, WorkspaceProbe, build_prompt, slugify,
+    ContextResult, ExecutePrJob, ExecuteResult, GeneratedDraft, JjMutateJob, JjMutateResult, JjOp,
+    LlmGenerateJob, LlmResult, PromptForm, RepoOptions, RepoOptionsProbe, RevsetProbe, RevsetStats,
+    RevsetStatsProbe, Revsets, StatusStore, TeaAuthProbe, TeaAuthStatus, VersionKind, VersionProbe,
+    VersionResult, WorkspaceInfo, WorkspaceProbe, build_prompt, slugify,
 };
 use crate::input::InputEvent;
 use crate::runtime::{CancelHandle, JobEvent, JobOutcomeEvent, JobSubmitter};
@@ -18,10 +18,12 @@ use crate::screens::backend_picker::{BackendPicker, PickerOutcome};
 use crate::screens::generate::{GeneratePhase, PrForm};
 use crate::screens::{self, GenerateState, LandingState, NewScreen, Screen, Transition};
 
-/// Byte budget for the single aggregate diff sent to the LLM. Per-change diffs
-/// are no longer sent, so the whole budget now backs one diff (was split across
-/// every change before); raised accordingly to keep the destination diff intact.
-const CONTEXT_DIFF_BUDGET_BYTES: usize = 64 * 1024;
+/// Fallback byte budget for the aggregate diff when a backend doesn't set its
+/// own `diff_budget_bytes`. Per-change diffs are no longer sent, so the whole
+/// budget backs one diff. A backend can override this (including 0 to omit the
+/// diff entirely; see `diff_budget_bytes`) to fit a smaller context window —
+/// a too-large diff overflows the window and times out mid-prefill.
+const CONTEXT_DIFF_BUDGET_BYTES: usize = 128 * 1024;
 
 /// Health probes must be snappy — they fan out across every backend when
 /// the switcher opens, and a dead backend should resolve to ✗ quickly
@@ -220,15 +222,20 @@ impl App {
             Transition::CopyUrl => self.copy_done_url(),
             Transition::OpenUrl => self.open_done_url(),
             Transition::RefreshRevsets => {
-                self.status.revsets.mark_loading();
-                self.submitter.submit(RevsetProbe {
-                    jj_binary: self.config.commands.jj.clone(),
-                    revset: "trunk()..@".into(),
-                });
-                self.dirty = true;
+                self.refresh_revsets();
             }
             Transition::OpenBackendPicker => self.open_backend_picker(),
+            Transition::JjOp(op) => self.start_jj_mutation(op),
         }
+    }
+
+    fn refresh_revsets(&mut self) {
+        self.status.revsets.mark_loading();
+        self.submitter.submit(RevsetProbe {
+            jj_binary: self.config.commands.jj.clone(),
+            revset: "trunk()..@".into(),
+        });
+        self.dirty = true;
     }
 
     fn start_generation(&mut self) {
@@ -248,11 +255,17 @@ impl App {
         state.last_action = None;
         state.phase = GeneratePhase::Collecting;
         self.dirty = true;
+        let diff_byte_budget = self
+            .config
+            .llm
+            .active_backend()
+            .diff_budget_bytes
+            .unwrap_or(CONTEXT_DIFF_BUDGET_BYTES);
         self.submitter.submit(ContextJob {
             jj_binary: self.config.commands.jj.clone(),
             base: base.clone(),
             head: head.clone(),
-            diff_byte_budget: CONTEXT_DIFF_BUDGET_BYTES,
+            diff_byte_budget,
         });
         tracing::info!(target: "teatui::generate", base = %base, head = %head, "started");
     }
@@ -320,6 +333,34 @@ impl App {
         self.dirty = true;
         self.submitter.submit(job);
         tracing::info!(target: "teatui::execute", "submitted");
+    }
+
+    fn start_jj_mutation(&mut self, op: JjOp) {
+        let Screen::Generate(state) = &mut self.screen else {
+            return;
+        };
+        if state.is_in_progress() {
+            tracing::debug!(target: "teatui::jj_mutate", "ignored: already in progress");
+            return;
+        }
+        let Some(pending) = state.take_confirmed_jj_op(&op) else {
+            tracing::debug!(target: "teatui::jj_mutate", "ignored: no matching confirmation");
+            return;
+        };
+        let summary = pending.summary();
+        state.phase = GeneratePhase::JjMutating {
+            op: op.kind,
+            summary,
+        };
+        state.last_action = None;
+        self.dirty = true;
+        self.submitter.submit(JjMutateJob {
+            jj_binary: self.config.commands.jj.clone(),
+            op,
+            // Conservative: this is also the revset backing the visible Changes pane.
+            conflict_revset: "trunk()..@".into(),
+        });
+        tracing::info!(target: "teatui::jj_mutate", "submitted");
     }
 
     fn copy_done_url(&mut self) {
@@ -496,6 +537,13 @@ impl App {
             }
             Err(a) => a,
         };
+        let any = match any.downcast::<JjMutateResult>() {
+            Ok(b) => {
+                self.handle_jj_mutate_result(*b);
+                return;
+            }
+            Err(a) => a,
+        };
         let _ = any;
         tracing::warn!(target: "teatui::jobs", name, "unhandled payload type");
     }
@@ -560,14 +608,16 @@ impl App {
         };
         match result {
             LlmResult::Ready(draft) => {
-                state.form.title.set_value(draft.title.clone());
-                state.form.description.set_value(draft.description.clone());
-                if state.form.branch().is_empty() {
+                // Record the overwrite as one edit so the user can `u` back to
+                // the hints they typed if the draft comes back as nonsense.
+                state.form.edit(|form| {
+                    form.title.set_value(draft.title.clone());
+                    form.description.set_value(draft.description.clone());
                     let branch = branch_from_draft(&draft);
                     if !branch.is_empty() {
-                        state.form.branch_name.set_value(branch);
+                        form.branch_name.set_value(branch);
                     }
-                }
+                });
                 state.phase = GeneratePhase::DraftReady { draft, prompt };
             }
             LlmResult::Errored { message } => {
@@ -606,6 +656,43 @@ impl App {
             }
         }
         self.dirty = true;
+    }
+
+    fn handle_jj_mutate_result(&mut self, result: JjMutateResult) {
+        let mut refresh = false;
+        {
+            let Screen::Generate(state) = &mut self.screen else {
+                return;
+            };
+            if !matches!(state.phase, GeneratePhase::JjMutating { .. }) {
+                tracing::debug!(target: "teatui::jj_mutate", "stale result ignored");
+                return;
+            }
+            match result {
+                JjMutateResult::Applied { op } => {
+                    tracing::info!(target: "teatui::jj_mutate", op = op.label(), "applied");
+                    state
+                        .reset_after_jj_mutation(self.config.pr.default_base.clone(), &self.status);
+                    state.last_action = Some("jj operation applied");
+                    refresh = true;
+                }
+                JjMutateResult::Reverted { op, reason } => {
+                    tracing::warn!(target: "teatui::jj_mutate", op = op.label(), %reason, "reverted");
+                    state.phase = GeneratePhase::Idle;
+                    state.show_jj_error(format!("{} reverted", op.label()), reason);
+                    refresh = true;
+                }
+                JjMutateResult::Errored { op, message } => {
+                    tracing::error!(target: "teatui::jj_mutate", op = op.label(), %message, "failed");
+                    state.phase = GeneratePhase::Idle;
+                    state.show_jj_error(format!("{} failed", op.label()), message);
+                    self.dirty = true;
+                }
+            }
+        }
+        if refresh {
+            self.refresh_revsets();
+        }
     }
 
     pub fn render(&self, frame: &mut Frame) {
