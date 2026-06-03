@@ -9,13 +9,13 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use teatui::domain::{
-    ChangeContext, ContextBundle, DiffContext, GeneratedDraft, LlmHealth, PromptBuild, PromptForm,
-    PromptManifest, PromptSection, RevsetSummary, Revsets, StatusStore, TeaAuthStatus, ToolStatus,
-    VersionKind, VersionResult, WorkspaceInfo, build_prompt,
+    ChangeContext, ContextBundle, DiffContext, GeneratedDraft, JjOp, JjOpKind, LlmHealth,
+    PromptBuild, PromptForm, PromptManifest, PromptSection, RevsetSummary, Revsets, StatusStore,
+    TeaAuthStatus, ToolStatus, VersionKind, VersionResult, WorkspaceInfo, build_prompt,
 };
 use teatui::runtime::Cached;
 use teatui::screens::generate::{
-    CommandPreview, FieldId, GeneratePhase, GenerateState, InputMode, Pane,
+    CommandPreview, FieldId, GeneratePhase, GenerateState, InputMode, JjOpDialog, Pane, PendingJjOp,
 };
 use teatui::screens::{self, LandingState};
 
@@ -175,6 +175,7 @@ fn sample_context() -> ContextBundle {
             diff_stat: "1 file changed".into(),
             diff: "@@ -1 +1 @@\n-old\n+new".into(),
             diff_truncated: false,
+            diff_omitted: false,
         },
     }
 }
@@ -248,6 +249,7 @@ fn generate_with(phase: GeneratePhase) -> GenerateState {
         field_focus: FieldId::Head,
         form,
         phase,
+        jj_op_dialog: None,
         last_action: None,
     }
 }
@@ -310,6 +312,17 @@ fn generate_executing_renders() {
 }
 
 #[test]
+fn generate_jj_mutating_renders() {
+    draw_generate(
+        &generate_with(GeneratePhase::JjMutating {
+            op: JjOpKind::MoveUp,
+            summary: "moving abcd Add foo above efgh Base work".into(),
+        }),
+        &populated_status(),
+    );
+}
+
+#[test]
 fn generate_small_terminal_each_phase_renders() {
     for phase in [
         GeneratePhase::Idle,
@@ -329,6 +342,10 @@ fn generate_small_terminal_each_phase_renders() {
         },
         GeneratePhase::Executing {
             draft: sample_draft(),
+        },
+        GeneratePhase::JjMutating {
+            op: JjOpKind::SquashWithBelow,
+            summary: "squashing abcd Add foo into efgh Base work".into(),
         },
         GeneratePhase::Done {
             url: "https://gitea.example.com/o/r/pulls/1".into(),
@@ -368,6 +385,31 @@ fn generate_failed_renders() {
         }),
         &populated_status(),
     );
+}
+
+#[test]
+fn generate_jj_confirm_dialog_renders() {
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.jj_op_dialog = Some(JjOpDialog::Confirm(PendingJjOp {
+        op: JjOp {
+            kind: JjOpKind::MoveDown,
+            change_id: "abcd".into(),
+            target_id: "efgh".into(),
+        },
+        change: "abcd Add foo".into(),
+        target: "efgh Base work".into(),
+    }));
+    draw_generate(&s, &populated_status());
+}
+
+#[test]
+fn generate_jj_error_dialog_renders() {
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.jj_op_dialog = Some(JjOpDialog::Error {
+        title: "move above failed".into(),
+        message: "conflicts exist in trunk()..@".into(),
+    });
+    draw_generate(&s, &populated_status());
 }
 
 #[test]

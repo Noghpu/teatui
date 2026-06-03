@@ -8,12 +8,13 @@ use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
 
 use teatui::domain::{
-    BaseBookmark, ChangeContext, ContextBundle, DiffContext, GeneratedDraft, LlmHealth,
-    PromptBuild, PromptManifest, PromptSection, RepoOptions, RevsetSummary, Revsets, StatusStore,
-    TeaAuthStatus, ToolStatus, VersionKind, VersionResult, WorkspaceInfo,
+    BaseBookmark, ChangeContext, ContextBundle, DiffContext, GeneratedDraft, JjOp, JjOpKind,
+    LlmHealth, PromptBuild, PromptManifest, PromptSection, RepoOptions, RevsetSummary, Revsets,
+    StatusStore, TeaAuthStatus, ToolStatus, VersionKind, VersionResult, WorkspaceInfo,
 };
 use teatui::screens::generate::{
-    CommandPreview, FieldId, GeneratePhase, GenerateState, InputMode, Pane, PrForm,
+    CommandPreview, FieldId, GeneratePhase, GenerateState, InputMode, JjOpDialog, Pane,
+    PendingJjOp, PrForm,
 };
 use teatui::screens::{self, LandingState};
 
@@ -37,6 +38,9 @@ enum SnapshotKind {
     GenerateFormFocused,
     GenerateDraftReady,
     GenerateConfirming,
+    GenerateJjMutating,
+    GenerateJjConfirm,
+    GenerateJjError,
     GeneratePickerModal,
     GenerateSmall,
     BackendPicker,
@@ -117,6 +121,24 @@ fn snapshot_specs() -> Vec<SnapshotSpec> {
             kind: SnapshotKind::GenerateConfirming,
         },
         SnapshotSpec {
+            name: "generate-jj-mutating",
+            width: 120,
+            height: 30,
+            kind: SnapshotKind::GenerateJjMutating,
+        },
+        SnapshotSpec {
+            name: "generate-jj-confirm",
+            width: 120,
+            height: 30,
+            kind: SnapshotKind::GenerateJjConfirm,
+        },
+        SnapshotSpec {
+            name: "generate-jj-error",
+            width: 120,
+            height: 30,
+            kind: SnapshotKind::GenerateJjError,
+        },
+        SnapshotSpec {
             name: "generate-picker-modal",
             width: 120,
             height: 30,
@@ -181,6 +203,42 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
                 FieldId::Description,
             );
             state.ensure_field_options_synced(&status);
+            screens::generate::render(&state, &status, frame, frame.area());
+        }
+        SnapshotKind::GenerateJjMutating => {
+            let mut state = generate_with(
+                GeneratePhase::JjMutating {
+                    op: JjOpKind::MoveDown,
+                    summary: "moving zzzzzzzz restore-pr-ui below yyyyyyyy Add deterministic UI snapshots"
+                        .into(),
+                },
+                Pane::Preview,
+                FieldId::Head,
+            );
+            state.ensure_field_options_synced(&status);
+            screens::generate::render(&state, &status, frame, frame.area());
+        }
+        SnapshotKind::GenerateJjConfirm => {
+            let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
+            state.ensure_field_options_synced(&status);
+            state.jj_op_dialog = Some(JjOpDialog::Confirm(PendingJjOp {
+                op: JjOp {
+                    kind: JjOpKind::SquashWithBelow,
+                    change_id: "zzzzzzzz".into(),
+                    target_id: "yyyyyyyy".into(),
+                },
+                change: "zzzzzzzz restore-pr-ui".into(),
+                target: "yyyyyyyy Add deterministic UI snapshots".into(),
+            }));
+            screens::generate::render(&state, &status, frame, frame.area());
+        }
+        SnapshotKind::GenerateJjError => {
+            let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
+            state.ensure_field_options_synced(&status);
+            state.jj_op_dialog = Some(JjOpDialog::Error {
+                title: "move below failed".into(),
+                message: "conflicts exist in trunk()..@".into(),
+            });
             screens::generate::render(&state, &status, frame, frame.area());
         }
         SnapshotKind::GeneratePickerModal => {
@@ -371,6 +429,7 @@ fn generate_with(phase: GeneratePhase, pane: Pane, field_focus: FieldId) -> Gene
         field_focus,
         form,
         phase,
+        jj_op_dialog: None,
         last_action: None,
     }
 }
@@ -436,6 +495,7 @@ fn sample_context() -> ContextBundle {
             diff_stat: "4 files changed, 188 insertions(+), 34 deletions(-)".into(),
             diff: "@@ -1 +1 @@\n-old\n+new".into(),
             diff_truncated: false,
+            diff_omitted: false,
         },
     }
 }

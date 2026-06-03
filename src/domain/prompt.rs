@@ -38,6 +38,15 @@ Explain what changed and why. You may infer motivation from commit messages, fil
 If `aggregate.diff_truncated` is true the diff was cut to fit a size budget; rely more on the commit bodies and diff stats for the unseen parts, and do not claim full coverage of changes you cannot see.
 ";
 
+/// Used when the backend omits the diff (`diff_budget_bytes = 0`). No code diff
+/// is present, so the model must work from commit messages and the per-file
+/// stat summary alone — and must not pretend to line-level certainty.
+const INSTRUCTIONS_NO_DIFF: &str = "\
+No code diff is included in this context — the backend is configured to omit it (`aggregate.diff_omitted` is true). Work from `changes` (commit subjects, bodies, and per-change diff stats, ordered oldest-to-newest) and `aggregate.diff_stat` (the per-file change summary) as your sources of truth.
+Explain what changed and why, leaning on the commit messages for motivation and the diff stats for which files and roughly how much changed. You may infer intent from commit messages and file names, but do not invent tests, issue numbers, benchmarks, user reports, or external facts not present in the context.
+Because you cannot see the actual code changes, keep claims at the level the commit messages and stats support; do not assert line-level detail or full coverage you cannot verify.
+";
+
 const INPUT_SCHEMA: &str = "\
 Incoming context JSON:
 - task.base: target branch/revision the pull request is opened against.
@@ -47,7 +56,7 @@ Incoming context JSON:
 - form.description: current description field value, if any. Refine it when the context supports a better body.
 - workspace.status: raw `jj status` output at generation time. Present only when head is the working copy; empty otherwise.
 - changes: ordered oldest-to-newest; each item has subject, body, and diff_stat. No per-change diff is included — the code is carried once by aggregate. Change ids and commit ids are intentionally omitted.
-- aggregate: the net effect of head against base. diff_stat is the summary; diff is the full unified (git-format) diff; diff_truncated is true if diff was cut to fit a size budget.
+- aggregate: the net effect of head against base. diff_stat is the per-file summary. When the diff fits the budget it is in `diff` (the full unified git-format diff), with `diff_truncated` true if it was cut to fit. When the backend omits the diff, `diff` is absent and `diff_omitted` is true — rely on diff_stat and the commit bodies instead.
 ";
 
 const OUTPUT_SCHEMA: &str = r#"Output JSON schema:
@@ -80,7 +89,12 @@ pub fn build_prompt(ctx: &ContextBundle, form: &PromptForm) -> PromptBuild {
     let mut sections = Vec::new();
     buf.push_str(SYSTEM);
 
-    push_section(&mut buf, &mut sections, "Instructions", INSTRUCTIONS);
+    let instructions = if ctx.aggregate.diff_omitted {
+        INSTRUCTIONS_NO_DIFF
+    } else {
+        INSTRUCTIONS
+    };
+    push_section(&mut buf, &mut sections, "Instructions", instructions);
     push_section(
         &mut buf,
         &mut sections,
@@ -151,10 +165,20 @@ fn render_context_json(ctx: &ContextBundle, form: &PromptForm) -> String {
                 diff_stat: change.diff_stat.trim(),
             })
             .collect(),
-        aggregate: PromptDiff {
-            diff_stat: ctx.aggregate.diff_stat.trim(),
-            diff: ctx.aggregate.diff.trim(),
-            diff_truncated: ctx.aggregate.diff_truncated,
+        aggregate: if ctx.aggregate.diff_omitted {
+            PromptDiff {
+                diff_stat: ctx.aggregate.diff_stat.trim(),
+                diff: None,
+                diff_truncated: None,
+                diff_omitted: true,
+            }
+        } else {
+            PromptDiff {
+                diff_stat: ctx.aggregate.diff_stat.trim(),
+                diff: Some(ctx.aggregate.diff.trim()),
+                diff_truncated: Some(ctx.aggregate.diff_truncated),
+                diff_omitted: false,
+            }
         },
     };
     serde_json::to_string_pretty(&context).unwrap_or_else(|_| "{}".into())
@@ -197,8 +221,11 @@ struct PromptChange<'a> {
 #[derive(Serialize)]
 struct PromptDiff<'a> {
     diff_stat: &'a str,
-    diff: &'a str,
-    diff_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diff: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diff_truncated: Option<bool>,
+    diff_omitted: bool,
 }
 
 fn first_non_empty<'a>(preferred: &'a str, fallback: &'a str) -> &'a str {
@@ -229,6 +256,7 @@ mod tests {
                 diff_stat: "1 file changed".into(),
                 diff: "@@ -1 +1 @@\n-old\n+new".into(),
                 diff_truncated: false,
+                diff_omitted: false,
             },
         }
     }
@@ -298,6 +326,29 @@ mod tests {
         assert_eq!(prompt.prompt.matches(r#""diff_truncated":"#).count(), 1);
         // The journey is still present per change.
         assert!(prompt.prompt.contains(r#""diff_stat": "1 file changed""#));
+    }
+
+    #[test]
+    fn omitted_diff_adapts_prompt_and_drops_diff_field() {
+        let mut ctx = sample();
+        ctx.aggregate.diff = String::new();
+        ctx.aggregate.diff_omitted = true;
+        let prompt = build_prompt(&ctx, &sample_form());
+        // No diff field is rendered; the omission is flagged instead.
+        assert_eq!(prompt.prompt.matches(r#""diff":"#).count(), 0);
+        assert_eq!(prompt.prompt.matches(r#""diff_truncated":"#).count(), 0);
+        assert!(prompt.prompt.contains(r#""diff_omitted": true"#));
+        // The instructions switch to the diff-free guidance, and the stat journey
+        // is still carried.
+        assert!(prompt.prompt.contains("No code diff is included"));
+        assert!(prompt.prompt.contains(r#""diff_stat": "1 file changed""#));
+    }
+
+    #[test]
+    fn present_diff_marks_omitted_false() {
+        let prompt = build_prompt(&sample(), &sample_form());
+        assert!(prompt.prompt.contains(r#""diff_omitted": false"#));
+        assert!(!prompt.prompt.contains("No code diff is included"));
     }
 
     #[test]

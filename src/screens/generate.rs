@@ -13,7 +13,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 
 use crate::domain::{
-    ContextBundle, ExecuteStep, GeneratedDraft, PromptBuild, RevsetSummary, Revsets, StatusStore,
+    ContextBundle, ExecuteStep, GeneratedDraft, JjOp, JjOpKind, PromptBuild, RevsetSummary,
+    Revsets, StatusStore,
 };
 use crate::runtime::Cached;
 
@@ -76,12 +77,55 @@ pub enum GeneratePhase {
     Executing {
         draft: GeneratedDraft,
     },
+    JjMutating {
+        op: JjOpKind,
+        summary: String,
+    },
     Done {
         url: String,
     },
     Failed {
         message: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingJjOp {
+    pub op: JjOp,
+    pub change: String,
+    pub target: String,
+}
+
+impl PendingJjOp {
+    fn title(&self) -> &'static str {
+        self.op.kind.label()
+    }
+
+    fn question(&self) -> String {
+        match self.op.kind {
+            JjOpKind::SquashWithBelow => {
+                format!("Squash {} into {}?", self.change, self.target)
+            }
+            JjOpKind::MoveUp => format!("Move {} above {}?", self.change, self.target),
+            JjOpKind::MoveDown => format!("Move {} below {}?", self.change, self.target),
+        }
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        match self.op.kind {
+            JjOpKind::SquashWithBelow => {
+                format!("squashing {} into {}", self.change, self.target)
+            }
+            JjOpKind::MoveUp => format!("moving {} above {}", self.change, self.target),
+            JjOpKind::MoveDown => format!("moving {} below {}", self.change, self.target),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JjOpDialog {
+    Confirm(PendingJjOp),
+    Error { title: String, message: String },
 }
 
 #[derive(Debug, Default, Clone)]
@@ -162,6 +206,7 @@ pub struct GenerateState {
     pub field_focus: FieldId,
     pub form: PrForm,
     pub phase: GeneratePhase,
+    pub jj_op_dialog: Option<JjOpDialog>,
     pub last_action: Option<&'static str>,
 }
 
@@ -177,6 +222,7 @@ impl GenerateState {
             field_focus: FieldId::Head,
             form: PrForm::new(default_base),
             phase: GeneratePhase::Idle,
+            jj_op_dialog: None,
             last_action: None,
         }
     }
@@ -187,6 +233,7 @@ impl GenerateState {
             GeneratePhase::Collecting
                 | GeneratePhase::Generating { .. }
                 | GeneratePhase::Executing { .. }
+                | GeneratePhase::JjMutating { .. }
         )
     }
 
@@ -222,6 +269,36 @@ impl GenerateState {
             other => other,
         };
     }
+
+    pub fn take_confirmed_jj_op(&mut self, op: &JjOp) -> Option<PendingJjOp> {
+        let dialog = self.jj_op_dialog.take()?;
+        match dialog {
+            JjOpDialog::Confirm(pending) if pending.op == *op => Some(pending),
+            other => {
+                self.jj_op_dialog = Some(other);
+                None
+            }
+        }
+    }
+
+    pub fn show_jj_error(&mut self, title: impl Into<String>, message: impl Into<String>) {
+        self.jj_op_dialog = Some(JjOpDialog::Error {
+            title: title.into(),
+            message: message.into(),
+        });
+    }
+
+    pub fn reset_after_jj_mutation(&mut self, default_base: String, status: &StatusStore) {
+        let selected = self.revset_selected;
+        self.input_mode = InputMode::Normal;
+        self.field_focus = FieldId::Head;
+        self.form = PrForm::new(default_base);
+        self.phase = GeneratePhase::Idle;
+        self.jj_op_dialog = None;
+        self.revset_selected = selected;
+        self.ensure_field_options_synced(status);
+        update_head_from_selection(self, status);
+    }
 }
 
 pub fn on_key(state: &mut GenerateState, status: &StatusStore, key: KeyEvent) -> Transition {
@@ -240,7 +317,59 @@ pub fn update_head_from_selection(state: &mut GenerateState, status: &StatusStor
         && let Some(item) = items.get(state.revset_selected)
     {
         state.form.head.set_value(item.change_id.clone());
+        // A change already carrying a bookmark names its own branch; prefill it
+        // so the form reflects the existing branch rather than inventing one.
+        // Record it as an edit so the user can undo/redo back to the prefill.
+        if let Some(bookmark) = item.bookmarks.first()
+            && !bookmark.is_empty()
+        {
+            let bookmark = bookmark.clone();
+            state.form.edit(|form| form.branch_name.set_value(bookmark));
+        }
     }
+}
+
+pub(super) fn open_jj_op_dialog(
+    state: &mut GenerateState,
+    status: &StatusStore,
+    kind: JjOpKind,
+) -> Transition {
+    let Some(Revsets::Loaded(items)) = status.revsets.value() else {
+        state.show_jj_error("jj operation unavailable", "Changes are not loaded yet.");
+        return Transition::Dirty;
+    };
+    let Some(change) = items.get(state.revset_selected) else {
+        state.show_jj_error("jj operation unavailable", "No change is selected.");
+        return Transition::Dirty;
+    };
+    let target_index = match kind {
+        JjOpKind::MoveUp => match state.revset_selected.checked_sub(1) {
+            Some(i) => i,
+            None => {
+                state.show_jj_error("cannot move up", "There is no change above this row.");
+                return Transition::Dirty;
+            }
+        },
+        JjOpKind::SquashWithBelow | JjOpKind::MoveDown => {
+            let i = state.revset_selected + 1;
+            if i >= items.len() {
+                state.show_jj_error("cannot use row below", "There is no change below this row.");
+                return Transition::Dirty;
+            }
+            i
+        }
+    };
+    let target = &items[target_index];
+    state.jj_op_dialog = Some(JjOpDialog::Confirm(PendingJjOp {
+        op: JjOp {
+            kind,
+            change_id: change.change_id.clone(),
+            target_id: target.change_id.clone(),
+        },
+        change: revset_dialog_label(change),
+        target: revset_dialog_label(target),
+    }));
+    Transition::Dirty
 }
 
 /// Width below which we drop the three-pane layout. Preview at < ~16
@@ -293,6 +422,9 @@ pub fn render(state: &GenerateState, status: &StatusStore, frame: &mut Frame, ar
         && let FieldState::Picker(picker) = state.form.field(state.field_focus)
     {
         render_picker_modal(state, picker, frame, main);
+    }
+    if let Some(dialog) = &state.jj_op_dialog {
+        render_jj_op_dialog(dialog, frame, main);
     }
 }
 
@@ -433,7 +565,11 @@ fn render_form(state: &GenerateState, frame: &mut Frame, area: Rect) {
 
                 let indent: u16 = 2;
                 let value_w = w.saturating_sub(indent as usize);
-                let value_h: u16 = if t.multiline { 6 } else { 1 };
+                let value_h: u16 = if t.multiline {
+                    multiline_value_height(t, value_w, editing)
+                } else {
+                    1
+                };
                 let sy = inner.y as i32 + cy as i32 - scroll as i32;
                 if sy >= inner.y as i32 && (sy as u16) < inner.y + inner.height {
                     let vis_h = value_h.min((inner.y + inner.height).saturating_sub(sy as u16));
@@ -580,10 +716,32 @@ fn form_scroll(state: &GenerateState, width: usize, visible: u16) -> u16 {
 }
 
 fn form_field_height(state: &GenerateState, id: FieldId, width: usize) -> u16 {
+    let editing = state.field_focus == id && state.input_mode == InputMode::Editing;
     match state.form.field(id) {
-        FieldState::Text(t) => 1 + (if t.multiline { 6 } else { 1 }) + t.errors.len() as u16,
+        FieldState::Text(t) => {
+            let value_h = if t.multiline {
+                multiline_value_height(t, width.saturating_sub(2), editing)
+            } else {
+                1
+            };
+            1 + value_h + t.errors.len() as u16
+        }
         FieldState::Picker(_) => field_lines(state, id, width).len() as u16,
     }
+}
+
+/// Display height of a multiline text field's value box: tall enough to show all
+/// the wrapped content, but never shorter than [`MULTILINE_MIN_HEIGHT`] (the box
+/// keeps its familiar minimum size even when nearly empty).
+fn multiline_value_height(t: &form::TextFieldState, value_w: usize, editing: bool) -> u16 {
+    const MULTILINE_MIN_HEIGHT: u16 = 6;
+    let content = if editing { &t.buffer } else { &t.value };
+    let lines: usize = if content.is_empty() {
+        1
+    } else {
+        content.lines().map(|l| wrap_chars(l, value_w).len()).sum()
+    };
+    (lines as u16).max(MULTILINE_MIN_HEIGHT)
 }
 
 fn render_picker_modal(
@@ -673,6 +831,55 @@ fn render_picker_modal(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+fn render_jj_op_dialog(dialog: &JjOpDialog, frame: &mut Frame, area: Rect) {
+    frame.render_widget(theme::backdrop(), area);
+    let width = area.width.saturating_sub(16).clamp(34, 72);
+    let height = area.height.saturating_sub(8).clamp(8, 12);
+    let rect = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, rect);
+    let title = match dialog {
+        JjOpDialog::Confirm(pending) => pending.title().to_string(),
+        JjOpDialog::Error { title, .. } => title.clone(),
+    };
+    let block = theme::modal_block(title);
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let lines = match dialog {
+        JjOpDialog::Confirm(pending) => vec![
+            Line::from(Span::styled(pending.question(), theme::text())),
+            Line::from(""),
+            Line::from(Span::styled(
+                "This rewrites the stack. Conflicts will be probed and reverted.",
+                theme::warning(),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Enter", theme::selected(true)),
+                Span::styled(" confirm   ", theme::muted()),
+                Span::styled("Esc", theme::selected(false)),
+                Span::styled(" cancel", theme::muted()),
+            ]),
+        ],
+        JjOpDialog::Error { message, .. } => vec![
+            Line::from(Span::styled("Cannot run jj operation.", theme::error())),
+            Line::from(""),
+            Line::from(Span::raw(message.clone())),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Enter/Esc", theme::selected(true)),
+                Span::styled(" close", theme::muted()),
+            ]),
+        ],
+    };
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
 fn render_preview(state: &GenerateState, status: &StatusStore, frame: &mut Frame, area: Rect) {
     let block = theme::pane_block("Preview", state.pane == Pane::Preview);
     let inner = block.inner(area);
@@ -693,6 +900,7 @@ fn render_preview(state: &GenerateState, status: &StatusStore, frame: &mut Frame
             commands,
         } => preview_confirming_lines(state, draft, prompt, commands, inner.width),
         GeneratePhase::Executing { draft } => preview_executing_lines(draft),
+        GeneratePhase::JjMutating { op, summary } => preview_jj_mutating_lines(*op, summary),
         GeneratePhase::Done { url } => preview_done_lines(url),
         GeneratePhase::Failed { message } => preview_failed_lines(message),
     });
@@ -853,6 +1061,18 @@ fn preview_executing_lines(draft: &GeneratedDraft) -> Vec<Line<'static>> {
     lines
 }
 
+fn preview_jj_mutating_lines(op: JjOpKind, summary: &str) -> Vec<Line<'static>> {
+    vec![
+        status_line(&format!("Running jj {}…", op.label())),
+        kv_line("operation", summary.to_string()),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Stack rewrite in progress. Navigation stays available; actions are blocked.",
+            theme::warning(),
+        )),
+    ]
+}
+
 fn preview_done_lines(url: &str) -> Vec<Line<'static>> {
     vec![
         Line::from(Span::styled(
@@ -901,6 +1121,7 @@ fn next_step_text(state: &GenerateState, status: &StatusStore) -> &'static str {
         }
         GeneratePhase::Confirming { .. } => "Switch to the preview pane to create the PR.",
         GeneratePhase::Executing { .. } => "Wait for the PR creation commands to finish.",
+        GeneratePhase::JjMutating { .. } => "Wait for the jj operation to finish.",
         GeneratePhase::Done { .. } => "Press o to open the created PR, or c to copy its URL.",
         GeneratePhase::Failed { .. } => "Fix the issue, then press g to retry generation.",
     }
@@ -1182,7 +1403,7 @@ fn truncate_ellipsis(value: &str, width: usize) -> (String, bool) {
     (out, true)
 }
 
-fn revset_primary(item: &RevsetSummary) -> String {
+pub(super) fn revset_primary(item: &RevsetSummary) -> String {
     if let Some(bookmark) = item.bookmarks.first()
         && !bookmark.is_empty()
     {
@@ -1195,6 +1416,15 @@ fn revset_primary(item: &RevsetSummary) -> String {
         return item.change_id.clone();
     }
     fmt_or_dash(&item.label)
+}
+
+fn revset_dialog_label(item: &RevsetSummary) -> String {
+    let primary = revset_primary(item);
+    if primary == item.change_id {
+        primary
+    } else {
+        format!("{} {}", item.change_id, primary)
+    }
 }
 
 fn compact_diff_stat(stats: &str) -> Option<String> {
@@ -1274,48 +1504,97 @@ fn render_help(state: &GenerateState, frame: &mut Frame, area: Rect) {
         }
     } else if matches!(
         state.phase,
-        GeneratePhase::Collecting | GeneratePhase::Generating { .. }
+        GeneratePhase::Collecting
+            | GeneratePhase::Generating { .. }
+            | GeneratePhase::JjMutating { .. }
     ) {
-        // Esc aborts the in-flight generation regardless of which pane is focused.
-        vec![HelpHint::primary("Esc", "cancel")]
-    } else {
-        match (state.pane, &state.phase) {
-            (Pane::Menu, _) => vec![
-                HelpHint::primary("Enter", "pick"),
-                HelpHint::new("r", "refresh"),
-                HelpHint::new("b", "backend"),
-                HelpHint::new("Esc", "back"),
-            ],
-            (Pane::Form, GeneratePhase::DraftReady { .. }) => vec![
-                HelpHint::new("Enter/i", "edit"),
-                HelpHint::new("g", "regenerate"),
-                HelpHint::primary("x", "review"),
-                HelpHint::new("Esc", "back"),
-            ],
-            (Pane::Form, _) => vec![
-                HelpHint::new("Enter/i", "edit"),
-                HelpHint::primary("g", "generate"),
-                HelpHint::new("b", "backend"),
-                HelpHint::new("Esc", "back"),
-            ],
-            (Pane::Preview, GeneratePhase::DraftReady { .. }) => vec![
-                HelpHint::new("g", "regenerate"),
-                HelpHint::primary("x", "review"),
-                HelpHint::new("Esc", "back"),
-            ],
-            (Pane::Preview, GeneratePhase::Confirming { .. }) => vec![
-                HelpHint::primary("Enter/x", "execute"),
-                HelpHint::new("Esc", "back"),
-            ],
-            (Pane::Preview, GeneratePhase::Done { .. }) => vec![
-                HelpHint::primary("o", "open"),
-                HelpHint::new("c", "copy URL"),
-                HelpHint::new("Esc", "back"),
-            ],
-            (Pane::Preview, _) => vec![HelpHint::new("Esc", "back")],
+        match &state.phase {
+            GeneratePhase::JjMutating { .. } => vec![HelpHint::primary("Wait", "jj running")],
+            _ => {
+                // Generation in flight: Esc aborts it (the headline action). `b` still
+                // works (it only changes the backend for the next run) and is shown
+                // everywhere for consistency.
+                vec![
+                    HelpHint::primary("Esc", "cancel"),
+                    HelpHint::new("b", "backend"),
+                ]
+            }
         }
+    } else {
+        normal_help_hints(state)
     };
     frame.render_widget(Paragraph::new(theme::help_line(&hints, area.width)), area);
+}
+
+/// Help hints for a non-editing, non-generating screen. Each key is listed
+/// exactly where it actually does something (mirroring the gates in
+/// `generate::input::on_key`): the pane-local action first, then `g` wherever a
+/// draft can be (re)generated, then `b` and `Esc` — both available everywhere.
+/// Navigation keys (q, arrows, hjkl) are intentionally never surfaced.
+fn normal_help_hints(state: &GenerateState) -> Vec<theme::HelpHint<'static>> {
+    use theme::HelpHint;
+    let mut hints: Vec<HelpHint> = Vec::new();
+
+    match (state.pane, &state.phase) {
+        (Pane::Menu, _) => {
+            hints.push(HelpHint::primary("Enter", "pick"));
+            hints.push(HelpHint::new("r", "refresh"));
+            if !state.is_in_progress() && state.jj_op_dialog.is_none() {
+                hints.push(HelpHint::new("s", "squash below"));
+                hints.push(HelpHint::new("J/K", "move"));
+            }
+        }
+        (Pane::Preview, GeneratePhase::DraftReady { .. }) => {
+            hints.push(HelpHint::primary("x", "review"));
+        }
+        (Pane::Preview, GeneratePhase::Confirming { .. }) => {
+            hints.push(HelpHint::primary("Enter/x", "execute"));
+        }
+        (Pane::Preview, GeneratePhase::Done { .. }) => {
+            hints.push(HelpHint::primary("o", "open"));
+            hints.push(HelpHint::new("c", "copy URL"));
+        }
+        (Pane::Form, _) => hints.push(HelpHint::new("Enter/i", "edit")),
+        (Pane::Preview, _) => {}
+    }
+
+    // Undo/redo live wherever the form content is shown. `u`/`r` move the whole
+    // form; `U`/`R` move just the highlighted field (Form pane only).
+    if matches!(state.pane, Pane::Form | Pane::Preview) {
+        hints.push(HelpHint::new("u/r", "undo/redo"));
+    }
+
+    // `g` (re)generates from any pane but Menu while no job is running.
+    if state.pane != Pane::Menu && !state.is_in_progress() {
+        let label = if matches!(
+            state.phase,
+            GeneratePhase::DraftReady { .. } | GeneratePhase::Confirming { .. }
+        ) {
+            "regenerate"
+        } else {
+            "generate"
+        };
+        hints.push(promote_if_first(HelpHint::new("g", label), &hints));
+    }
+
+    hints.push(HelpHint::new("b", "backend"));
+    // Esc leaves the screen (or steps back from confirmation); highlight it only
+    // when nothing more specific has claimed the primary slot.
+    hints.push(promote_if_first(HelpHint::new("Esc", "back"), &hints));
+    hints
+}
+
+/// Mark `hint` as the primary (highlighted) one unless an earlier hint already
+/// is, so each help line has exactly one highlight.
+fn promote_if_first<'a>(
+    hint: theme::HelpHint<'a>,
+    existing: &[theme::HelpHint<'a>],
+) -> theme::HelpHint<'a> {
+    if existing.iter().any(|h| h.primary) {
+        hint
+    } else {
+        theme::HelpHint::primary(hint.key, hint.label)
+    }
 }
 
 #[cfg(test)]
@@ -1421,5 +1700,71 @@ mod tests {
             next_step_text(&state, &status),
             "Press x or Enter to create the PR."
         );
+    }
+
+    fn draft_ready_phase() -> GeneratePhase {
+        GeneratePhase::DraftReady {
+            draft: GeneratedDraft {
+                pr_type: "feat".into(),
+                branch_slug: "add-foo".into(),
+                title: "Add foo".into(),
+                description: "Body".into(),
+            },
+            prompt: PromptBuild {
+                prompt: "prompt".into(),
+                manifest: PromptManifest {
+                    sections: Vec::new(),
+                    total_bytes: 0,
+                },
+            },
+        }
+    }
+
+    fn help_keys(phase: GeneratePhase, pane: Pane) -> Vec<&'static str> {
+        normal_help_hints(&generate_state(phase, pane))
+            .into_iter()
+            .map(|hint| hint.key)
+            .collect()
+    }
+
+    #[test]
+    fn backend_is_offered_in_every_pane() {
+        for pane in [Pane::Menu, Pane::Form, Pane::Preview] {
+            assert!(
+                help_keys(GeneratePhase::Idle, pane).contains(&"b"),
+                "backend hint missing in {pane:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_is_only_offered_where_it_works() {
+        // `x` review fires only from the Preview pane, so the Form pane must not
+        // advertise it even though the draft is ready.
+        assert!(help_keys(draft_ready_phase(), Pane::Preview).contains(&"x"));
+        assert!(!help_keys(draft_ready_phase(), Pane::Form).contains(&"x"));
+    }
+
+    #[test]
+    fn generate_is_offered_wherever_it_works() {
+        // Anywhere but the Menu pane, with no job running, `g` is available —
+        // including the Preview pane while idle, which previously omitted it.
+        assert!(help_keys(GeneratePhase::Idle, Pane::Preview).contains(&"g"));
+        assert!(help_keys(GeneratePhase::Idle, Pane::Form).contains(&"g"));
+        assert!(!help_keys(GeneratePhase::Idle, Pane::Menu).contains(&"g"));
+    }
+
+    #[test]
+    fn exactly_one_hint_is_primary() {
+        for pane in [Pane::Menu, Pane::Form, Pane::Preview] {
+            for phase in [GeneratePhase::Idle, draft_ready_phase()] {
+                let state = generate_state(phase, pane);
+                let primaries = normal_help_hints(&state)
+                    .into_iter()
+                    .filter(|hint| hint.primary)
+                    .count();
+                assert_eq!(primaries, 1, "expected one primary hint in {pane:?}");
+            }
+        }
     }
 }

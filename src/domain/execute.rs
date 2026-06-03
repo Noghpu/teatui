@@ -65,7 +65,9 @@ fn run_execute(job: ExecutePrJob) -> ExecuteResult {
         };
     }
 
-    // Step 2: push the bookmark to the remote.
+    // Step 2: push the bookmark to the remote. A brand-new bookmark needs no
+    // special flag: `jj git push --bookmark <name>` auto-creates and tracks an
+    // untracked bookmark's remote counterpart.
     let push_args = vec![
         "git".to_string(),
         "push".to_string(),

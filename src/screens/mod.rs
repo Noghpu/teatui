@@ -3,6 +3,8 @@ pub mod generate;
 pub mod landing;
 pub mod theme;
 
+use crate::domain::JjOp;
+
 pub use generate::GenerateState;
 pub use landing::LandingState;
 
@@ -42,6 +44,8 @@ pub enum Transition {
     RefreshRevsets,
     /// User asked to open the LLM backend switcher.
     OpenBackendPicker,
+    /// User confirmed a jj stack-shaping operation from the Changes pane.
+    JjOp(JjOp),
 }
 
 pub enum NewScreen {
