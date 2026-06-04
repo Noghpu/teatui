@@ -9,13 +9,18 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use teatui::domain::{
+    BulkPhase, PrStatus, StackDraft, StackExistingPr, StackIntent, StackPlan, StackPlanItem,
+    StackPrInput, annotate_blockers,
+};
+use teatui::domain::{
     ChangeContext, ContextBundle, DiffContext, GeneratedDraft, JjOp, JjOpKind, LlmHealth,
     PromptBuild, PromptForm, PromptManifest, PromptSection, RevsetSummary, Revsets, StatusStore,
     TeaAuthStatus, ToolStatus, VersionKind, VersionResult, WorkspaceInfo, build_prompt,
 };
 use teatui::runtime::Cached;
 use teatui::screens::generate::{
-    CommandPreview, FieldId, GeneratePhase, GenerateState, InputMode, JjOpDialog, Pane, PendingJjOp,
+    BulkItemEditor, BulkReviewFocus, CommandPreview, FieldId, GeneratePhase, GenerateState,
+    InputMode, JjOpDialog, Pane, PendingJjOp,
 };
 use teatui::screens::{self, LandingState};
 
@@ -251,6 +256,11 @@ fn generate_with(phase: GeneratePhase) -> GenerateState {
         phase,
         jj_op_dialog: None,
         last_action: None,
+        selected_heads: Vec::new(),
+        bulk: BulkPhase::Idle,
+        bulk_review_focus: BulkReviewFocus::List,
+        bulk_editor: BulkItemEditor::default(),
+        bulk_list_scroll: std::cell::Cell::new(0),
     }
 }
 
@@ -373,7 +383,7 @@ fn generate_done_with_action_hint_renders() {
     let mut s = generate_with(GeneratePhase::Done {
         url: "https://gitea.example.com/o/r/pulls/1".into(),
     });
-    s.last_action = Some("copied to clipboard");
+    s.last_action = Some("copied to clipboard".into());
     draw_generate(&s, &populated_status());
 }
 
@@ -510,6 +520,340 @@ fn generate_picker_modal_with_discouraged_options_renders() {
     s.form.base.set_value("base".into());
     s.form.head.begin_edit();
     draw_generate(&s, &status);
+}
+
+// ====================== Selected heads rendering ============================
+
+#[test]
+fn generate_with_zero_selected_heads_renders() {
+    // Baseline: no heads selected — same as normal idle state.
+    let status = ordered_revset_status();
+    let s = generate_with(GeneratePhase::Idle);
+    draw_generate(&s, &status);
+}
+
+#[test]
+fn generate_with_one_selected_head_renders() {
+    let status = ordered_revset_status();
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.pane = Pane::Menu;
+    s.selected_heads.push("new".into());
+    draw_generate(&s, &status);
+}
+
+#[test]
+fn generate_with_multiple_selected_heads_renders() {
+    let status = ordered_revset_status();
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.pane = Pane::Menu;
+    s.selected_heads.push("new".into());
+    s.selected_heads.push("old".into());
+    draw_generate(&s, &status);
+}
+
+#[test]
+fn generate_selected_head_at_cursor_renders() {
+    // Cursor and selected marker both active on the same row.
+    let status = ordered_revset_status();
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.pane = Pane::Menu;
+    s.revset_selected = 0;
+    s.selected_heads.push("new".into());
+    draw_generate(&s, &status);
+}
+
+#[test]
+fn generate_selected_heads_small_terminal_renders() {
+    let status = ordered_revset_status();
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.pane = Pane::Menu;
+    s.selected_heads.push("new".into());
+    s.selected_heads.push("old".into());
+    draw_generate_small(&s, &status);
+}
+
+// ========================= Bulk modal phases ================================
+
+fn sample_stack_plan(n: usize) -> StackPlan {
+    let items = (0..n)
+        .map(|i| {
+            let base = if i == 0 {
+                "main".to_string()
+            } else {
+                format!("pr/feat/pr-{}", i - 1)
+            };
+            StackPlanItem {
+                input: StackPrInput {
+                    index: i,
+                    base,
+                    head: format!("head-{i}"),
+                    included_change_ids: vec![format!("ch-{i}")],
+                    subject: format!("Change {i}"),
+                },
+                bookmark: format!("pr/feat/pr-{i}"),
+                title: format!("PR {i}: Feature slice"),
+                description: format!("Description for PR {i}.\n\n## Summary\n- Does something."),
+                status: PrStatus::Pending,
+                warnings: Vec::new(),
+                blockers: Vec::new(),
+            }
+        })
+        .collect();
+    StackPlan {
+        items,
+        labels: vec!["ui".into()],
+        assignees: Vec::new(),
+        milestone: "v1.0".into(),
+        intent: StackIntent {
+            title: "Add feature".into(),
+            description: "Overall goal.".into(),
+            branch: "add-feature".into(),
+        },
+    }
+}
+
+fn sample_bulk_generating() -> BulkPhase {
+    let inputs: Vec<StackPrInput> = (0..3)
+        .map(|i| StackPrInput {
+            index: i,
+            base: if i == 0 {
+                "main".into()
+            } else {
+                format!("pr/feat/pr-{}", i - 1)
+            },
+            head: format!("head-{i}"),
+            included_change_ids: vec![format!("ch-{i}")],
+            subject: format!("Change {i}"),
+        })
+        .collect();
+    let mut drafts = vec![None, None, None];
+    drafts[0] = Some(StackDraft {
+        index: 0,
+        pr_type: "feat".into(),
+        branch_slug: "pr-0".into(),
+        title: "PR 0".into(),
+        description: "Description".into(),
+    });
+    BulkPhase::Generating {
+        prefix: std::sync::Arc::from("PREFIX"),
+        inputs,
+        intent: StackIntent {
+            title: "Add feature".into(),
+            description: "Overall goal.".into(),
+            branch: "add-feature".into(),
+        },
+        labels: vec!["ui".into()],
+        assignees: Vec::new(),
+        milestone: "v1.0".into(),
+        drafts,
+        warnings: vec![Vec::new(), vec!["LLM fallback: timeout".into()], Vec::new()],
+        next: 2,
+        total: 3,
+    }
+}
+
+#[test]
+fn generate_bulk_collecting_renders() {
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.selected_heads.push("new".into());
+    s.selected_heads.push("old".into());
+    s.bulk = BulkPhase::Collecting;
+    draw_generate(&s, &populated_status());
+}
+
+#[test]
+fn generate_bulk_generating_renders() {
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.selected_heads.push("new".into());
+    s.bulk = sample_bulk_generating();
+    draw_generate(&s, &populated_status());
+}
+
+#[test]
+fn generate_bulk_review_empty_renders() {
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.bulk = BulkPhase::Review {
+        plan: sample_stack_plan(0),
+        cursor: 0,
+        pushing: None,
+        push_all: false,
+    };
+    draw_generate(&s, &populated_status());
+}
+
+#[test]
+fn generate_bulk_review_one_item_renders() {
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.bulk = BulkPhase::Review {
+        plan: sample_stack_plan(1),
+        cursor: 0,
+        pushing: None,
+        push_all: false,
+    };
+    s.seed_bulk_editor_from_cursor();
+    draw_generate(&s, &populated_status());
+}
+
+#[test]
+fn generate_bulk_review_multiple_items_renders() {
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.bulk = BulkPhase::Review {
+        plan: sample_stack_plan(3),
+        cursor: 1,
+        pushing: None,
+        push_all: false,
+    };
+    s.seed_bulk_editor_from_cursor();
+    draw_generate(&s, &populated_status());
+}
+
+#[test]
+fn generate_bulk_review_preview_focus_with_wrapped_title_renders() {
+    let mut s = generate_with(GeneratePhase::Idle);
+    let mut plan = sample_stack_plan(2);
+    plan.items[0].title =
+        "Refine the stacked pull request review workflow with a deliberately long generated title"
+            .into();
+    s.bulk = BulkPhase::Review {
+        plan,
+        cursor: 0,
+        pushing: None,
+        push_all: false,
+    };
+    s.bulk_review_focus = BulkReviewFocus::Preview;
+    s.seed_bulk_editor_from_cursor();
+    draw_generate(&s, &populated_status());
+}
+
+#[test]
+fn generate_bulk_review_push_in_flight_renders() {
+    let mut s = generate_with(GeneratePhase::Idle);
+    let mut plan = sample_stack_plan(2);
+    plan.items[0].status = PrStatus::Created {
+        url: "https://example.com/pulls/1".into(),
+    };
+    s.bulk = BulkPhase::Review {
+        plan,
+        cursor: 1,
+        pushing: Some(1),
+        push_all: true,
+    };
+    s.seed_bulk_editor_from_cursor();
+    draw_generate(&s, &populated_status());
+}
+
+#[test]
+fn generate_bulk_review_done_renders() {
+    let mut s = generate_with(GeneratePhase::Idle);
+    let mut plan = sample_stack_plan(2);
+    plan.items[0].status = PrStatus::Created {
+        url: "https://example.com/pulls/1".into(),
+    };
+    plan.items[1].status = PrStatus::Created {
+        url: "https://example.com/pulls/2".into(),
+    };
+    s.bulk = BulkPhase::Review {
+        plan,
+        cursor: 1,
+        pushing: None,
+        push_all: false,
+    };
+    s.seed_bulk_editor_from_cursor();
+    draw_generate(&s, &populated_status());
+}
+
+#[test]
+fn generate_bulk_review_failed_item_renders() {
+    let mut s = generate_with(GeneratePhase::Idle);
+    let mut plan = sample_stack_plan(2);
+    plan.items[0].status = PrStatus::Created {
+        url: "https://example.com/pulls/1".into(),
+    };
+    plan.items[1].status = PrStatus::Failed {
+        step: teatui::domain::ExecuteStep::Create,
+        message: "validation failed".into(),
+    };
+    s.bulk = BulkPhase::Review {
+        plan,
+        cursor: 1,
+        pushing: None,
+        push_all: false,
+    };
+    s.seed_bulk_editor_from_cursor();
+    draw_generate(&s, &populated_status());
+}
+
+#[test]
+fn generate_bulk_failed_renders() {
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.bulk = BulkPhase::Failed {
+        message: "LLM server unreachable".into(),
+    };
+    draw_generate(&s, &populated_status());
+}
+
+#[test]
+fn generate_bulk_review_with_bookmark_collision_blocker_renders() {
+    let mut plan = sample_stack_plan(2);
+    annotate_blockers(&mut plan, &["pr/feat/pr-0".to_string()], &[]);
+    assert!(!plan.items[0].blockers.is_empty());
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.bulk = BulkPhase::Review {
+        plan,
+        cursor: 0,
+        pushing: None,
+        push_all: false,
+    };
+    s.seed_bulk_editor_from_cursor();
+    draw_generate(&s, &populated_status());
+}
+
+#[test]
+fn generate_bulk_review_with_existing_pr_blocker_renders() {
+    let mut plan = sample_stack_plan(1);
+    annotate_blockers(
+        &mut plan,
+        &[],
+        &[StackExistingPr {
+            head_branch: "pr/feat/pr-0".into(),
+            state: "open".into(),
+            url: Some("https://example.com/pulls/17".into()),
+        }],
+    );
+    assert!(!plan.items[0].blockers.is_empty());
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.bulk = BulkPhase::Review {
+        plan,
+        cursor: 0,
+        pushing: None,
+        push_all: false,
+    };
+    s.seed_bulk_editor_from_cursor();
+    draw_generate(&s, &populated_status());
+}
+
+#[test]
+fn generate_bulk_small_terminal_each_phase_renders() {
+    let phases: Vec<BulkPhase> = vec![
+        BulkPhase::Collecting,
+        sample_bulk_generating(),
+        BulkPhase::Review {
+            plan: sample_stack_plan(2),
+            cursor: 0,
+            pushing: None,
+            push_all: false,
+        },
+        BulkPhase::Failed {
+            message: "timeout".into(),
+        },
+    ];
+    for phase in phases {
+        let mut s = generate_with(GeneratePhase::Idle);
+        s.selected_heads.push("new".into());
+        s.bulk = phase;
+        s.seed_bulk_editor_from_cursor();
+        draw_generate_small(&s, &populated_status());
+    }
 }
 
 // ========================== Backend switcher ================================
