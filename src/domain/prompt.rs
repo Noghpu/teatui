@@ -1,4 +1,5 @@
 use super::context::ContextBundle;
+use super::stack::{StackIntent, StackPrInput};
 
 use serde::Serialize;
 
@@ -27,6 +28,12 @@ pub struct PromptManifest {
 pub struct PromptSection {
     pub name: &'static str,
     pub bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StackPrefix {
+    pub prefix: String,
+    pub manifest: PromptManifest,
 }
 
 const SYSTEM: &str = "You are a PR drafting assistant. Draft a pull request for the supplied `head` against `base`. All log and diff context is for `base..head`.\nRespond with ONLY the requested JSON object — no markdown fences, no prose before or after.\n\n";
@@ -117,6 +124,163 @@ pub fn build_prompt(ctx: &ContextBundle, form: &PromptForm) -> PromptBuild {
             total_bytes,
         },
     }
+}
+
+const STACK_SYSTEM: &str = "You are a PR drafting assistant. Draft pull requests for a stacked chain of changes. Each PR is a focused slice of the overall work; together they form a coherent stack.\nYou will be asked to draft one PR at a time. Respond to each ask with ONLY the requested JSON object — no markdown fences, no prose before or after.\n\n";
+
+const STACK_INSTRUCTIONS: &str = "\
+You will receive the full stacked context once: multiple PR ranges, each with its own context, and a soft stack-intent block that describes the overall goal of the whole stack as if it were a single PR.
+After this shared context, a tiny task suffix will name the one change_index to draft now.
+Use the stack intent ONLY to keep each PR's title and description consistent and pointing the same direction. Do NOT copy the stack-intent title or description verbatim into any PR; each PR must describe its own slice of the work.
+For the requested range, use its `changes` to understand the sequence and motivation, and its `aggregate.diff` as the source of truth for what actually changed. If `aggregate.diff_truncated` is true, rely more on commit bodies and diff stats.
+If `aggregate.diff_omitted` is true for a range, work from commit messages and diff stats for that range.
+Keep PRs non-overlapping: do not summarize work that belongs to another change_index, even though the full stack context is visible.
+Assignees are not included — they are applied automatically and are not useful for drafting.
+";
+
+const STACK_INPUT_SCHEMA: &str = "\
+Incoming context JSON:
+- stack_intent: overall goal of the whole stack (guidance only; do not copy verbatim into any PR).
+  - title: one-line summary of the overall stack goal.
+  - description: detailed motivation for the whole stack.
+  - branch: proposed overall branch name (guidance only).
+- shared_labels: labels that will be applied to every PR (included as context).
+- shared_milestone: milestone that will be applied to every PR (included as context).
+- ranges: array of per-PR contexts, ordered oldest (change_index 0) to newest.
+  Each item:
+  - change_index: 0-based index of this PR in the stack (oldest first).
+  - base: the revision this PR is based on.
+  - head: the head revision of this PR's range.
+  - subject: the head change's commit subject (use as a hint, not a verbatim title).
+  - changes: ordered oldest-to-newest; each item has subject, body, and diff_stat.
+  - aggregate: the net diff for this range. Same schema as single-PR context.
+";
+
+/// Build the byte-stable shared prefix for stacked-PR generation. The per-PR
+/// ask is appended later by [`stack_pr_suffix`], so this prefix must not depend
+/// on which row is being generated.
+///
+/// `contexts` and `inputs` must have the same length and be in the same
+/// oldest-to-newest order (index 0 = oldest PR).
+pub fn build_stack_prefix(
+    contexts: &[ContextBundle],
+    inputs: &[StackPrInput],
+    intent: &StackIntent,
+    shared_labels: &[String],
+    milestone: &str,
+) -> StackPrefix {
+    let mut buf = String::new();
+    let mut sections = Vec::new();
+    buf.push_str(STACK_SYSTEM);
+
+    push_section(&mut buf, &mut sections, "Instructions", STACK_INSTRUCTIONS);
+    push_section(
+        &mut buf,
+        &mut sections,
+        "Incoming Data Schema",
+        STACK_INPUT_SCHEMA,
+    );
+    push_section(&mut buf, &mut sections, "Output JSON Schema", OUTPUT_SCHEMA);
+
+    // Stack-intent block (guidance only).
+    let intent_block = render_stack_intent(intent, shared_labels, milestone);
+    push_section(
+        &mut buf,
+        &mut sections,
+        "Stack Intent (Guidance Only)",
+        &intent_block,
+    );
+
+    // Per-range contexts.
+    let ranges_block = render_ranges_json(contexts, inputs);
+    push_section(&mut buf, &mut sections, "Context JSON", &ranges_block);
+
+    let total_bytes = buf.len();
+    StackPrefix {
+        prefix: buf,
+        manifest: PromptManifest {
+            sections,
+            total_bytes,
+        },
+    }
+}
+
+/// Build the tiny per-PR suffix appended after [`StackPrefix::prefix`].
+pub fn stack_pr_suffix(input: &StackPrInput) -> String {
+    format!(
+        "\n## Your Task Now\nFrom the full stack context above, draft the pull request for change_index = {} ONLY (head `{}` against base `{}`). Output a single JSON object per the Output JSON Schema — no array, no other PRs, no prose.\n",
+        input.index,
+        input.head.trim(),
+        input.base.trim(),
+    )
+}
+
+fn render_stack_intent(intent: &StackIntent, shared_labels: &[String], milestone: &str) -> String {
+    #[derive(Serialize)]
+    struct StackIntentJson<'a> {
+        title: &'a str,
+        description: &'a str,
+        branch: &'a str,
+        shared_labels: &'a [String],
+        shared_milestone: &'a str,
+    }
+    let data = StackIntentJson {
+        title: intent.title.trim(),
+        description: intent.description.trim(),
+        branch: intent.branch.trim(),
+        shared_labels,
+        shared_milestone: milestone.trim(),
+    };
+    serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".into())
+}
+
+fn render_ranges_json(contexts: &[ContextBundle], inputs: &[StackPrInput]) -> String {
+    #[derive(Serialize)]
+    struct StackContextJson<'a> {
+        change_index: usize,
+        base: &'a str,
+        head: &'a str,
+        subject: &'a str,
+        changes: Vec<PromptChange<'a>>,
+        aggregate: PromptDiff<'a>,
+    }
+
+    let ranges: Vec<StackContextJson<'_>> = contexts
+        .iter()
+        .zip(inputs.iter())
+        .map(|(ctx, input)| StackContextJson {
+            change_index: input.index,
+            base: ctx.base.trim(),
+            head: ctx.head.trim(),
+            subject: input.subject.trim(),
+            changes: ctx
+                .changes
+                .iter()
+                .map(|c| PromptChange {
+                    subject: c.subject.trim(),
+                    body: c.body.trim(),
+                    diff_stat: c.diff_stat.trim(),
+                })
+                .collect(),
+            aggregate: if ctx.aggregate.diff_omitted {
+                PromptDiff {
+                    diff_stat: ctx.aggregate.diff_stat.trim(),
+                    diff: None,
+                    diff_truncated: None,
+                    diff_omitted: true,
+                }
+            } else {
+                PromptDiff {
+                    diff_stat: ctx.aggregate.diff_stat.trim(),
+                    diff: Some(ctx.aggregate.diff.trim()),
+                    diff_truncated: Some(ctx.aggregate.diff_truncated),
+                    diff_omitted: false,
+                }
+            },
+        })
+        .collect();
+
+    serde_json::to_string_pretty(&ranges).unwrap_or_else(|_| "[]".into())
 }
 
 fn push_section(
@@ -366,5 +530,125 @@ mod tests {
         assert!(!prompt.prompt.contains("range"));
         assert!(!prompt.prompt.contains("change_id"));
         assert!(!prompt.prompt.contains("commit_id"));
+    }
+
+    // =================== build_stack_prefix tests ===================
+
+    fn sample_intent() -> StackIntent {
+        StackIntent {
+            title: "Overhaul authentication".into(),
+            description: "Refactor auth to support OAuth2.".into(),
+            branch: "auth-overhaul".into(),
+        }
+    }
+
+    fn stack_input(index: usize, base: &str, head: &str, subject: &str) -> StackPrInput {
+        StackPrInput {
+            index,
+            base: base.into(),
+            head: head.into(),
+            included_change_ids: vec![head.into()],
+            subject: subject.into(),
+        }
+    }
+
+    #[test]
+    fn stack_prefix_contains_guidance_only_intent_block() {
+        let ctxs = vec![sample(), sample()];
+        let inputs = vec![
+            stack_input(0, "main", "abcd", "Add auth module"),
+            stack_input(1, "abcd", "efgh", "Wire OAuth2 endpoints"),
+        ];
+        let prefix = build_stack_prefix(
+            &ctxs,
+            &inputs,
+            &sample_intent(),
+            &["auth".to_string()],
+            "v2.0",
+        );
+        // Stack-intent block present
+        assert!(
+            prefix.prefix.contains("Stack Intent (Guidance Only)"),
+            "missing stack-intent section header"
+        );
+        assert!(
+            prefix.prefix.contains("Overhaul authentication"),
+            "intent title missing"
+        );
+        assert!(
+            prefix.prefix.contains("Refactor auth to support OAuth2."),
+            "intent description missing"
+        );
+    }
+
+    #[test]
+    fn stack_prefix_contains_shared_labels_and_milestone() {
+        let ctxs = vec![sample()];
+        let inputs = vec![stack_input(0, "main", "abcd", "Add feature")];
+        let prefix = build_stack_prefix(
+            &ctxs,
+            &inputs,
+            &sample_intent(),
+            &["backend".to_string(), "priority".to_string()],
+            "v1.5",
+        );
+        assert!(prefix.prefix.contains("backend"), "label 'backend' missing");
+        assert!(
+            prefix.prefix.contains("priority"),
+            "label 'priority' missing"
+        );
+        assert!(prefix.prefix.contains("v1.5"), "milestone missing");
+    }
+
+    #[test]
+    fn stack_prefix_output_schema_requests_single_object_without_change_index() {
+        let ctxs = vec![sample()];
+        let inputs = vec![stack_input(0, "main", "abcd", "Add feature")];
+        let prefix = build_stack_prefix(&ctxs, &inputs, &sample_intent(), &[], "");
+        assert!(
+            !prefix.prefix.contains("A top-level JSON array"),
+            "output schema must not request a batched array"
+        );
+        assert!(
+            prefix.prefix.contains("Output JSON Schema"),
+            "output schema section missing"
+        );
+        assert!(
+            prefix
+                .prefix
+                .contains(r#""type": "feat|fix|docs|refactor|test|chore""#),
+            "single-object output schema missing"
+        );
+    }
+
+    #[test]
+    fn stack_prefix_excludes_assignees() {
+        let ctxs = vec![sample()];
+        let inputs = vec![stack_input(0, "main", "abcd", "Add feature")];
+        let prefix = build_stack_prefix(&ctxs, &inputs, &sample_intent(), &[], "");
+        assert!(
+            !prefix.prefix.contains("assignees"),
+            "assignees must not appear in prompt"
+        );
+    }
+
+    #[test]
+    fn stack_prefix_manifest_total_bytes_matches_prefix_len() {
+        let ctxs = vec![sample(), sample()];
+        let inputs = vec![
+            stack_input(0, "main", "abcd", "First"),
+            stack_input(1, "abcd", "efgh", "Second"),
+        ];
+        let prefix = build_stack_prefix(&ctxs, &inputs, &sample_intent(), &[], "");
+        assert_eq!(prefix.manifest.total_bytes, prefix.prefix.len());
+    }
+
+    #[test]
+    fn stack_pr_suffix_is_tiny_tail_with_requested_index() {
+        let suffix = stack_pr_suffix(&stack_input(3, "pr/feat/previous", "head-3", "Feature"));
+        assert!(suffix.starts_with("\n## Your Task Now\n"));
+        assert!(suffix.contains("change_index = 3 ONLY"));
+        assert!(suffix.contains("head `head-3` against base `pr/feat/previous`"));
+        assert!(!suffix.contains("Context JSON"));
     }
 }

@@ -1,16 +1,24 @@
 use std::any::Any;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::KeyEvent;
 use ratatui::Frame;
 
-use crate::config::Config;
+use crate::config::{Config, LlmApi};
 use crate::domain::{
     BackendHealth, BackendHealthProbe, BaseBookmarks, BaseBookmarksProbe, ContextJob,
     ContextResult, ExecutePrJob, ExecuteResult, GeneratedDraft, JjMutateJob, JjMutateResult, JjOp,
     LlmGenerateJob, LlmResult, PromptForm, RepoOptions, RepoOptionsProbe, RevsetProbe, RevsetStats,
-    RevsetStatsProbe, Revsets, StatusStore, TeaAuthProbe, TeaAuthStatus, VersionKind, VersionProbe,
-    VersionResult, WorkspaceInfo, WorkspaceProbe, build_prompt, slugify,
+    RevsetStatsProbe, Revsets, StackContextJob, StackContextResult, StackExistingPrsProbe,
+    StackLlmResult, StackPrLlmJob, StackPushJob, StackPushPrecheck, StackPushPrecheckJob,
+    StackPushResult, StatusStore, TeaAuthProbe, TeaAuthStatus, VersionKind, VersionProbe,
+    VersionResult, WorkspaceInfo, WorkspaceProbe, annotate_blockers, annotate_order_blockers,
+    build_prompt, build_stack_prefix, derive_stack_ranges, fallback_stack_draft,
+    mark_created_from_existing_prs, slugify, stack_pr_suffix,
+};
+use crate::domain::{
+    BulkPhase, CacheHealth, StackDraft, StackIntent, StackPlan, StackPlanItem, StackPrInput,
 };
 use crate::input::InputEvent;
 use crate::runtime::{CancelHandle, JobEvent, JobOutcomeEvent, JobSubmitter};
@@ -37,12 +45,26 @@ pub struct App {
     screen: Screen,
     /// LLM backend switcher overlay, shown over any screen when `Some`.
     backend_picker: Option<BackendPicker>,
+    pending_stack_push: Option<PendingStackPush>,
     /// Aborts the in-flight LLM generation request. `Some` only while a
     /// generation job is running; taken when the result lands or the user
     /// cancels. See [`App::cancel_generation`].
     gen_cancel: Option<CancelHandle>,
     quit: bool,
     dirty: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingStackPush {
+    index: usize,
+    push_all: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StackGenerationAction {
+    None,
+    Submit(usize),
+    Finish,
 }
 
 impl App {
@@ -91,6 +113,7 @@ impl App {
             status,
             screen: Screen::default(),
             backend_picker: None,
+            pending_stack_push: None,
             gen_cancel: None,
             quit: false,
             dirty: true,
@@ -226,6 +249,10 @@ impl App {
             }
             Transition::OpenBackendPicker => self.open_backend_picker(),
             Transition::JjOp(op) => self.start_jj_mutation(op),
+            Transition::GenerateStack => self.start_stack_generation(),
+            Transition::CancelStack => self.cancel_stack_generation(),
+            Transition::PushStackPr(index) => self.start_stack_push(index, false),
+            Transition::PushStackAll => self.start_stack_push(0, true),
         }
     }
 
@@ -290,7 +317,7 @@ impl App {
             )
         {
             state.phase = GeneratePhase::Idle;
-            state.last_action = Some("generation cancelled");
+            state.last_action = Some("generation cancelled".to_string());
             tracing::info!(target: "teatui::generate", "cancelled by user");
         }
         self.dirty = true;
@@ -363,6 +390,640 @@ impl App {
         tracing::info!(target: "teatui::jj_mutate", "submitted");
     }
 
+    fn start_stack_generation(&mut self) {
+        let Screen::Generate(state) = &mut self.screen else {
+            return;
+        };
+        if state.has_busy_job() {
+            tracing::debug!(target: "teatui::stack", "ignored: busy");
+            return;
+        }
+        let Some(crate::domain::Revsets::Loaded(revsets)) = self.status.revsets.value() else {
+            return;
+        };
+        if state.selected_heads.is_empty() {
+            return;
+        }
+        let base = state.form.base().to_string();
+        let ranges = derive_stack_ranges(revsets, &state.selected_heads, &base);
+        if ranges.is_empty() {
+            tracing::warn!(target: "teatui::stack", "ignored: no valid ranges derived");
+            return;
+        }
+
+        // Transition to Collecting and submit the context job. The form state
+        // (base, intent, labels, etc.) is stable during Collecting/Generating;
+        // it is re-read when the context and LLM results land so we do not need
+        // to clone it all here.
+        state.bulk = BulkPhase::Collecting;
+        state.last_action = None;
+        self.dirty = true;
+
+        let n_ranges = ranges.len();
+        let diff_budget = self
+            .config
+            .llm
+            .active_backend()
+            .diff_budget_bytes
+            .unwrap_or(CONTEXT_DIFF_BUDGET_BYTES);
+
+        self.submitter.submit(StackContextJob {
+            jj_binary: self.config.commands.jj.clone(),
+            ranges,
+            total_diff_byte_budget: diff_budget,
+        });
+        tracing::info!(target: "teatui::stack", ranges = n_ranges, "started context collection");
+    }
+
+    fn cancel_stack_generation(&mut self) {
+        if let Some(cancel) = self.gen_cancel.take() {
+            cancel.cancel();
+        }
+        if let Screen::Generate(state) = &mut self.screen {
+            match &state.bulk {
+                BulkPhase::Collecting | BulkPhase::Generating { .. } => {
+                    state.bulk = BulkPhase::Idle;
+                    state.last_action = Some("stack generation cancelled".to_string());
+                    tracing::info!(target: "teatui::stack", "cancelled by user");
+                }
+                _ => {}
+            }
+        }
+        self.dirty = true;
+    }
+
+    fn start_stack_push(&mut self, requested_index: usize, push_all: bool) {
+        let Screen::Generate(state) = &mut self.screen else {
+            return;
+        };
+        if state.has_busy_job() {
+            tracing::debug!(target: "teatui::stack", "ignored: busy");
+            return;
+        }
+        state.flush_bulk_editor_to_plan();
+
+        let BulkPhase::Review { plan, .. } = &mut state.bulk else {
+            tracing::debug!(target: "teatui::stack", "ignored: not in review");
+            return;
+        };
+
+        if push_all {
+            let Some(index) = next_stack_push_index(plan, 0) else {
+                state.last_action = Some("stack already pushed".to_string());
+                self.dirty = true;
+                return;
+            };
+            self.start_stack_push_precheck(index, true);
+            return;
+        }
+
+        let Some(item) = plan.items.get(requested_index) else {
+            return;
+        };
+        if matches!(item.status, crate::domain::PrStatus::Created { .. }) {
+            state.last_action = Some("PR already created".to_string());
+            self.dirty = true;
+            return;
+        }
+        if let Some((index, _)) = plan
+            .items
+            .iter()
+            .enumerate()
+            .take(requested_index)
+            .find(|(_, item)| !matches!(item.status, crate::domain::PrStatus::Created { .. }))
+        {
+            state.last_action = Some(format!("wait for PR {} to be created first", index + 1));
+            self.dirty = true;
+            return;
+        }
+        if let Some(reason) = item.blockers.first().cloned() {
+            state.last_action = Some(reason);
+            self.dirty = true;
+            return;
+        }
+
+        self.start_stack_push_precheck(requested_index, false);
+    }
+
+    fn start_stack_push_precheck(&mut self, index: usize, push_all: bool) {
+        let Screen::Generate(state) = &mut self.screen else {
+            return;
+        };
+        let BulkPhase::Review {
+            plan,
+            cursor,
+            pushing,
+            push_all: current_push_all,
+        } = &mut state.bulk
+        else {
+            return;
+        };
+        if plan.items.get(index).is_none() {
+            return;
+        }
+        *cursor = index;
+        *pushing = Some(index);
+        *current_push_all = push_all;
+        state.seed_bulk_editor_from_cursor();
+        state.last_action = Some("checking current PR state".to_string());
+        self.pending_stack_push = Some(PendingStackPush { index, push_all });
+        self.dirty = true;
+        self.submitter.submit(StackPushPrecheckJob {
+            jj_binary: self.config.commands.jj.clone(),
+            tea_binary: self.config.commands.tea.clone(),
+        });
+        tracing::info!(target: "teatui::stack", index, push_all, "submitted push precheck");
+    }
+
+    fn submit_stack_push(&mut self, index: usize, push_all: bool) {
+        let (item, labels, assignees, milestone) = {
+            let Screen::Generate(state) = &mut self.screen else {
+                return;
+            };
+            let BulkPhase::Review {
+                plan,
+                cursor,
+                pushing,
+                push_all: current_push_all,
+            } = &mut state.bulk
+            else {
+                return;
+            };
+
+            if let Some(item) = plan.items.get(index)
+                && let Some(reason) = item.blockers.first().cloned()
+            {
+                state.last_action = Some(reason);
+                self.dirty = true;
+                return;
+            }
+
+            let Some(item) = plan.items.get(index).cloned() else {
+                return;
+            };
+            *cursor = index;
+            *pushing = Some(index);
+            *current_push_all = push_all;
+            (
+                item,
+                plan.labels.clone(),
+                plan.assignees.clone(),
+                plan.milestone.clone(),
+            )
+        };
+
+        if let Screen::Generate(state) = &mut self.screen {
+            state.seed_bulk_editor_from_cursor();
+            state.last_action = None;
+        }
+        self.dirty = true;
+
+        self.submitter.submit(StackPushJob {
+            jj_binary: self.config.commands.jj.clone(),
+            tea_binary: self.config.commands.tea.clone(),
+            item,
+            labels,
+            assignees,
+            milestone,
+        });
+        tracing::info!(target: "teatui::stack", index, push_all, "submitted push job");
+    }
+
+    fn handle_stack_context_result(&mut self, result: StackContextResult) {
+        {
+            let Screen::Generate(state) = &mut self.screen else {
+                return;
+            };
+            if !matches!(state.bulk, BulkPhase::Collecting) {
+                tracing::debug!(target: "teatui::stack", "stale stack context result ignored");
+                return;
+            }
+        }
+
+        match result {
+            StackContextResult::Ready { bundles, inputs } => {
+                // Collect the data we need from the screen state before mutating.
+                let (intent, labels, assignees, milestone) = {
+                    let Screen::Generate(state) = &mut self.screen else {
+                        return;
+                    };
+                    (
+                        StackIntent {
+                            title: state.form.title().to_string(),
+                            description: state.form.description().to_string(),
+                            branch: state.form.branch().to_string(),
+                        },
+                        state.form.labels(),
+                        state.form.assignees(),
+                        state.form.milestone().to_string(),
+                    )
+                };
+
+                let prefix = build_stack_prefix(&bundles, &inputs, &intent, &labels, &milestone);
+                let cancel = CancelHandle::new();
+                let total = inputs.len();
+                let Screen::Generate(state) = &mut self.screen else {
+                    return;
+                };
+                state.bulk = BulkPhase::Generating {
+                    prefix: Arc::from(prefix.prefix),
+                    inputs,
+                    intent,
+                    labels,
+                    assignees,
+                    milestone,
+                    drafts: vec![None; total],
+                    warnings: vec![Vec::new(); total],
+                    next: 0,
+                    total,
+                };
+                self.gen_cancel = Some(cancel);
+                self.submit_stack_pr_llm(0);
+                tracing::info!(target: "teatui::stack", total, "stack context ready, submitted first llm row");
+            }
+            StackContextResult::Errored { index, message } => {
+                let Screen::Generate(state) = &mut self.screen else {
+                    return;
+                };
+                let msg = format!("context collection failed at PR {index}: {message}");
+                tracing::error!(target: "teatui::stack", %message, "stack context failed");
+                state.bulk = BulkPhase::Failed { message: msg };
+            }
+        }
+        self.dirty = true;
+    }
+
+    fn handle_stack_llm_result(&mut self, result: StackLlmResult) {
+        {
+            let Screen::Generate(state) = &mut self.screen else {
+                return;
+            };
+            if !matches!(state.bulk, BulkPhase::Generating { .. }) {
+                tracing::debug!(target: "teatui::stack", "stale stack llm result ignored");
+                return;
+            }
+        }
+
+        let action = match result {
+            StackLlmResult::Ready {
+                index,
+                draft,
+                cache,
+            } => self.record_stack_draft(index, draft, cache, None),
+            StackLlmResult::Errored {
+                index,
+                message,
+                fallback,
+                cache,
+            } => self.record_stack_draft(index, fallback, cache, Some(message)),
+            StackLlmResult::Cancelled { .. } => {
+                self.gen_cancel = None;
+                let Screen::Generate(state) = &mut self.screen else {
+                    return;
+                };
+                tracing::info!(target: "teatui::stack", "stack llm cancelled");
+                state.bulk = BulkPhase::Idle;
+                state.last_action = Some("stack generation cancelled".to_string());
+                StackGenerationAction::None
+            }
+        };
+
+        match action {
+            StackGenerationAction::None => {}
+            StackGenerationAction::Submit(index) => self.submit_stack_pr_llm(index),
+            StackGenerationAction::Finish => self.finish_stack_generation(),
+        }
+        self.dirty = true;
+    }
+
+    fn submit_stack_pr_llm(&mut self, index: usize) {
+        let Some(cancel) = self.gen_cancel.clone() else {
+            return;
+        };
+        let Some((prefix, input, suffix)) = self.stack_pr_llm_payload(index) else {
+            return;
+        };
+        let llm = self.config.llm.active_backend();
+        self.submitter.submit(StackPrLlmJob {
+            base_url: llm.base_url.clone(),
+            model: llm.model.clone(),
+            api: llm.api,
+            api_key: llm.api_key.clone(),
+            prefix,
+            suffix,
+            temperature: llm.temperature,
+            max_tokens: llm.max_tokens,
+            timeout: Duration::from_secs(llm.timeout_secs),
+            cancel,
+            input,
+        });
+        if let Screen::Generate(state) = &mut self.screen
+            && let BulkPhase::Generating { next, .. } = &mut state.bulk
+        {
+            *next = index + 1;
+        }
+        tracing::info!(target: "teatui::stack", index, "submitted stack llm row");
+    }
+
+    fn stack_pr_llm_payload(&self, index: usize) -> Option<(Arc<str>, StackPrInput, String)> {
+        let Screen::Generate(state) = &self.screen else {
+            return None;
+        };
+        let BulkPhase::Generating {
+            prefix,
+            inputs,
+            total,
+            ..
+        } = &state.bulk
+        else {
+            return None;
+        };
+        if index >= *total {
+            return None;
+        }
+        let input = inputs.get(index)?.clone();
+        let suffix = stack_pr_suffix(&input);
+        Some((Arc::clone(prefix), input, suffix))
+    }
+
+    fn record_stack_draft(
+        &mut self,
+        index: usize,
+        draft: StackDraft,
+        cache: CacheHealth,
+        error: Option<String>,
+    ) -> StackGenerationAction {
+        let api = self.config.llm.active_backend().api;
+        let Screen::Generate(state) = &mut self.screen else {
+            return StackGenerationAction::None;
+        };
+        let BulkPhase::Generating {
+            drafts,
+            warnings,
+            next,
+            total,
+            ..
+        } = &mut state.bulk
+        else {
+            tracing::debug!(target: "teatui::stack", "stale stack llm result ignored");
+            return StackGenerationAction::None;
+        };
+        if index >= *total {
+            tracing::debug!(target: "teatui::stack", index, total, "out-of-range stack llm result ignored");
+            return StackGenerationAction::None;
+        }
+
+        if let Some(message) = error {
+            warnings[index].push(format!("LLM fallback: {message}"));
+        }
+        if let Some(message) = stack_cache_warning(api, index, &cache) {
+            warnings[index].push(message);
+        }
+        drafts[index] = Some(draft);
+
+        if drafts.iter().all(Option::is_some) {
+            StackGenerationAction::Finish
+        } else if *next < *total {
+            StackGenerationAction::Submit(*next)
+        } else {
+            StackGenerationAction::None
+        }
+    }
+
+    fn finish_stack_generation(&mut self) {
+        self.gen_cancel = None;
+
+        let (inputs, intent, labels, assignees, milestone, drafts, warnings) = {
+            let Screen::Generate(state) = &mut self.screen else {
+                return;
+            };
+            let phase = std::mem::replace(&mut state.bulk, BulkPhase::Idle);
+            let BulkPhase::Generating {
+                inputs,
+                intent,
+                labels,
+                assignees,
+                milestone,
+                drafts,
+                warnings,
+                ..
+            } = phase
+            else {
+                return;
+            };
+            (
+                inputs, intent, labels, assignees, milestone, drafts, warnings,
+            )
+        };
+
+        let drafts: Vec<StackDraft> = drafts
+            .into_iter()
+            .enumerate()
+            .map(|(index, draft)| {
+                draft.unwrap_or_else(|| {
+                    inputs
+                        .get(index)
+                        .map(fallback_stack_draft)
+                        .unwrap_or_else(|| StackDraft {
+                            index,
+                            pr_type: "chore".into(),
+                            branch_slug: String::new(),
+                            title: format!("PR {}", index + 1),
+                            description: String::new(),
+                        })
+                })
+            })
+            .collect();
+
+        let items = build_plan_items(&inputs, &drafts, &warnings);
+        let plan = StackPlan {
+            items,
+            labels,
+            assignees,
+            milestone,
+            intent,
+        };
+
+        {
+            let Screen::Generate(state) = &mut self.screen else {
+                return;
+            };
+            state.bulk = BulkPhase::Review {
+                plan,
+                cursor: 0,
+                pushing: None,
+                push_all: false,
+            };
+            state.bulk_review_focus = crate::screens::generate::BulkReviewFocus::List;
+            state.seed_bulk_editor_from_cursor();
+        }
+        self.refresh_stack_review_blockers();
+        self.status.mark_stack_existing_prs_loading();
+        self.submitter.submit(StackExistingPrsProbe {
+            tea_binary: self.config.commands.tea.clone(),
+        });
+        tracing::info!(target: "teatui::stack", "stack llm complete, entering review");
+    }
+
+    fn handle_stack_push_precheck(&mut self, result: StackPushPrecheck) {
+        self.status.set_base_bookmarks(result.bookmarks);
+        self.status.set_stack_existing_prs(result.existing_prs);
+        self.refresh_stack_review_blockers();
+
+        let Some(pending) = self.pending_stack_push.take() else {
+            tracing::debug!(target: "teatui::stack", "stale stack push precheck ignored");
+            self.dirty = true;
+            return;
+        };
+
+        let mut already_created = false;
+        let mut blocker = None;
+        {
+            let Screen::Generate(state) = &mut self.screen else {
+                return;
+            };
+            let BulkPhase::Review {
+                plan,
+                pushing,
+                push_all,
+                ..
+            } = &mut state.bulk
+            else {
+                return;
+            };
+            if *pushing != Some(pending.index) {
+                tracing::debug!(target: "teatui::stack", "stale stack push precheck ignored");
+                return;
+            }
+
+            if let Some(item) = plan.items.get(pending.index) {
+                already_created = matches!(item.status, crate::domain::PrStatus::Created { .. });
+                blocker = item.blockers.first().cloned();
+            }
+
+            if already_created || blocker.is_some() {
+                *pushing = None;
+                if blocker.is_some() || !pending.push_all {
+                    *push_all = false;
+                }
+            }
+
+            if already_created {
+                state.last_action = Some("PR already created".to_string());
+            } else if let Some(reason) = &blocker {
+                state.last_action = Some(reason.clone());
+            }
+        }
+
+        if already_created && pending.push_all {
+            let next = {
+                let Screen::Generate(state) = &mut self.screen else {
+                    return;
+                };
+                let BulkPhase::Review { plan, .. } = &state.bulk else {
+                    return;
+                };
+                next_stack_push_index(plan, pending.index + 1)
+            };
+            if let Some(next_index) = next {
+                self.start_stack_push_precheck(next_index, true);
+                return;
+            }
+            if let Screen::Generate(state) = &mut self.screen {
+                if let BulkPhase::Review {
+                    pushing, push_all, ..
+                } = &mut state.bulk
+                {
+                    *pushing = None;
+                    *push_all = false;
+                }
+                state.last_action = Some("stack push complete".to_string());
+            }
+            self.dirty = true;
+            return;
+        }
+
+        if blocker.is_none() && !already_created {
+            self.submit_stack_push(pending.index, pending.push_all);
+            return;
+        }
+
+        self.dirty = true;
+    }
+
+    fn handle_stack_push_result(&mut self, result: StackPushResult) {
+        let mut continue_from: Option<usize> = None;
+        {
+            let Screen::Generate(state) = &mut self.screen else {
+                return;
+            };
+            let BulkPhase::Review {
+                plan,
+                cursor,
+                pushing,
+                push_all,
+            } = &mut state.bulk
+            else {
+                tracing::debug!(target: "teatui::stack", "stale stack push result ignored");
+                return;
+            };
+            let Some(active_index) = pushing.take() else {
+                tracing::debug!(target: "teatui::stack", "stale stack push result ignored");
+                return;
+            };
+            if active_index != result.index {
+                tracing::debug!(
+                    target: "teatui::stack",
+                    active_index,
+                    result.index,
+                    "stack push result did not match active item"
+                );
+                return;
+            }
+
+            let status = {
+                let Some(item) = plan.items.get_mut(result.index) else {
+                    return;
+                };
+                item.status = result.status.clone();
+                *cursor = result.index;
+                state.bulk_editor = crate::screens::generate::BulkItemEditor::from_plan_item(item);
+                item.status.clone()
+            };
+
+            state.last_action = match &status {
+                crate::domain::PrStatus::Created { .. } => Some("PR created".to_string()),
+                crate::domain::PrStatus::Failed { step, message } => {
+                    Some(format!("{}: {}", step.label(), message))
+                }
+                crate::domain::PrStatus::Bookmarked => Some("bookmark set".to_string()),
+                crate::domain::PrStatus::Pushed => Some("bookmark pushed".to_string()),
+                crate::domain::PrStatus::Pending => None,
+            };
+
+            if matches!(status, crate::domain::PrStatus::Created { .. }) && *push_all {
+                continue_from = next_stack_push_index(plan, result.index + 1);
+                if continue_from.is_none() {
+                    state.last_action = Some("stack push complete".to_string());
+                }
+            }
+
+            if !matches!(status, crate::domain::PrStatus::Created { .. }) || continue_from.is_none()
+            {
+                *push_all = false;
+            }
+        }
+
+        self.refresh_stack_review_blockers();
+
+        if let Some(next_index) = continue_from {
+            self.start_stack_push_precheck(next_index, true);
+            return;
+        }
+
+        self.dirty = true;
+    }
+
     fn copy_done_url(&mut self) {
         let Screen::Generate(state) = &mut self.screen else {
             return;
@@ -372,12 +1033,12 @@ impl App {
         };
         match arboard::Clipboard::new().and_then(|mut c| c.set_text(url.clone())) {
             Ok(()) => {
-                state.last_action = Some("copied to clipboard");
+                state.last_action = Some("copied to clipboard".to_string());
                 tracing::info!(target: "teatui::execute", %url, "copied URL");
             }
             Err(e) => {
                 tracing::error!(target: "teatui::execute", error = %e, "clipboard write failed");
-                state.last_action = Some("clipboard write failed");
+                state.last_action = Some("clipboard write failed".to_string());
             }
         }
         self.dirty = true;
@@ -392,12 +1053,12 @@ impl App {
         };
         match opener::open(&url) {
             Ok(()) => {
-                state.last_action = Some("opened in browser");
+                state.last_action = Some("opened in browser".to_string());
                 tracing::info!(target: "teatui::execute", %url, "opened URL");
             }
             Err(e) => {
                 tracing::error!(target: "teatui::execute", error = %e, "open failed");
-                state.last_action = Some("open failed");
+                state.last_action = Some("open failed".to_string());
             }
         }
         self.dirty = true;
@@ -485,6 +1146,7 @@ impl App {
                     jj_binary: self.config.commands.jj.clone(),
                     revset: "trunk()..@".into(),
                 });
+                self.refresh_stack_review_blockers();
                 self.dirty = true;
                 return;
             }
@@ -502,7 +1164,24 @@ impl App {
             Ok(b) => {
                 self.status.set_base_bookmarks(*b);
                 self.sync_generate_options();
+                self.refresh_stack_review_blockers();
                 self.dirty = true;
+                return;
+            }
+            Err(a) => a,
+        };
+        let any = match any.downcast::<crate::domain::StackExistingPrs>() {
+            Ok(b) => {
+                self.status.set_stack_existing_prs(*b);
+                self.refresh_stack_review_blockers();
+                self.dirty = true;
+                return;
+            }
+            Err(a) => a,
+        };
+        let any = match any.downcast::<StackPushPrecheck>() {
+            Ok(b) => {
+                self.handle_stack_push_precheck(*b);
                 return;
             }
             Err(a) => a,
@@ -537,9 +1216,30 @@ impl App {
             }
             Err(a) => a,
         };
+        let any = match any.downcast::<StackPushResult>() {
+            Ok(b) => {
+                self.handle_stack_push_result(*b);
+                return;
+            }
+            Err(a) => a,
+        };
         let any = match any.downcast::<JjMutateResult>() {
             Ok(b) => {
                 self.handle_jj_mutate_result(*b);
+                return;
+            }
+            Err(a) => a,
+        };
+        let any = match any.downcast::<StackContextResult>() {
+            Ok(b) => {
+                self.handle_stack_context_result(*b);
+                return;
+            }
+            Err(a) => a,
+        };
+        let any = match any.downcast::<StackLlmResult>() {
+            Ok(b) => {
+                self.handle_stack_llm_result(*b);
                 return;
             }
             Err(a) => a,
@@ -630,7 +1330,7 @@ impl App {
             LlmResult::Cancelled => {
                 tracing::info!(target: "teatui::generate", "llm cancelled");
                 state.phase = GeneratePhase::Idle;
-                state.last_action = Some("generation cancelled");
+                state.last_action = Some("generation cancelled".to_string());
             }
         }
         self.dirty = true;
@@ -673,7 +1373,7 @@ impl App {
                     tracing::info!(target: "teatui::jj_mutate", op = op.label(), "applied");
                     state
                         .reset_after_jj_mutation(self.config.pr.default_base.clone(), &self.status);
-                    state.last_action = Some("jj operation applied");
+                    state.last_action = Some("jj operation applied".to_string());
                     refresh = true;
                 }
                 JjMutateResult::Reverted { op, reason } => {
@@ -718,6 +1418,27 @@ impl App {
             state.ensure_field_options_synced(&self.status);
         }
     }
+
+    fn refresh_stack_review_blockers(&mut self) {
+        let local_bookmarks = collect_stack_bookmarks(&self.status);
+        let existing_prs = self
+            .status
+            .stack_existing_prs
+            .value()
+            .cloned()
+            .unwrap_or_default();
+
+        let Screen::Generate(state) = &mut self.screen else {
+            return;
+        };
+        let BulkPhase::Review { plan, .. } = &mut state.bulk else {
+            return;
+        };
+
+        mark_created_from_existing_prs(plan, &existing_prs);
+        annotate_blockers(plan, &local_bookmarks, &existing_prs);
+        annotate_order_blockers(plan);
+    }
 }
 
 fn screen_label(screen: &Screen) -> &'static str {
@@ -737,19 +1458,131 @@ fn prompt_form_from_generate(form: &PrForm) -> PromptForm {
     }
 }
 
-fn branch_from_draft(draft: &GeneratedDraft) -> String {
-    let slug = if draft.branch_slug.trim().is_empty() {
-        slugify(&draft.title)
+fn collect_stack_bookmarks(status: &StatusStore) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+
+    if let Some(crate::domain::Revsets::Loaded(items)) = status.revsets.value() {
+        for item in items {
+            for bookmark in &item.bookmarks {
+                let bookmark = bookmark.trim();
+                if !bookmark.is_empty() && seen.insert(bookmark.to_string()) {
+                    out.push(bookmark.to_string());
+                }
+            }
+        }
+    }
+
+    if let Some(bookmarks) = status.base_bookmarks.value() {
+        for bookmark in bookmarks {
+            let name = bookmark.name.trim();
+            if !name.is_empty() && seen.insert(name.to_string()) {
+                out.push(name.to_string());
+            }
+        }
+    }
+
+    out
+}
+
+fn stack_cache_warning(api: LlmApi, index: usize, cache: &CacheHealth) -> Option<String> {
+    if index == 0 || api != LlmApi::Openai {
+        return None;
+    }
+    let cached = cache.cached_tokens?;
+    if cached == 0 {
+        return Some(
+            "LLM prefix cache appears cold; llama.cpp SWA may need --swa-full, vLLM needs prefix caching".into(),
+        );
+    }
+    if let Some(prompt_tokens) = cache.prompt_tokens
+        && prompt_tokens > 0
+        && cached.saturating_mul(2) < prompt_tokens
+    {
+        return Some(format!(
+            "LLM prefix cache reused only {cached}/{prompt_tokens} prompt tokens"
+        ));
+    }
+    None
+}
+
+fn next_stack_push_index(plan: &StackPlan, start: usize) -> Option<usize> {
+    plan.items
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find_map(|(index, item)| match item.status {
+            crate::domain::PrStatus::Created { .. } => None,
+            _ => Some(index),
+        })
+}
+
+/// Build `StackPlanItem` entries from the LLM drafts. The bookmark for each
+/// item is built via the same `pr/{type}/{slug}` logic as `branch_from_draft`.
+fn build_plan_items(
+    ranges: &[StackPrInput],
+    drafts: &[StackDraft],
+    warnings: &[Vec<String>],
+) -> Vec<StackPlanItem> {
+    use crate::domain::PrStatus;
+
+    // Update bases: PR k's base should be PR k-1's bookmark (not its head
+    // change_id as stored in derive_stack_ranges). We build bookmarks first
+    // so we can chain them.
+    let bookmarks: Vec<String> = drafts
+        .iter()
+        .map(|d| bookmark_from_draft_fields(&d.pr_type, &d.branch_slug, &d.title))
+        .collect();
+
+    ranges
+        .iter()
+        .zip(drafts.iter())
+        .enumerate()
+        .map(|(i, (input, draft))| {
+            // Update the base: PR 0 keeps the form base; PR k uses the previous
+            // PR's bookmark (which may now be different from the head change_id).
+            let base = if i == 0 {
+                input.base.clone()
+            } else {
+                bookmarks[i - 1].clone()
+            };
+            let updated_input = StackPrInput {
+                base,
+                ..input.clone()
+            };
+            StackPlanItem {
+                input: updated_input,
+                bookmark: bookmarks[i].clone(),
+                title: draft.title.clone(),
+                description: draft.description.clone(),
+                status: PrStatus::Pending,
+                warnings: warnings.get(i).cloned().unwrap_or_default(),
+                blockers: Vec::new(),
+            }
+        })
+        .collect()
+}
+
+fn bookmark_from_draft_fields(pr_type: &str, branch_slug: &str, title: &str) -> String {
+    let slug = if branch_slug.trim().is_empty() {
+        slugify(title)
     } else {
-        slugify(&draft.branch_slug)
+        slugify(branch_slug)
     };
-    let type_prefix = format!("{}-", draft.pr_type);
+    let type_prefix = format!("{pr_type}-");
     let slug = slug.strip_prefix(&type_prefix).unwrap_or(&slug).to_string();
     if slug.is_empty() {
         String::new()
     } else {
-        format!("pr/{}/{}", draft.pr_type, slug)
+        format!("pr/{pr_type}/{slug}")
     }
+}
+
+/// Single-PR branch name from a draft. Shares `bookmark_from_draft_fields` with
+/// the stacked path so the two can never derive different bookmarks from the
+/// same draft.
+fn branch_from_draft(draft: &GeneratedDraft) -> String {
+    bookmark_from_draft_fields(&draft.pr_type, &draft.branch_slug, &draft.title)
 }
 
 #[cfg(test)]

@@ -603,6 +603,15 @@ pub struct BaseBookmark {
 
 pub type BaseBookmarks = Vec<BaseBookmark>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StackExistingPr {
+    pub head_branch: String,
+    pub state: String,
+    pub url: Option<String>,
+}
+
+pub type StackExistingPrs = Vec<StackExistingPr>;
+
 pub struct BaseBookmarksProbe {
     pub jj_binary: String,
 }
@@ -613,31 +622,34 @@ impl Job for BaseBookmarksProbe {
     }
 
     fn run(self: Box<Self>) -> JobOutcome {
-        // `--ignore-working-copy`: bookmark listing reads only repo refs and
-        // never depends on the working-copy snapshot, so we skip taking one.
-        const TEMPLATE: &str = r#"name() ++ "\t" ++ remote().name() ++ "\n""#;
-        let bookmarks = match Command::new(&self.jj_binary)
-            .args([
-                "--no-pager",
-                "--ignore-working-copy",
-                "bookmark",
-                "list",
-                "--all-remotes",
-                "-T",
-                TEMPLATE,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-        {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                parse_base_bookmarks(&stdout)
-            }
-            _ => Vec::new(),
-        };
-        JobOutcome::Done(Box::new(bookmarks))
+        JobOutcome::Done(Box::new(fetch_base_bookmarks(&self.jj_binary)))
+    }
+}
+
+fn fetch_base_bookmarks(jj_binary: &str) -> BaseBookmarks {
+    // `--ignore-working-copy`: bookmark listing reads only repo refs and
+    // never depends on the working-copy snapshot, so we skip taking one.
+    const TEMPLATE: &str = r#"name() ++ "\t" ++ remote().name() ++ "\n""#;
+    match Command::new(jj_binary)
+        .args([
+            "--no-pager",
+            "--ignore-working-copy",
+            "bookmark",
+            "list",
+            "--all-remotes",
+            "-T",
+            TEMPLATE,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            parse_base_bookmarks(&stdout)
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -660,6 +672,141 @@ fn parse_base_bookmarks(stdout: &str) -> BaseBookmarks {
             })
         })
         .collect()
+}
+
+// ======================== Existing stack PRs ================================
+
+pub struct StackExistingPrsProbe {
+    pub tea_binary: String,
+}
+
+impl Job for StackExistingPrsProbe {
+    fn name(&self) -> &'static str {
+        "probe.stack_existing_prs"
+    }
+
+    fn run(self: Box<Self>) -> JobOutcome {
+        JobOutcome::Done(Box::new(fetch_existing_prs(&self.tea_binary)))
+    }
+}
+
+fn fetch_existing_prs(tea_binary: &str) -> StackExistingPrs {
+    match Command::new(tea_binary)
+        .args(["pr", "list", "--output", "json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            parse_existing_prs(&stdout)
+        }
+        _ => Vec::new(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StackPushPrecheck {
+    pub bookmarks: BaseBookmarks,
+    pub existing_prs: StackExistingPrs,
+}
+
+pub struct StackPushPrecheckJob {
+    pub jj_binary: String,
+    pub tea_binary: String,
+}
+
+impl Job for StackPushPrecheckJob {
+    fn name(&self) -> &'static str {
+        "probe.stack_push_precheck"
+    }
+
+    fn run(self: Box<Self>) -> JobOutcome {
+        JobOutcome::Done(Box::new(StackPushPrecheck {
+            bookmarks: fetch_base_bookmarks(&self.jj_binary),
+            existing_prs: fetch_existing_prs(&self.tea_binary),
+        }))
+    }
+}
+
+fn parse_existing_prs(stdout: &str) -> StackExistingPrs {
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(stdout) else {
+        return Vec::new();
+    };
+    let Some(items) = root.as_array() else {
+        return Vec::new();
+    };
+
+    items.iter().filter_map(parse_existing_pr_item).collect()
+}
+
+fn parse_existing_pr_item(item: &serde_json::Value) -> Option<StackExistingPr> {
+    let obj = item.as_object()?;
+    let head_branch = field_string(
+        obj,
+        &[
+            "head_branch",
+            "headBranch",
+            "head_ref",
+            "headRefName",
+            "source_branch",
+            "sourceBranch",
+            "branch",
+            "head",
+        ],
+    )?;
+    let state = field_string(obj, &["state", "status"]).unwrap_or_default();
+    let url = field_string(obj, &["url", "html_url", "href", "web_url"]);
+    Some(StackExistingPr {
+        head_branch,
+        state,
+        url,
+    })
+}
+
+fn field_string(obj: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(value) = obj.get(*key)
+            && let Some(text) = json_string(value)
+        {
+            return Some(text);
+        }
+    }
+    None
+}
+
+fn json_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => {
+            let text = s.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Array(items) => items.iter().find_map(json_string),
+        serde_json::Value::Object(map) => {
+            for key in [
+                "ref",
+                "name",
+                "label",
+                "title",
+                "value",
+                "url",
+                "text",
+                "state",
+                "head_branch",
+            ] {
+                if let Some(value) = map.get(key)
+                    && let Some(text) = json_string(value)
+                {
+                    return Some(text);
+                }
+            }
+            map.values().find_map(json_string)
+        }
+        serde_json::Value::Null => None,
+    }
 }
 
 // ======================== Repo options =====================================
@@ -797,5 +944,51 @@ mod tests {
         let revsets = parse_revset_log_with_stats(raw);
         assert_eq!(revsets.len(), 1);
         assert_eq!(revsets[0].stats, "");
+    }
+
+    #[test]
+    fn parses_existing_prs_tolerates_string_and_object_fields() {
+        let raw = r#"
+        [
+          {
+            "head_branch": "pr/feat/add-foo",
+            "state": "open",
+            "url": "https://example.com/pulls/1",
+            "ignored": {"nested": true}
+          },
+          {
+            "head_branch": {"name": "pr/fix/rework"},
+            "state": {"title": "merged"},
+            "url": {"html_url": "https://example.com/pulls/2"}
+          },
+          {
+            "head": {"ref": "pr/chore/nested-head", "label": "owner:pr/chore/nested-head"},
+            "status": "closed",
+            "html_url": "https://example.com/pulls/3",
+            "title": "Do not parse title as a branch"
+          },
+          {
+            "state": "open",
+            "title": "Do not parse title-only entries"
+          }
+        ]
+        "#;
+        let prs = parse_existing_prs(raw);
+        assert_eq!(prs.len(), 3);
+        assert_eq!(prs[0].head_branch, "pr/feat/add-foo");
+        assert_eq!(prs[0].state, "open");
+        assert_eq!(prs[0].url.as_deref(), Some("https://example.com/pulls/1"));
+        assert_eq!(prs[1].head_branch, "pr/fix/rework");
+        assert_eq!(prs[1].state, "merged");
+        assert_eq!(prs[1].url.as_deref(), Some("https://example.com/pulls/2"));
+        assert_eq!(prs[2].head_branch, "pr/chore/nested-head");
+        assert_eq!(prs[2].state, "closed");
+        assert_eq!(prs[2].url.as_deref(), Some("https://example.com/pulls/3"));
+    }
+
+    #[test]
+    fn parses_existing_prs_handles_malformed_json() {
+        let prs = parse_existing_prs("{ definitely not json");
+        assert!(prs.is_empty());
     }
 }

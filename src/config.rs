@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{Result, WrapErr};
@@ -158,8 +159,28 @@ impl Config {
 
 /// Where `Config::load` looks for the config file, and where `teatui config
 /// --write` writes the example. `None` when the platform has no config dir.
+///
+/// `XDG_CONFIG_HOME`, when set to an absolute path, wins on every platform —
+/// including Windows and macOS, where `dirs::config_dir()` ignores it (it
+/// returns `%APPDATA%` and `~/Library/Application Support` respectively). This
+/// lets a single XDG layout drive every machine. A relative `XDG_CONFIG_HOME`
+/// is ignored per the XDG Base Directory spec, falling back to the platform dir.
 pub fn default_config_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("teatui").join("config.toml"))
+    config_path_in(std::env::var_os("XDG_CONFIG_HOME"), dirs::config_dir())
+}
+
+/// Resolve the config path from the raw `XDG_CONFIG_HOME` value and the platform
+/// config dir. Split out from the environment lookup so it can be tested without
+/// mutating process-global env vars.
+fn config_path_in(
+    xdg_config_home: Option<OsString>,
+    platform_config_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
+    xdg_config_home
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or(platform_config_dir)
+        .map(|dir| dir.join("teatui").join("config.toml"))
 }
 
 /// An annotated example configuration covering every section, with two example
@@ -371,6 +392,41 @@ api_key = "sk-test"
         let backend = &config.llm.backends[0];
         assert_eq!(backend.api, LlmApi::Openai);
         assert_eq!(backend.api_key.as_deref(), Some("sk-test"));
+    }
+
+    #[test]
+    fn xdg_config_home_absolute_supersedes_platform_dir() {
+        // An absolute XDG_CONFIG_HOME wins even when a platform dir exists —
+        // this is the Windows case where dirs::config_dir() would point at
+        // %APPDATA% but the user keeps config under XDG_CONFIG_HOME.
+        let xdg = std::env::temp_dir().join("xdg-home");
+        let platform = std::env::temp_dir().join("platform-home");
+        let got = config_path_in(Some(xdg.clone().into_os_string()), Some(platform));
+        assert_eq!(got, Some(xdg.join("teatui").join("config.toml")));
+    }
+
+    #[test]
+    fn relative_xdg_config_home_is_ignored() {
+        // The XDG spec says a relative XDG_CONFIG_HOME must be ignored; fall
+        // back to the platform dir rather than resolving it against the cwd.
+        let platform = std::env::temp_dir().join("platform-home");
+        let got = config_path_in(
+            Some(OsString::from("relative/config")),
+            Some(platform.clone()),
+        );
+        assert_eq!(got, Some(platform.join("teatui").join("config.toml")));
+    }
+
+    #[test]
+    fn falls_back_to_platform_dir_without_xdg() {
+        let platform = std::env::temp_dir().join("platform-home");
+        let got = config_path_in(None, Some(platform.clone()));
+        assert_eq!(got, Some(platform.join("teatui").join("config.toml")));
+    }
+
+    #[test]
+    fn no_config_path_when_nothing_resolves() {
+        assert_eq!(config_path_in(None, None), None);
     }
 
     #[test]

@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use crate::runtime::Cached;
 
 use super::probe::{
-    BaseBookmarks, LlmHealth, RepoOptions, RevsetStats, Revsets, TeaAuthStatus, ToolStatus,
-    VersionKind, VersionResult, WorkspaceInfo,
+    BaseBookmarks, LlmHealth, RepoOptions, RevsetStats, Revsets, StackExistingPrs, TeaAuthStatus,
+    ToolStatus, VersionKind, VersionResult, WorkspaceInfo,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -21,6 +21,7 @@ pub struct StatusStore {
     pub backend_health: HashMap<String, Cached<LlmHealth>>,
     pub revsets: Cached<Revsets>,
     pub base_bookmarks: Cached<BaseBookmarks>,
+    pub stack_existing_prs: Cached<StackExistingPrs>,
     pub repo_options: Cached<RepoOptions>,
 }
 
@@ -110,6 +111,14 @@ impl StatusStore {
 
     pub fn set_base_bookmarks(&mut self, bookmarks: BaseBookmarks) {
         self.base_bookmarks.set(bookmarks);
+    }
+
+    pub fn mark_stack_existing_prs_loading(&mut self) {
+        self.stack_existing_prs.mark_loading();
+    }
+
+    pub fn set_stack_existing_prs(&mut self, prs: StackExistingPrs) {
+        self.stack_existing_prs.set(prs);
     }
 
     pub fn mark_repo_options_loading(&mut self) {
