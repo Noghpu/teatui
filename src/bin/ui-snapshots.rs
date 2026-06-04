@@ -8,8 +8,9 @@ use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
 
 use teatui::domain::{
-    BaseBookmark, ChangeContext, ContextBundle, DiffContext, GeneratedDraft, JjOp, JjOpKind,
-    LlmHealth, PromptBuild, PromptManifest, PromptSection, RepoOptions, RevsetSummary, Revsets,
+    BaseBookmark, BulkPhase, ChangeContext, ContextBundle, DiffContext, GeneratedDraft, JjOp,
+    JjOpKind, LlmHealth, PrStatus, PromptBuild, PromptManifest, PromptSection, RepoOptions,
+    RevsetSummary, Revsets, StackDraft, StackIntent, StackPlan, StackPlanItem, StackPrInput,
     StatusStore, TeaAuthStatus, ToolStatus, VersionKind, VersionResult, WorkspaceInfo,
 };
 use teatui::screens::generate::{
@@ -44,6 +45,14 @@ enum SnapshotKind {
     GeneratePickerModal,
     GenerateSmall,
     BackendPicker,
+    GenerateBulkCollecting,
+    GenerateBulkGenerating,
+    GenerateBulkReview,
+    GenerateBulkPushCurrent,
+    GenerateBulkPushDone,
+    GenerateBulkPushFailed,
+    GenerateBulkFailed,
+    GenerateBulkSmall,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -155,6 +164,54 @@ fn snapshot_specs() -> Vec<SnapshotSpec> {
             width: 120,
             height: 30,
             kind: SnapshotKind::BackendPicker,
+        },
+        SnapshotSpec {
+            name: "generate-bulk-collecting",
+            width: 120,
+            height: 30,
+            kind: SnapshotKind::GenerateBulkCollecting,
+        },
+        SnapshotSpec {
+            name: "generate-bulk-generating",
+            width: 120,
+            height: 30,
+            kind: SnapshotKind::GenerateBulkGenerating,
+        },
+        SnapshotSpec {
+            name: "generate-bulk-review",
+            width: 120,
+            height: 30,
+            kind: SnapshotKind::GenerateBulkReview,
+        },
+        SnapshotSpec {
+            name: "generate-bulk-push-current",
+            width: 120,
+            height: 30,
+            kind: SnapshotKind::GenerateBulkPushCurrent,
+        },
+        SnapshotSpec {
+            name: "generate-bulk-push-done",
+            width: 120,
+            height: 30,
+            kind: SnapshotKind::GenerateBulkPushDone,
+        },
+        SnapshotSpec {
+            name: "generate-bulk-push-failed",
+            width: 120,
+            height: 30,
+            kind: SnapshotKind::GenerateBulkPushFailed,
+        },
+        SnapshotSpec {
+            name: "generate-bulk-failed",
+            width: 120,
+            height: 30,
+            kind: SnapshotKind::GenerateBulkFailed,
+        },
+        SnapshotSpec {
+            name: "generate-bulk-small",
+            width: 80,
+            height: 24,
+            kind: SnapshotKind::GenerateBulkSmall,
         },
     ]
 }
@@ -310,6 +367,121 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
             let picker = BackendPicker::new("default", &backends);
             backend_picker::render(&picker, &backends, "default", &status, frame, frame.area());
         }
+        SnapshotKind::GenerateBulkCollecting => {
+            let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
+            state.selected_heads.push("zzzzzzzz".into());
+            state.selected_heads.push("yyyyyyyy".into());
+            state.bulk = BulkPhase::Collecting;
+            state.ensure_field_options_synced(&status);
+            screens::generate::render(&state, &status, frame, frame.area());
+        }
+        SnapshotKind::GenerateBulkGenerating => {
+            let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
+            state.selected_heads.push("zzzzzzzz".into());
+            state.selected_heads.push("yyyyyyyy".into());
+            state.bulk = sample_bulk_generating();
+            state.ensure_field_options_synced(&status);
+            screens::generate::render(&state, &status, frame, frame.area());
+        }
+        SnapshotKind::GenerateBulkReview => {
+            let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
+            state.selected_heads.push("zzzzzzzz".into());
+            state.selected_heads.push("yyyyyyyy".into());
+            let mut plan = sample_stack_plan(2);
+            plan.items[0].title =
+                "Refine stacked review modal focus with a title that wraps naturally".into();
+            state.bulk = BulkPhase::Review {
+                plan,
+                cursor: 0,
+                pushing: None,
+                push_all: false,
+            };
+            state.seed_bulk_editor_from_cursor();
+            state.ensure_field_options_synced(&status);
+            screens::generate::render(&state, &status, frame, frame.area());
+        }
+        SnapshotKind::GenerateBulkPushCurrent => {
+            let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
+            state.selected_heads.push("zzzzzzzz".into());
+            state.selected_heads.push("yyyyyyyy".into());
+            let mut plan = sample_stack_plan(2);
+            plan.items[0].status = PrStatus::Created {
+                url: "https://example.com/pulls/1".into(),
+            };
+            state.bulk = BulkPhase::Review {
+                plan,
+                cursor: 1,
+                pushing: Some(1),
+                push_all: false,
+            };
+            state.seed_bulk_editor_from_cursor();
+            state.ensure_field_options_synced(&status);
+            screens::generate::render(&state, &status, frame, frame.area());
+        }
+        SnapshotKind::GenerateBulkPushDone => {
+            let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
+            state.selected_heads.push("zzzzzzzz".into());
+            state.selected_heads.push("yyyyyyyy".into());
+            let mut plan = sample_stack_plan(2);
+            plan.items[0].status = PrStatus::Created {
+                url: "https://example.com/pulls/1".into(),
+            };
+            plan.items[1].status = PrStatus::Created {
+                url: "https://example.com/pulls/2".into(),
+            };
+            state.bulk = BulkPhase::Review {
+                plan,
+                cursor: 1,
+                pushing: None,
+                push_all: false,
+            };
+            state.seed_bulk_editor_from_cursor();
+            state.ensure_field_options_synced(&status);
+            screens::generate::render(&state, &status, frame, frame.area());
+        }
+        SnapshotKind::GenerateBulkPushFailed => {
+            let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
+            state.selected_heads.push("zzzzzzzz".into());
+            state.selected_heads.push("yyyyyyyy".into());
+            let mut plan = sample_stack_plan(2);
+            plan.items[0].status = PrStatus::Created {
+                url: "https://example.com/pulls/1".into(),
+            };
+            plan.items[1].status = PrStatus::Failed {
+                step: teatui::domain::ExecuteStep::Create,
+                message: "http 400: validation failed".into(),
+            };
+            state.bulk = BulkPhase::Review {
+                plan,
+                cursor: 1,
+                pushing: None,
+                push_all: false,
+            };
+            state.seed_bulk_editor_from_cursor();
+            state.ensure_field_options_synced(&status);
+            screens::generate::render(&state, &status, frame, frame.area());
+        }
+        SnapshotKind::GenerateBulkFailed => {
+            let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
+            state.bulk = BulkPhase::Failed {
+                message: "LLM server unreachable: connection refused".into(),
+            };
+            state.ensure_field_options_synced(&status);
+            screens::generate::render(&state, &status, frame, frame.area());
+        }
+        SnapshotKind::GenerateBulkSmall => {
+            let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
+            state.selected_heads.push("zzzzzzzz".into());
+            state.bulk = BulkPhase::Review {
+                plan: sample_stack_plan(2),
+                cursor: 0,
+                pushing: None,
+                push_all: false,
+            };
+            state.seed_bulk_editor_from_cursor();
+            state.ensure_field_options_synced(&status);
+            screens::generate::render(&state, &status, frame, frame.area());
+        }
     })?;
     Ok(terminal.backend().buffer().clone())
 }
@@ -419,6 +591,7 @@ fn generate_with(phase: GeneratePhase, pane: Pane, field_focus: FieldId) -> Gene
     );
     form.labels.set_values(vec!["ui".into(), "rewrite".into()]);
     form.assignees.set_values(vec!["dev".into()]);
+    use teatui::screens::generate::{BulkItemEditor, BulkReviewFocus};
     GenerateState {
         pane,
         revset_selected: 0,
@@ -431,6 +604,89 @@ fn generate_with(phase: GeneratePhase, pane: Pane, field_focus: FieldId) -> Gene
         phase,
         jj_op_dialog: None,
         last_action: None,
+        selected_heads: Vec::new(),
+        bulk: BulkPhase::Idle,
+        bulk_review_focus: BulkReviewFocus::List,
+        bulk_editor: BulkItemEditor::default(),
+        bulk_list_scroll: std::cell::Cell::new(0),
+    }
+}
+
+fn sample_stack_plan(n: usize) -> StackPlan {
+    let items = (0..n)
+        .map(|i| {
+            let base = if i == 0 {
+                "main".to_string()
+            } else {
+                format!("pr/feat/pr-{}", i - 1)
+            };
+            StackPlanItem {
+                input: StackPrInput {
+                    index: i,
+                    base,
+                    head: format!("head-{i}"),
+                    included_change_ids: vec![format!("ch-{i}")],
+                    subject: format!("Change {i}"),
+                },
+                bookmark: format!("pr/feat/pr-{i}"),
+                title: format!("PR {i}: Feature slice"),
+                description: format!("Description for PR {i}.\n\n## Summary\n- Does something."),
+                status: PrStatus::Pending,
+                warnings: Vec::new(),
+                blockers: Vec::new(),
+            }
+        })
+        .collect();
+    StackPlan {
+        items,
+        labels: vec!["ui".into()],
+        assignees: Vec::new(),
+        milestone: "v1.0".into(),
+        intent: StackIntent {
+            title: "Add feature".into(),
+            description: "Overall goal.".into(),
+            branch: "add-feature".into(),
+        },
+    }
+}
+
+fn sample_bulk_generating() -> BulkPhase {
+    let inputs: Vec<StackPrInput> = (0..3)
+        .map(|i| StackPrInput {
+            index: i,
+            base: if i == 0 {
+                "main".into()
+            } else {
+                format!("pr/feat/pr-{}", i - 1)
+            },
+            head: format!("head-{i}"),
+            included_change_ids: vec![format!("ch-{i}")],
+            subject: format!("Change {i}"),
+        })
+        .collect();
+    let mut drafts = vec![None, None, None];
+    drafts[0] = Some(StackDraft {
+        index: 0,
+        pr_type: "feat".into(),
+        branch_slug: "pr-0".into(),
+        title: "PR 0".into(),
+        description: "Description".into(),
+    });
+    BulkPhase::Generating {
+        prefix: std::sync::Arc::from("PREFIX"),
+        inputs,
+        intent: StackIntent {
+            title: "Add feature".into(),
+            description: "Overall goal.".into(),
+            branch: "add-feature".into(),
+        },
+        labels: vec!["ui".into()],
+        assignees: Vec::new(),
+        milestone: "v1.0".into(),
+        drafts,
+        warnings: vec![Vec::new(), vec!["LLM fallback: timeout".into()], Vec::new()],
+        next: 2,
+        total: 3,
     }
 }
 

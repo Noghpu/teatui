@@ -1,254 +1,487 @@
-# Stacked PR Bulk Bookmark Plan
+# Stacked PR LLM Generation Plan
 
-Source of truth for the **bulk stacked-PR** feature: select several mutable
-changes in the Changes pane, generate slugified bookmarks for each (LLM-drafted),
-then push and open a stacked chain of PRs where each PR targets the previous
-change's bookmark.
+Source of truth for the **full stacked-PR generation** feature. Tier D
+(in-pane jj stack shaping) is already implemented and is treated as foundation,
+not future scope.
 
 Update this doc as decisions evolve. Tickets carved from it live under
 `docs/tickets/open`.
 
 ## Status
 
-- **Phase:** Tier D implemented; Tier A not started.
-- **Scope decision:** full A+B+C (multi-select → LLM slugs → stacked push + PR
-  creation), plus **Tier D** (in-pane jj management). Tiers A, B, and D are
-  shippable checkpoints, not throwaway steps. D is independent of A–C and can
-  land first (it needs no LLM and improves the everyday flow on its own).
+- **Phase:** design locked 2026-06-04; carving implementation tickets.
+- **Implemented foundation:** in-pane jj stack shaping from the Changes pane:
+  squash with below, move above, move below, confirmation/error modals,
+  conflict probing, `jj undo` on introduced conflicts, and a visible
+  `JjMutating` busy phase.
+- **Remaining scope:** the full stacked PR flow: multi-select PR heads ->
+  describe the stack in the existing Form -> batched LLM drafts -> review in a
+  dedicated modal -> bookmark, push, and create PRs as a stacked chain.
+- **Screen decision:** bulk generation is integrated into the existing Generate
+  screen/mode. The default three-pane screen (Changes / Form / Preview) is
+  **unchanged**; bulk is additive. Review + push happen in a **modal overlay**,
+  not by restructuring the main panes.
+
+### Resolved Decisions (2026-06-04)
+
+- **Default view unchanged.** Opening PR-gen still shows Changes / Form /
+  Preview exactly as today. Bulk capability is layered on; no fields are removed
+  and no panes are restructured.
+- **Selection.** In the Changes pane, **`space`** toggles the current row as a
+  selected PR head (multi-select). `space` follows the Gmail/lazygit convention
+  and is free in Changes today. Selected heads render with a distinct marker and
+  a live count; a `G review stack` footer hint appears only when >=1 is selected.
+- **The Form describes the whole stack in bulk.** When >=1 head is selected, the
+  *same* Form fields take a stack-level meaning (the visible multi-selection is
+  the mode signal, so nothing is hidden or greyed):
+  - **title / description / branch** = the overall goal of the stack *as if it
+    were a single PR*. These are **soft guidance** fed to the LLM, not literal
+    per-PR output (see prompt below).
+  - **labels / assignees / milestone** = **shared**, applied to every PR. Labels
+    and milestone are also sent to the LLM as context.
+  - **head** = **derived, read-only** = the oldest selected change (foot of the
+    stack / head of PR 1). Editing is intentionally disabled — `base` plus the
+    selection carry all the flexibility, and an editable head would require
+    invalid-state validation and disabled list rows.
+  - **base** = **editable** (default `main`). This is the lever for manual
+    resume / append: point `base` at an already-pushed bookmark to generate a
+    new batch *on top of* an existing remote stack. `base` + `head` describe the
+    *first PR of this batch*, not necessarily the bottom of the whole remote
+    stack.
+- **LLM call: single batched prompt.** One prompt carries the whole stack (the
+  per-range contexts plus the soft stack-intent block) and the model returns a
+  JSON array, one entry per PR. Needs an array parser with per-row fallback and
+  a diff budget divided across ranges. (Not N looped single-PR calls — the batch
+  is what lets the model keep the per-PR drafts coherent.)
+- **Review / push: a dedicated modal.** `G` opens a modal that shows *loading*
+  while context + LLM run (`Esc` cancels generation). When ready it becomes a
+  two-pane review — **PR list on the left, a per-PR form on the right**
+  (master-detail, mirroring the Changes+Form grammar) — for editing each PR's
+  **title / branch / description**. Push from the modal: **`p`** pushes the
+  highlighted PR, **`P`** pushes the whole stack.
+- **Resume: in-session, manual.** Per-PR push *is* the resume mechanism: push
+  stops on the first failure; fix the cause and press `p` again, or `P` to walk
+  the rest. Earlier PRs must be pushed before later ones (a later PR's base is
+  the earlier PR's bookmark). Nothing is persisted to disk; relaunch starts
+  fresh and re-validates against current repo/server state.
+- **Diff budget (default):** reuse the existing total `CONTEXT_DIFF_BUDGET_BYTES`
+  as a whole-prompt budget divided across ranges, falling back to stat-only for
+  a range whose share drops below a floor.
 
 ## Goal
 
-Today the generate flow is single-change: one `PrForm`, one head/base, one draft,
-one `tea pr create`. The state machine (`GenerateState` / `GeneratePhase`) is
-entirely scalar. This feature adds a parallel bulk flow that operates on N
-selected changes at once and wires them into a **stacked** PR chain:
+The current Generate flow creates one PR from one selected change. The new flow
+lets the user select multiple **PR heads** in the Changes pane and generate a
+stacked chain of PRs. Selected heads do not have to be contiguous. Any
+unselected changes between two selected heads become part of the later PR's
+range.
 
-```
-trunk() ─< c1 ─< c2 ─< c3        (selected, oldest→newest)
-            │     │     │
-   bookmark slug1 slug2 slug3
-       PR  base=trunk  base=slug1  base=slug2
+Example, oldest to newest:
+
+```text
+main, 1, 2, 3, 4, 5
+selected heads: 1, 4
+
+PR 1: base=main, head=1
+PR 2: base=<bookmark for 1>, head=4, includes changes 2..4
+
+change 5 remains outside this app's responsibility for now
 ```
 
-## What we reuse (already built)
+The app does not try to rebase leftover changes after merge. The user shapes
+the stack first with the already-implemented Tier D jj operations, then runs
+the stacked PR generation flow.
+
+## Non-Negotiable Constraints
+
+- **Review before mutate.** No bookmark, push, or PR creation runs until the
+  user is in the review modal and explicitly presses `p` / `P`.
+- **One PR per selected head.** Gaps are included in the next selected head's
+  PR range.
+- **Full LLM drafts.** The batched LLM call returns branch slug, title, and
+  description for each PR.
+- **Refuse existing PRs.** If a selected head/bookmark already appears to have
+  a PR, do not update it. Show a blocking error on that plan item and refuse to
+  push it.
+- **Refuse bookmark collisions.** Detect collisions with proposed bookmarks and
+  existing local/remote bookmarks before push. Fast-fail with a clear error;
+  do not offer automatic suffixes or cleanup.
+- **Green path only.** This tool is convenience automation for ordinary clean
+  stacks. If bookmark/PR state is out of the ordinary, stop and require cleanup
+  through the traditional jj/tea/Gitea paths.
+- **Partial failure is explicit and manually resumable.** Push is sequential and
+  stops on the first failed step, showing which PR/step failed and which
+  previous PRs succeeded (with URLs). The user fixes the cause and re-pushes;
+  the app re-checks state before re-pushing so it does not duplicate work.
+- **Reuse existing command builders.** Bulk push composes the same jj/tea
+  command construction as `ExecutePrJob`, not duplicated shell behavior in
+  screen code.
+- **Responsive while busy.** While context, LLM, or push jobs run, navigation
+  can remain responsive, but mutating actions are blocked and the UI must
+  visibly explain what is running.
+
+## Existing Foundation
 
 | Building block | Location | Reuse |
 |---|---|---|
-| `slugify()` — branch-safe, collapse, 64-char truncate | `domain/bookmark.rs` | direct |
-| `jj bookmark set --allow-backwards <name> -r <change>` | `domain/execute.rs:53` | loop it |
-| `jj git push --bookmark <name>` | `domain/execute.rs:71` | loop it |
-| `tea pr create --base … --head … --title … --description …` | `domain/execute.rs:85` | per change, base chained |
-| Per-change context (subject/body/diff_stat, oldest→newest) | `domain/context.rs` | feeds the slug prompt |
-| Single-draft LLM `{type, branch_slug, title}` + schema | `domain/prompt.rs`, `domain/llm.rs` | extend to an array schema |
-| Changes pane listing + selection + bookmark prefill | `screens/generate.rs` | extend to multi-select |
-| `RevsetSummary` rows (change_id, bookmarks, description, stats) | `domain/probe.rs` | per-change source data |
+| Changes list, cursor, scrolling | `screens/generate.rs` | add selected-head markers |
+| PR Form fields + widgets | `screens/generate/form.rs` | stack-level inputs in bulk; reuse `TextFieldState` in the modal |
+| Tier D stack shaping | `domain/jj_mutate.rs`, Generate screen | user prepares stack before generation |
+| `slugify()` | `domain/bookmark.rs` | fallback / normalized branch slugs |
+| Single PR command flow | `domain/execute.rs` | reuse `ExecutePrJob` step builders for per-PR push |
+| Per-change context collection | `domain/context.rs` | extend for per-range stack context |
+| Prompt building | `domain/prompt.rs` | add batched stacked-PR prompt + stack-intent block |
+| LLM parsing | `domain/llm.rs` | add array parser with per-row fallback |
+| Revset metadata | `domain/probe.rs` | selected head ordering, bookmarks; existing-PR / collision probes |
+| jj op modal | `screens/generate.rs` (`render_jj_op_dialog`) | pattern for the bulk modal overlay |
+| Render smoke contract | `tests/render_smoke.rs` | add every new bulk phase/state |
 
-## Non-negotiable constraints
+## UX Flow
 
-- **Review before mutate.** No bookmark set, push, or PR create runs until the
-  user confirms the full plan. Matches the existing design principle.
-- **Reuse, don't fork.** The bulk job composes the same jj/tea command builders
-  used by `ExecutePrJob`; do not duplicate command construction.
-- **Partial failure is reported, not hidden.** N changes → up to 3N steps. A
-  failure stops the chain (a later PR's base may not exist yet) and the UI shows
-  which step of which change failed and which changes already succeeded.
+### 1. Select PR heads (Changes pane)
 
----
+- `space` toggles the current row as a selected PR head.
+- The cursor (`revset_selected`) and the selected-head set are separate concepts.
+- Selections are stored by `change_id`, not row index, so refreshes/reorders do
+  not corrupt the set. Stale ids (no longer in `StatusStore::revsets`) are
+  dropped on read.
+- The Changes pane is newest-first. The bulk flow derives oldest-to-newest order
+  by reversing the selected heads in display order.
+- Render: a selected-head marker in addition to the cursor marker, plus a live
+  selected count, plus a `G review stack` footer hint shown only when >=1 head
+  is selected.
 
-## Phases
+### 2. Describe the stack (Form pane)
 
-### Tier A — Multi-select + bulk bookmark-only (shippable)
+With >=1 head selected the Form's fields are read as stack-level inputs (no
+layout change; the selection markers are the mode signal):
 
-Select N mutable changes, slugify each from its commit subject, set N bookmarks.
-The selected changes do **not** have to be contiguous. Each selected change is a
-PR head, and any unselected changes between two selected heads are included in
-the later PR's range. Example, oldest→newest stack `main, 1, 2, 3, 4, 5` with
-heads `1` and `4` selected:
+- **head** is forced to the oldest selected change and made read-only, with a
+  `(from selection)` hint.
+- **base** stays editable (default `main`); it is PR 1's base and the
+  resume/append lever.
+- **title / description / branch** are the overall stack intent (soft guidance).
+- **labels / assignees / milestone** are shared across all PRs.
 
-- PR 1: base `main`, head `1`.
-- PR 2: base bookmark from PR 1, head `4`, including changes `2..4`.
-- Change `5` is left alone; rebasing it after merges is outside the app for now.
+### 3. `G` opens the review modal (loading)
 
-No LLM, no push, no PR.
+- `G` from the Changes pane (>=1 head selected, no other job/modal active) opens
+  the bulk modal and starts generation. It first derives PR ranges:
+  - PR 1: `base..oldest_selected`
+  - PR k: `prev_selected..this_selected` (unselected gap changes fold in)
+- Validate before LLM: selected heads still exist; ordered on the stack; the
+  range is non-empty. (Collision / existing-PR checks land before push, step 6.)
+- The modal shows a *loading* state (collecting context, then generating).
+  `Esc` cancels: the modal closes, generation is aborted, the selection is kept.
 
-- **State:** add a selection set to `GenerateState` (e.g. `selected: Vec<usize>`
-  or a `HashSet<change_id>`). Keep the existing `revset_selected` cursor for
-  navigation; selection is layered on top.
-- **Input:** a toggle key (Space) in the Changes pane; "select range" optional.
-  Update `input.rs` and the footer help hints.
-- **Render:** per-row selection markers in `render_menu`; a selection count.
-- **Job:** new `SetBookmarksJob` looping `jj bookmark set` over the selected
-  heads in oldest→newest order. Collision detection across the proposed slugs
-  and against existing local/remote bookmarks happens before running. On
-  collision, refuse, show a warning, offer a suffixed replacement, and let the
-  user retry.
-- **Confirm UI:** a per-change list (change → proposed slug), editable slug,
-  collision flags.
+### 4. Collect stack context
 
-**Risk:** low. Slug source and jj command both already exist.
+One context bundle per PR range, oldest-to-newest. Each includes:
 
-### Tier B — LLM-generated slugs (batched)
+- base expression and head change id
+- selected head subject/body
+- all changes in that range, including unselected gap changes
+- per-range diff stat
+- aggregate diff for the range, budgeted (total budget divided across ranges;
+  stat-only when a range's share is below a floor)
 
-Replace local subject-slugs with one LLM call returning an array.
+Extend `domain/context.rs` rather than forking a parallel command style. Keep
+the snapshot rule: one working-copy snapshot where needed, then read-only
+commands with `--ignore-working-copy`.
 
-- **Prompt:** new template alongside the single-PR one in `domain/prompt.rs`.
-  Output schema becomes an array:
-  `[{ change_index, type, branch_slug, title, description }]`. Reuse the
-  per-change context already collected by `context.rs`.
-- **Parse:** new response parser in `domain/llm.rs` for the array shape, with a
-  **fallback to local slugify** per change if the model omits or malforms a row.
-- **Wiring:** a `GenerateSlugsJob` (LLM) feeding the Tier A confirm list.
+### 5. Generate batched LLM drafts
 
-**Risk:** medium — array prompt design + robust parsing/fallback.
+Add a stacked prompt builder alongside the single-PR prompt. It carries every
+range context plus a **soft stack-intent block** built from the Form's overall
+title / description / branch, instructed roughly as:
 
-### Tier C — Stacked push + PR creation (full feature)
+> **Stack intent (guidance only):** title / description / branch describe the
+> overall goal of the whole stack as if it were a single PR. Use them only to
+> keep each PR's title and description consistent and pointing the same
+> direction. Do **not** copy them verbatim into any PR; each PR must describe
+> its own slice.
 
-Extend execution from "set bookmarks" to the full stacked chain.
+Labels and milestone are included as additional context. The model output is an
+array, one item per PR range:
 
-- **Ordering / base chain:** sort the selection oldest→newest; the first PR's
-  base is the chosen trunk/base, each subsequent PR's base is the previous
-  change's bookmark.
-- **Execution:** extend the bulk job to, per change in order: `bookmark set` →
-  `git push --bookmark` → `tea pr create --base <prev-bookmark>`. Reuse
-  `ExecutePrJob`'s command builders.
-- **Per-PR titles/descriptions:** use the Tier B batched LLM drafts: branch name,
-  title, and description per selected head / PR range.
-- **Existing PRs:** if the stack appears to already have PRs for the target
-  heads/bookmarks, refuse and show an error/warning. Updating existing PRs is
-  out of scope.
-- **Status UI:** a `BulkPhase` (parallel to `GeneratePhase`) tracking per-change
-  step status (pending / bookmarked / pushed / PR-created / failed) and the
-  resulting PR URLs.
+```json
+[
+  {
+    "change_index": 0,
+    "type": "feat",
+    "branch_slug": "add-parser-cache",
+    "title": "Add parser cache",
+    "description": "..."
+  }
+]
+```
 
-**Risk:** medium-high — base-chain correctness and partial-failure recovery
-across N PRs are the fiddly parts.
+Parser requirements:
 
-### Tier D — In-pane jj management (independent, can land first) — done
+- Match rows by `change_index`.
+- If a row is missing or malformed, fill it with local fallbacks:
+  `type = "chore"`, `branch_slug = slugify(subject)`, title from subject,
+  description from the range summary.
+- Normalize branch slugs through `slugify()`; build bookmarks `pr/{type}/{slug}`
+  the same way `branch_from_draft` does for single PRs.
+- One malformed row must not discard valid rows.
 
-Because the feature commits to **one PR per change**, the stack the user picks
-must be the stack they want. Tier D adds minimal, conflict-safe stack editing
-directly in the Changes pane so they can shape it without leaving the app.
+There is no fixed maximum number of selected heads; rely on context budgets,
+truncation, and clear progress/error reporting, not a hard UI cap.
 
-#### Operations
+### 6. Review + push (modal, two-pane)
 
-| Action | Key(s) | jj command (on the cursor's change, by `change_id`) |
-|---|---|---|
-| Squash with below | `s` | `jj squash --from <change> --into <below>` |
-| Move change up | `J` / `Ctrl+Up` / `Ctrl+k` | `jj rebase -r <change> --insert-after <above>` |
-| Move change down | `K` / `Ctrl+Down` / `Ctrl+j` | `jj rebase -r <change> --insert-before <below>` |
+When generation completes the modal becomes a two-pane review that mirrors the
+Changes+Form grammar:
 
-- These operate on the **cursor's single change** (`revset_selected`), *not* the
-  bulk multi-select set from Tier A. Keep the two concepts separate.
-- The Changes menu is **newest-first**. "Above" means the visually previous row
-  toward `@`; "below" means the visually next row toward `trunk()`. The confirm
-  dialog must use those words literally.
-- Operations are inert at the boundaries (squash/move-down on the last row,
-  move-up on the first) and while any job is in flight. Show a popup error for
-  trunk/immutable rows rather than letting an operation target them.
-- Tier D operations are active only in Normal mode, only in the Changes pane,
-  and only when no modal / generation / execution / jj mutation is running.
+- **Left — PR list** (oldest-to-newest): per row the head id/subject, included
+  range, base, generated bookmark, push status, and any blocker/warning marker.
+- **Right — per-PR form**: edit the highlighted PR's **title / branch /
+  description** (reuse `TextFieldState` + undo/redo). `head` and `base` for that
+  PR are read-only; the shared labels/assignees/milestone show in the modal
+  header (read-only here — they were set in the main Form).
+- **Header**: base, PR count, shared-metadata summary, blocker count.
+- **Footer**: contextual keymap (navigate, edit, `p` push current, `P` push all,
+  `Esc` close).
 
-#### Confirmation dialog (new, generic)
+Push (reuses `ExecutePrJob`'s builders per PR):
 
-Each op opens a confirmation modal **before** running. The existing `Confirming`
-phase is PR-execution-specific, so add a generic dialog:
+1. `jj bookmark set --allow-backwards <bookmark> -r <head>`
+2. `jj git push --bookmark <bookmark>`
+3. `tea pr create --base <base> --head <bookmark> --title --description` plus the
+   shared `--labels` / `--assignees` / `--milestone` flags when non-empty.
 
-- New `Option<JjOpDialog>` (or a small modal enum) on `GenerateState`, holding
-  the pending op + a human summary ("Squash `<id> subject` into `<id> subject`?
-  This rewrites both changes."). `Enter` confirms, `Esc` cancels.
-- Render as an overlay; reuse `render_picker_modal`'s centered-box styling
-  (`generate.rs:624`) rather than inventing new modal chrome.
+For PR 1 `<base>` is the Form base; for PR k `<base>` is PR k-1's bookmark. Per
+PR the modal tracks status: `pending` -> `bookmarked` -> `pushed` ->
+`created{url}` -> or `failed{step, message}`.
 
-#### Conflict-safe execution + auto-revert
+- `p` pushes the highlighted PR. It is refused (blocker) if an earlier PR in the
+  chain is not yet `created` (its base bookmark would not exist).
+- `P` walks the stack oldest-to-newest, stopping on the first failure.
+- On failure, completed URLs stay visible; the user fixes the cause and presses
+  `p`/`P` again. Before re-pushing an item the app re-checks its bookmark/PR
+  state so it does not duplicate work. This is the in-session resume.
 
-**Key jj fact:** rebase/squash *never fail on conflict* — jj records the conflict
-as a first-class object inside the commit and the command **succeeds (exit 0)**.
-So exit code tells us nothing; we must probe the result. jj's own docs recommend
-exactly this run-then-`jj undo` pattern, so it's idiomatic, not a workaround.
-([conflicts docs](https://docs.jj-vcs.dev/latest/conflicts/))
+## State Model
 
-1. **Block on pre-existing conflicts** in the relevant stack range. If conflicts
-   already exist, show an error dialog and do not mutate.
-2. **Run** the jj command (squash / rebase). jj rebases descendants
-   automatically and marks any that don't apply cleanly as conflicted. This
-   command snapshots the working copy first (capturing pending edits before the
-   rewrite) — desired here.
-3. **Probe for conflicts** with `--ignore-working-copy` (the snapshot was just
-   taken in step 1; skip the redundant rescan — see the snapshot-cost note
-   below):
-   `jj log --ignore-working-copy -r '<range>' --no-graph -T 'if(self.conflict(), "C", "")'`
-   — any `C` means the op introduced a conflict. For Tier D, derive the smallest
-   useful range from the operation: the moved/squashed change plus affected
-   descendants, at least through the following change. `trunk()..@` remains an
-   acceptable conservative fallback because it matches the displayed list.
-   Note `self.conflict()` is the jj 0.41 template *method*; the bare `conflict`
-   keyword is gone.
-4. **On conflict, revert with `jj undo`** — it reverses exactly the last
-   operation (our rebase/squash) and nothing else, leaving any pre-mutation
-   auto-snapshot intact. Then pop an **error dialog**: the op was reverted
-   because it would conflict. We deliberately do *not* capture an op id up front
-   (`jj op restore`'s job); `jj undo` is the leaner, more idiomatic primitive and
-   needs no snapshot bookkeeping.
-5. On success, dismiss the confirm dialog.
-6. Either way the repo changed, so re-emit `RefreshRevsets` to reload the
-   Changes pane (and invalidate revset stats).
+Keep the existing single-PR flow intact. Add parallel bulk state inside the
+Generate screen rather than a separate screen.
 
-This runs as a new background job `JjMutateJob` in `domain/` (sibling of
-`execute.rs`), returning `Applied | Reverted { reason } | Errored { message }`.
-Keep command construction in the job; the screen only dispatches a `Transition`.
-`jj undo` is considered safe enough for this workflow; keep it simple.
+Recommended shape (planning anchor, not mandatory API):
 
-#### Wiring
+```rust
+pub struct GenerateState {
+    // existing fields ...
+    pub selected_heads: Vec<String>, // change_id; stable set, newest-first display order
+    pub bulk: BulkPhase,
+}
 
-- New `Transition` variants (e.g. `JjOp(JjOp)` carrying squash / move-up /
-  move-down + the target `change_id`), dispatched from `input.rs` in the Menu
-  pane only.
-- App layer submits `JjMutateJob` and maps its outcome to the success-dismiss or
-  error-dialog state.
-- Add a general, obvious in-progress state for jj mutation. While it is active,
-  navigation remains responsive but mutating actions are blocked, and the
-  Preview pane shows what operation is running.
-- Any successful jj operation resets PR generation state back to idle; stack
-  shaping happens before generation/review.
-- Footer help hints + new tests for key handling and boundary inertness.
+pub enum BulkPhase {
+    Idle,
+    Collecting,                 // modal: "Collecting context..."
+    Generating,                 // modal: "Generating drafts..."
+    Review {                    // modal: two-pane review + push
+        plan: StackPlan,
+        cursor: usize,          // highlighted PR
+        pushing: Option<usize>, // index of the PR whose push job is in flight
+    },
+    Failed { message: String }, // collection/generation failure (modal shows error)
+}
+```
 
-**Risk:** medium. `jj undo` revert is reliable. The remaining sharp edge is
-choosing the smallest conflict probe range; `trunk()..@` is conservative and
-matches the current displayed list.
+Use `GeneratePhase` for the scalar PR path and `BulkPhase` for the stack path. A
+helper such as `GenerateState::has_busy_job()` must cover scalar jobs, bulk jobs
+(`Collecting` / `Generating` / `Review { pushing: Some(_), .. }`), and Tier D
+`JjMutating`, so input gates stay consistent. The bulk modal is open whenever
+`bulk` is not `Idle`; while open it captures keys like the existing jj/picker
+modals.
 
----
+## Domain Types
 
-## State-model note (cross-cutting, the real cost)
+Expected additions (keep the landed shape close to this):
 
-The jj/slug mechanics are cheap; the cost is breaking the **scalar single-draft
-state model**. `GenerateState` assumes one `PrForm` / one draft / one head-base.
-Two viable shapes:
+```rust
+pub struct StackIntent {        // overall guidance from the Form, bulk mode
+    pub title: String,
+    pub description: String,
+    pub branch: String,
+}
 
-1. **Parallel `BulkPhase`** inside the generate screen, with a per-change result
-   list rendered in the preview pane. Smaller blast radius; reuses panes.
-2. **Dedicated bulk screen.** Cleaner separation; more new render/input code.
+pub struct StackPrInput {
+    pub index: usize,
+    pub base: String,           // PR 1 = form base; PR k = prev bookmark (filled at plan build)
+    pub head: String,
+    pub included_change_ids: Vec<String>,
+    pub subject: String,
+}
 
-Recommendation: option 1 (parallel phase) to maximize reuse of the existing
-three-pane layout, multi-select living in the Changes pane.
+pub struct StackSelection {     // assembled at `G`, drives context + prompt
+    pub items: Vec<StackPrInput>,
+    pub intent: StackIntent,
+    pub labels: Vec<String>,
+    pub assignees: Vec<String>,
+    pub milestone: String,
+}
 
-Most touched files: `screens/generate.rs` (~1.5k lines), `screens/generate/input.rs`,
-`domain/prompt.rs`, `domain/llm.rs`, `domain/execute.rs` (new bulk job).
+pub struct StackDraft {         // one parsed LLM row
+    pub index: usize,
+    pub pr_type: String,
+    pub branch_slug: String,
+    pub title: String,
+    pub description: String,
+}
 
-## Rough effort
+pub enum PrStatus {
+    Pending,
+    Bookmarked,
+    Pushed,
+    Created { url: String },
+    Failed { step: ExecuteStep, message: String },
+}
 
-- Tier A: ~1 day (low risk).
-- Tier A+B: ~2–2.5 days.
-- Tier A+B+C (full): ~4–5 days (medium-high risk).
-- Tier D (in-pane jj management): ~1.5–2 days (medium risk); independent of A–C.
+pub struct StackPlanItem {
+    pub input: StackPrInput,
+    pub bookmark: String,
+    pub title: String,
+    pub description: String,
+    pub status: PrStatus,
+    pub warnings: Vec<String>,
+    pub blockers: Vec<String>,
+}
 
-## Open questions
+pub struct StackPlan {
+    pub items: Vec<StackPlanItem>,
+    pub labels: Vec<String>,    // shared, applied to every PR's tea create
+    pub assignees: Vec<String>,
+    pub milestone: String,
+    pub intent: StackIntent,
+}
+```
 
-- Tier D conflict probe range can start conservative (`trunk()..@`) but should
-  be tightened if the UX starts surfacing unrelated conflicts too often.
+## Collision And Existing PR Checks
 
-## Post-mortems
+Checks run when the plan is built (entering Review) and again per item just
+before its push. Every bookmark/PR conflict is a fast-fail condition surfaced as
+a `blocker` on the plan item; the app never invents alternative names, updates
+existing PRs, deletes bookmarks, or repairs unusual state.
 
-### Tier D — In-pane jj management
+Check against:
+
+- duplicate generated bookmarks within the plan
+- local bookmarks on `RevsetSummary`
+- remote bookmarks from bookmark probes / `jj bookmark list`
+- existing PRs found by tea (`tea pr list --output json`)
+
+On bookmark collision: refuse the item's push, show a blocker naming the
+colliding bookmark, require manual cleanup/renaming outside this flow.
+
+Existing-PR scenarios:
+
+- **Open PR for the same head bookmark** (main case): refuse, show the existing
+  PR.
+- **Closed/merged PR for the same head bookmark**: out-of-ordinary; refuse.
+- **Remote bookmark without an obvious PR**: treat as a bookmark collision;
+  refuse.
+- **Same change pushed under a different bookmark**: detect only if tea/jj
+  exposes it cheaply; otherwise out of scope for v1.
+
+Blocked items keep their blocker visible and cannot be pushed until the user
+resolves the state and regenerates / re-checks.
+
+## Input Summary
+
+Changes pane:
+
+- `space` — toggle selected head
+- `G` — open the review modal and generate from selected heads (>=1 selected)
+- existing `Enter` (focus Form), `r` (refresh), `s` / `J` / `K` (Tier D) keep
+  their meaning; Tier D keys stay active only when no bulk/scalar job is running
+
+Review modal:
+
+- `up` / `down` / `j` / `k` — move the PR-list cursor (swaps the right form)
+- `Enter` / `i` — edit the focused per-PR field (same as the main Form)
+- `p` — push the highlighted PR; `P` — push the whole stack
+- `Esc` — cancel generation (while loading) or close the modal (keeps selection)
+
+Pane navigation on the main screen stays on the existing arrow / `h` / `l`
+bindings.
+
+## Rendering Summary
+
+Changes pane:
+
+- cursor marker + selected-head marker + selected count
+- `G review stack` footer hint when >=1 head selected
+- busy/disabled visual when a job blocks mutation
+
+Form pane (bulk mode): `head` shown read-only with `(from selection)`; other
+fields unchanged.
+
+Bulk modal:
+
+- loading / generating: status + selected count, `Esc cancel`
+- review: header (base, count, shared metadata, blocker count); left PR list
+  (blockers/warnings first per row, push status badges); right per-PR form
+- push in flight: the active PR's step; completed PRs show URLs
+- done: all URLs in stack order; failed: failed PR/step plus completed URLs
+
+## Tests
+
+Unit:
+
+- selection toggles by change id and survives reorder/refresh; stale ids dropped
+- ranges derive oldest-to-newest with gaps folded into the later PR
+- derived head = oldest selected; base passes through from the Form
+- batched parser accepts valid arrays and falls back per malformed row; one bad
+  row does not discard valid rows
+- stacked prompt includes the soft stack-intent block and shared labels/milestone
+- bookmark/existing-PR collision detection maps to blockers
+- `p` is refused when an earlier PR is not yet created (ordering blocker)
+- `P` stops on the first failed step; completed items keep their URLs
+- input gates block Tier D / scalar / bulk mutations while any job is in flight
+
+Render smoke:
+
+- Changes pane with zero, one, and multiple selected heads
+- bulk modal: loading, generating, review, pushing, done, failed
+- review with a bookmark-collision blocker and with an existing-PR blocker
+- small terminal floor for every bulk modal state
+
+Verification: `just verify` for handoff; `just snapshots` after UI changes.
+
+## Implementation Order
+
+One feature, landed as reviewable slices. Data-only slices (context, prompt,
+parser, checks) are independently testable without UI.
+
+1. **Selection + ranges + types.** `selected_heads` set, `space` toggle, Changes
+   markers/count/footer hint, the `Stack*` domain types, and pure stack-range
+   derivation with tests. No generation yet.
+2. **Stack context collection.** Per-range bundles in `domain/context.rs` with
+   budget division; data-only + tests.
+3. **Batched prompt + array parser.** Stacked prompt builder with the
+   stack-intent block (`domain/prompt.rs`) and the per-row-fallback array parser
+   (`domain/llm.rs`); data-only + tests.
+4. **Review modal + Form bulk semantics + `G` wiring.** `BulkPhase`, the modal
+   (loading/generating/review with master-detail per-PR editing), derived
+   read-only head, and `G` assembling the `StackSelection` and running slices
+   2-3. Read-only review (no push yet). Render smoke + snapshots.
+5. **Collision / existing-PR checks.** Bookmark + `tea pr list` probes/parsers
+   and plan-item blockers shown in the modal.
+6. **Push.** Per-PR (`p`) and whole-stack (`P`) push reusing `ExecutePrJob`
+   builders, per-item status, ordering blocker, stop-on-first-failure, in-session
+   re-push resume; push UI + done/failed states; render smoke + snapshots.
+
+Each slice keeps `just verify` green.
+
+## Open Questions For User
+
+_None outstanding._
+
+## Completed Foundation Post-Mortem
+
+### Tier D - In-pane jj management
 
 - Added conflict-safe jj stack shaping from the Changes pane:
   `s` squashes the selected row into the visual row below, `J` / `Ctrl+Up` /
@@ -268,5 +501,5 @@ Most touched files: `screens/generate.rs` (~1.5k lines), `screens/generate/input
   and refresh revsets.
 - Tests added for command construction, input fallback keys, boundary/error
   behavior, render smoke for `JjMutating`, and confirm/error dialogs. Snapshot
-  generation now includes the new jj surfaces.
+  generation includes the jj surfaces.
 - Verification: `just verify` green; `just snapshots` writes 12 artifacts.
