@@ -1,16 +1,20 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::domain::JjOpKind;
 use crate::domain::StatusStore;
+use crate::domain::{BulkPhase, JjOpKind};
 use crate::screens::{NewScreen, Transition};
 
 use super::form::{FieldKind, FieldState, InputMode};
 use super::{
-    GeneratePhase, GenerateState, JjOpDialog, Pane, current_revset_count, open_jj_op_dialog,
-    update_head_from_selection,
+    BulkItemField, BulkReviewFocus, GeneratePhase, GenerateState, JjOpDialog, Pane,
+    current_revset_count, open_jj_op_dialog, update_head_from_selection,
 };
 
 pub fn on_key(state: &mut GenerateState, status: &StatusStore, key: KeyEvent) -> Transition {
+    // The bulk modal captures all keys while open (mirrors the jj/picker modals).
+    if !matches!(state.bulk, BulkPhase::Idle) {
+        return on_bulk_modal_key(state, key);
+    }
     if state.jj_op_dialog.is_some() {
         return on_jj_dialog_key(state, key);
     }
@@ -48,7 +52,7 @@ pub fn on_key(state: &mut GenerateState, status: &StatusStore, key: KeyEvent) ->
         // Generation needs only the jj range (head/base), which `start_generation`
         // guards. The form's title/branch/etc. are what the LLM fills in, so don't
         // force the user to populate them first — an empty form is fine here.
-        (KeyCode::Char('g'), false) if !state.is_in_progress() && state.pane != Pane::Menu => {
+        (KeyCode::Char('g'), false) if !state.has_busy_job() && state.pane != Pane::Menu => {
             Transition::Generate
         }
         // Undo/redo of the form. `u`/`r` work on the whole form (so the LLM
@@ -56,22 +60,22 @@ pub fn on_key(state: &mut GenerateState, status: &StatusStore, key: KeyEvent) ->
         // highlighted field on its own. Both live in the Form and Preview panes
         // — never the Menu, where `r` already refreshes the change list.
         (KeyCode::Char('u'), false)
-            if matches!(state.pane, Pane::Form | Pane::Preview) && !state.is_in_progress() =>
+            if matches!(state.pane, Pane::Form | Pane::Preview) && !state.has_busy_job() =>
         {
             let changed = state.form.undo();
             undo_redo(state, changed, "undid form change")
         }
         (KeyCode::Char('r'), false)
-            if matches!(state.pane, Pane::Form | Pane::Preview) && !state.is_in_progress() =>
+            if matches!(state.pane, Pane::Form | Pane::Preview) && !state.has_busy_job() =>
         {
             let changed = state.form.redo();
             undo_redo(state, changed, "redid form change")
         }
-        (KeyCode::Char('U'), false) if state.pane == Pane::Form && !state.is_in_progress() => {
+        (KeyCode::Char('U'), false) if state.pane == Pane::Form && !state.has_busy_job() => {
             let changed = state.form.undo_field(state.field_focus);
             undo_redo(state, changed, "undid field")
         }
-        (KeyCode::Char('R'), false) if state.pane == Pane::Form && !state.is_in_progress() => {
+        (KeyCode::Char('R'), false) if state.pane == Pane::Form && !state.has_busy_job() => {
             let changed = state.form.redo_field(state.field_focus);
             undo_redo(state, changed, "redid field")
         }
@@ -100,16 +104,35 @@ pub fn on_key(state: &mut GenerateState, status: &StatusStore, key: KeyEvent) ->
             Transition::Dirty
         }
         (KeyCode::Char('r'), false) if state.pane == Pane::Menu => Transition::RefreshRevsets,
-        (KeyCode::Char('s'), false) if state.pane == Pane::Menu && !state.is_in_progress() => {
+        // `G` (capital) opens the stacked-PR review modal when >= 1 head is
+        // selected and no job is running.
+        (KeyCode::Char('G'), false)
+            if state.pane == Pane::Menu
+                && !state.has_busy_job()
+                && !state.selected_heads.is_empty() =>
+        {
+            Transition::GenerateStack
+        }
+        (KeyCode::Char(' '), false) if state.pane == Pane::Menu && !state.has_busy_job() => {
+            if let Some(crate::domain::Revsets::Loaded(items)) = status.revsets.value()
+                && let Some(item) = items.get(state.revset_selected)
+            {
+                let change_id = item.change_id.clone();
+                state.toggle_selected_head(&change_id);
+                return Transition::Dirty;
+            }
+            Transition::None
+        }
+        (KeyCode::Char('s'), false) if state.pane == Pane::Menu && !state.has_busy_job() => {
             open_jj_op_dialog(state, status, JjOpKind::SquashWithBelow)
         }
         (KeyCode::Char('J'), false) | (KeyCode::Up, true) | (KeyCode::Char('k'), true)
-            if state.pane == Pane::Menu && !state.is_in_progress() =>
+            if state.pane == Pane::Menu && !state.has_busy_job() =>
         {
             open_jj_op_dialog(state, status, JjOpKind::MoveUp)
         }
         (KeyCode::Char('K'), false) | (KeyCode::Down, true) | (KeyCode::Char('j'), true)
-            if state.pane == Pane::Menu && !state.is_in_progress() =>
+            if state.pane == Pane::Menu && !state.has_busy_job() =>
         {
             open_jj_op_dialog(state, status, JjOpKind::MoveDown)
         }
@@ -144,6 +167,10 @@ pub fn on_key(state: &mut GenerateState, status: &StatusStore, key: KeyEvent) ->
             Transition::Dirty
         }
         (KeyCode::Char('i'), false) | (KeyCode::Enter, _) if state.pane == Pane::Form => {
+            // In bulk mode the `head` field is derived/read-only: refuse editing.
+            if !state.selected_heads.is_empty() && state.field_focus == super::FieldId::Head {
+                return Transition::None;
+            }
             state.form.field_mut(state.field_focus).begin_edit();
             state.input_mode = InputMode::Editing;
             Transition::Dirty
@@ -159,6 +186,186 @@ pub fn on_key(state: &mut GenerateState, status: &StatusStore, key: KeyEvent) ->
         }
         _ => Transition::None,
     }
+}
+
+/// Handle keys while the bulk modal is open. This captures all keys so the
+/// underlying panes never see them.
+fn on_bulk_modal_key(state: &mut GenerateState, key: KeyEvent) -> Transition {
+    match &state.bulk {
+        BulkPhase::Collecting | BulkPhase::Generating { .. } => {
+            // Only Esc is meaningful: cancel the in-flight generation.
+            if key.code == KeyCode::Esc {
+                return Transition::CancelStack;
+            }
+            Transition::None
+        }
+        BulkPhase::Failed { .. } => {
+            // Esc or Enter closes the failed modal.
+            if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+                state.bulk = BulkPhase::Idle;
+                return Transition::Dirty;
+            }
+            Transition::None
+        }
+        BulkPhase::Review { .. } => on_bulk_review_key(state, key),
+        BulkPhase::Idle => Transition::None,
+    }
+}
+
+fn on_bulk_review_key(state: &mut GenerateState, key: KeyEvent) -> Transition {
+    // While a push is in flight the modal stays responsive for *navigation* so
+    // the user can keep inspecting the stack, but every mutating or
+    // modal-closing action is disabled — closing or re-pushing now would
+    // conflict with the running job.
+    if matches!(
+        state.bulk,
+        BulkPhase::Review {
+            pushing: Some(_),
+            ..
+        }
+    ) {
+        return match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if state.bulk_review_focus == BulkReviewFocus::Preview {
+                    move_bulk_field_focus(state, -1);
+                } else {
+                    move_bulk_cursor(state, -1);
+                }
+                Transition::Dirty
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if state.bulk_review_focus == BulkReviewFocus::Preview {
+                    move_bulk_field_focus(state, 1);
+                } else {
+                    move_bulk_cursor(state, 1);
+                }
+                Transition::Dirty
+            }
+            _ => Transition::None,
+        };
+    }
+    // If currently editing a per-PR field, route to the editor.
+    if state.bulk_editor.editing {
+        return on_bulk_editor_key(state, key);
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            if state.bulk_review_focus == BulkReviewFocus::Preview {
+                state.bulk_review_focus = BulkReviewFocus::List;
+            } else {
+                // Flush edits to plan then close.
+                state.flush_bulk_editor_to_plan();
+                state.bulk = BulkPhase::Idle;
+            }
+            Transition::Dirty
+        }
+        KeyCode::Char('p') => {
+            state.flush_bulk_editor_to_plan();
+            let index = match &state.bulk {
+                BulkPhase::Review { cursor, .. } => *cursor,
+                _ => return Transition::None,
+            };
+            Transition::PushStackPr(index)
+        }
+        KeyCode::Char('P') => {
+            state.flush_bulk_editor_to_plan();
+            Transition::PushStackAll
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if state.bulk_review_focus == BulkReviewFocus::Preview {
+                move_bulk_field_focus(state, -1);
+            } else {
+                move_bulk_cursor(state, -1);
+            }
+            Transition::Dirty
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if state.bulk_review_focus == BulkReviewFocus::Preview {
+                move_bulk_field_focus(state, 1);
+            } else {
+                move_bulk_cursor(state, 1);
+            }
+            Transition::Dirty
+        }
+        KeyCode::Enter if state.bulk_review_focus == BulkReviewFocus::List => {
+            state.flush_bulk_editor_to_plan();
+            state.seed_bulk_editor_from_cursor();
+            state.bulk_review_focus = BulkReviewFocus::Preview;
+            Transition::Dirty
+        }
+        KeyCode::Char('i') | KeyCode::Enter
+            if state.bulk_review_focus == BulkReviewFocus::Preview =>
+        {
+            // Begin editing the focused per-PR field.
+            state.bulk_editor.editing = true;
+            let f = state.bulk_editor.field_focus;
+            state.bulk_editor.field_mut(f).begin_edit();
+            Transition::Dirty
+        }
+        KeyCode::Tab => {
+            // Move field focus within the per-PR form.
+            if state.bulk_review_focus == BulkReviewFocus::Preview {
+                let next = state.bulk_editor.field_focus.next();
+                state.bulk_editor.field_focus = next;
+            }
+            Transition::Dirty
+        }
+        KeyCode::BackTab => {
+            if state.bulk_review_focus == BulkReviewFocus::Preview {
+                let prev = state.bulk_editor.field_focus.prev();
+                state.bulk_editor.field_focus = prev;
+            }
+            Transition::Dirty
+        }
+        _ => Transition::None,
+    }
+}
+
+fn on_bulk_editor_key(state: &mut GenerateState, key: KeyEvent) -> Transition {
+    let f = state.bulk_editor.field_focus;
+    let multiline = f == BulkItemField::Description;
+    let commit = key.code == KeyCode::Esc || (!multiline && key.code == KeyCode::Enter);
+
+    if commit {
+        state.bulk_editor.field_mut(f).commit();
+        state.bulk_editor.editing = false;
+        // Write the edit back into the plan so the list row updates.
+        state.flush_bulk_editor_to_plan();
+    } else {
+        state.bulk_editor.field_mut(f).input(key);
+    }
+    Transition::Dirty
+}
+
+fn move_bulk_field_focus(state: &mut GenerateState, delta: isize) {
+    state.bulk_editor.field_focus = if delta < 0 {
+        state.bulk_editor.field_focus.prev()
+    } else {
+        state.bulk_editor.field_focus.next()
+    };
+}
+
+/// Move the bulk review cursor by `delta`. Flushes current edits to the plan,
+/// moves the cursor, then re-seeds the editor from the new item.
+fn move_bulk_cursor(state: &mut GenerateState, delta: isize) {
+    // Flush any in-progress edits.
+    if state.bulk_editor.editing {
+        let f = state.bulk_editor.field_focus;
+        state.bulk_editor.field_mut(f).commit();
+        state.bulk_editor.editing = false;
+    }
+    state.flush_bulk_editor_to_plan();
+
+    if let BulkPhase::Review { plan, cursor, .. } = &mut state.bulk {
+        let n = plan.items.len();
+        if n == 0 {
+            return;
+        }
+        let next = (*cursor as isize + delta).clamp(0, (n as isize) - 1) as usize;
+        *cursor = next;
+    }
+    state.seed_bulk_editor_from_cursor();
 }
 
 fn on_jj_dialog_key(state: &mut GenerateState, key: KeyEvent) -> Transition {
@@ -180,7 +387,7 @@ fn on_jj_dialog_key(state: &mut GenerateState, key: KeyEvent) -> Transition {
 /// in the Preview pane when something actually changed.
 fn undo_redo(state: &mut GenerateState, changed: bool, hint: &'static str) -> Transition {
     if changed {
-        state.last_action = Some(hint);
+        state.last_action = Some(hint.to_string());
         Transition::Dirty
     } else {
         Transition::None
@@ -307,6 +514,11 @@ mod tests {
             },
             jj_op_dialog: None,
             last_action: None,
+            selected_heads: Vec::new(),
+            bulk: crate::domain::BulkPhase::Idle,
+            bulk_review_focus: crate::screens::generate::BulkReviewFocus::List,
+            bulk_editor: crate::screens::generate::BulkItemEditor::default(),
+            bulk_list_scroll: std::cell::Cell::new(0),
         }
     }
 
@@ -481,6 +693,37 @@ mod tests {
     }
 
     #[test]
+    fn space_toggles_selected_head_in_changes_pane() {
+        let status = status_with_two_revsets();
+        let mut state = draft_state();
+        state.phase = GeneratePhase::Idle;
+        state.pane = Pane::Menu;
+        state.revset_selected = 0;
+
+        // First press: select "new"
+        let transition = on_key(&mut state, &status, key(KeyCode::Char(' ')));
+        assert!(matches!(transition, Transition::Dirty));
+        assert!(state.selected_heads.contains(&"new".to_string()));
+
+        // Second press: deselect "new"
+        let transition = on_key(&mut state, &status, key(KeyCode::Char(' ')));
+        assert!(matches!(transition, Transition::Dirty));
+        assert!(!state.selected_heads.contains(&"new".to_string()));
+    }
+
+    #[test]
+    fn space_is_blocked_while_job_is_in_progress() {
+        let status = status_with_two_revsets();
+        let mut state = draft_state();
+        state.phase = GeneratePhase::Collecting;
+        state.pane = Pane::Menu;
+
+        let transition = on_key(&mut state, &status, key(KeyCode::Char(' ')));
+        assert!(matches!(transition, Transition::None));
+        assert!(state.selected_heads.is_empty());
+    }
+
+    #[test]
     fn jj_ops_are_blocked_while_jj_mutation_is_running() {
         let status = status_with_two_revsets();
         let mut state = draft_state();
@@ -494,5 +737,243 @@ mod tests {
 
         assert!(matches!(transition, Transition::None));
         assert!(state.jj_op_dialog.is_none());
+    }
+
+    #[test]
+    fn p_requests_push_for_the_current_review_row() {
+        let mut state = draft_state();
+        state.bulk = BulkPhase::Review {
+            plan: crate::domain::StackPlan {
+                items: vec![
+                    crate::domain::StackPlanItem {
+                        input: crate::domain::StackPrInput {
+                            index: 0,
+                            base: "main".into(),
+                            head: "a".into(),
+                            included_change_ids: vec!["a".into()],
+                            subject: "A".into(),
+                        },
+                        bookmark: "pr/feat/a".into(),
+                        title: "A".into(),
+                        description: "Body".into(),
+                        status: crate::domain::PrStatus::Created {
+                            url: "https://example.com/1".into(),
+                        },
+                        warnings: Vec::new(),
+                        blockers: Vec::new(),
+                    },
+                    crate::domain::StackPlanItem {
+                        input: crate::domain::StackPrInput {
+                            index: 1,
+                            base: "pr/feat/a".into(),
+                            head: "b".into(),
+                            included_change_ids: vec!["b".into()],
+                            subject: "B".into(),
+                        },
+                        bookmark: "pr/feat/b".into(),
+                        title: "B".into(),
+                        description: "Body".into(),
+                        status: crate::domain::PrStatus::Pending,
+                        warnings: Vec::new(),
+                        blockers: Vec::new(),
+                    },
+                ],
+                labels: Vec::new(),
+                assignees: Vec::new(),
+                milestone: String::new(),
+                intent: crate::domain::StackIntent {
+                    title: String::new(),
+                    description: String::new(),
+                    branch: String::new(),
+                },
+            },
+            cursor: 1,
+            pushing: None,
+            push_all: false,
+        };
+
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Char('p')));
+        assert!(matches!(transition, Transition::PushStackPr(1)));
+    }
+
+    #[test]
+    fn enter_from_bulk_review_list_focuses_preview_without_editing() {
+        let mut state = two_item_review(None);
+        state.bulk_review_focus = BulkReviewFocus::List;
+
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Enter));
+
+        assert!(matches!(transition, Transition::Dirty));
+        assert_eq!(state.bulk_review_focus, BulkReviewFocus::Preview);
+        assert!(!state.bulk_editor.editing);
+    }
+
+    #[test]
+    fn second_enter_from_bulk_review_preview_starts_field_editing() {
+        let mut state = two_item_review(None);
+        state.bulk_review_focus = BulkReviewFocus::List;
+
+        let first = on_key(&mut state, &StatusStore::new(), key(KeyCode::Enter));
+        let second = on_key(&mut state, &StatusStore::new(), key(KeyCode::Enter));
+
+        assert!(matches!(first, Transition::Dirty));
+        assert!(matches!(second, Transition::Dirty));
+        assert_eq!(state.bulk_review_focus, BulkReviewFocus::Preview);
+        assert!(state.bulk_editor.editing);
+    }
+
+    #[test]
+    fn esc_from_bulk_review_preview_returns_to_list() {
+        let mut state = two_item_review(None);
+        state.bulk_review_focus = BulkReviewFocus::Preview;
+
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Esc));
+
+        assert!(matches!(transition, Transition::Dirty));
+        assert_eq!(state.bulk_review_focus, BulkReviewFocus::List);
+        assert!(matches!(state.bulk, BulkPhase::Review { .. }));
+    }
+
+    #[test]
+    fn shift_p_requests_push_all() {
+        let mut state = draft_state();
+        state.bulk = BulkPhase::Review {
+            plan: crate::domain::StackPlan {
+                items: Vec::new(),
+                labels: Vec::new(),
+                assignees: Vec::new(),
+                milestone: String::new(),
+                intent: crate::domain::StackIntent {
+                    title: String::new(),
+                    description: String::new(),
+                    branch: String::new(),
+                },
+            },
+            cursor: 0,
+            pushing: None,
+            push_all: false,
+        };
+
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Char('P')));
+        assert!(matches!(transition, Transition::PushStackAll));
+    }
+
+    #[test]
+    fn bulk_review_mutation_is_ignored_while_push_is_running() {
+        let mut state = draft_state();
+        state.bulk = BulkPhase::Review {
+            plan: crate::domain::StackPlan {
+                items: Vec::new(),
+                labels: Vec::new(),
+                assignees: Vec::new(),
+                milestone: String::new(),
+                intent: crate::domain::StackIntent {
+                    title: String::new(),
+                    description: String::new(),
+                    branch: String::new(),
+                },
+            },
+            cursor: 0,
+            pushing: Some(0),
+            push_all: true,
+        };
+
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Char('p')));
+        assert!(matches!(transition, Transition::None));
+    }
+
+    /// Build a two-item review plan for push-time navigation tests.
+    fn two_item_review(pushing: Option<usize>) -> GenerateState {
+        use crate::domain::{PrStatus, StackIntent, StackPlan, StackPlanItem, StackPrInput};
+        let item = |index: usize| StackPlanItem {
+            input: StackPrInput {
+                index,
+                base: if index == 0 {
+                    "main".into()
+                } else {
+                    "pr/feat/0".into()
+                },
+                head: format!("h{index}"),
+                included_change_ids: vec![format!("h{index}")],
+                subject: format!("S{index}"),
+            },
+            bookmark: format!("pr/feat/{index}"),
+            title: format!("T{index}"),
+            description: "Body".into(),
+            status: PrStatus::Pending,
+            warnings: Vec::new(),
+            blockers: Vec::new(),
+        };
+        let mut state = draft_state();
+        state.bulk = BulkPhase::Review {
+            plan: StackPlan {
+                items: vec![item(0), item(1)],
+                labels: Vec::new(),
+                assignees: Vec::new(),
+                milestone: String::new(),
+                intent: StackIntent {
+                    title: String::new(),
+                    description: String::new(),
+                    branch: String::new(),
+                },
+            },
+            cursor: 0,
+            pushing,
+            push_all: pushing.is_some(),
+        };
+        state.seed_bulk_editor_from_cursor();
+        state
+    }
+
+    #[test]
+    fn bulk_review_navigation_stays_live_while_push_is_running() {
+        let mut state = two_item_review(Some(0));
+
+        // `j` moves the list cursor even though PR 0's push is in flight, and the
+        // in-flight push is left untouched.
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Char('j')));
+        assert!(matches!(transition, Transition::Dirty));
+        let BulkPhase::Review {
+            cursor, pushing, ..
+        } = &state.bulk
+        else {
+            panic!("expected review phase");
+        };
+        assert_eq!(*cursor, 1, "navigation must move the cursor during a push");
+        assert_eq!(
+            *pushing,
+            Some(0),
+            "navigation must not disturb the in-flight push"
+        );
+    }
+
+    #[test]
+    fn bulk_review_mutating_and_closing_keys_are_disabled_during_push() {
+        for code in [
+            KeyCode::Char('p'),
+            KeyCode::Char('P'),
+            KeyCode::Char('i'),
+            KeyCode::Enter,
+            KeyCode::Esc,
+        ] {
+            let mut state = two_item_review(Some(0));
+            let transition = on_key(&mut state, &StatusStore::new(), key(code));
+            assert!(
+                matches!(transition, Transition::None),
+                "{code:?} must be ignored while a push is running"
+            );
+            // The modal stays open with the push still active.
+            assert!(matches!(
+                state.bulk,
+                BulkPhase::Review {
+                    pushing: Some(0),
+                    ..
+                }
+            ));
+            assert!(
+                !state.bulk_editor.editing,
+                "{code:?} must not start editing"
+            );
+        }
     }
 }

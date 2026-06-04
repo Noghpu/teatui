@@ -13,8 +13,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 
 use crate::domain::{
-    ContextBundle, ExecuteStep, GeneratedDraft, JjOp, JjOpKind, PromptBuild, RevsetSummary,
-    Revsets, StatusStore,
+    BulkPhase, ContextBundle, ExecuteStep, GeneratedDraft, JjOp, JjOpKind, PromptBuild,
+    RevsetSummary, Revsets, StackPlanItem, StatusStore,
 };
 use crate::runtime::Cached;
 
@@ -192,6 +192,106 @@ fn quote_arg(value: &str) -> String {
     }
 }
 
+/// Per-PR editing state inside the bulk review modal.
+/// Reuses three `TextFieldState` for title, branch, and description.
+#[derive(Debug, Clone)]
+pub struct BulkItemEditor {
+    pub title: form::TextFieldState,
+    pub branch: form::TextFieldState,
+    pub description: form::TextFieldState,
+    /// Which field is focused in the per-PR form.
+    pub field_focus: BulkItemField,
+    /// True when the user is actively editing a field.
+    pub editing: bool,
+}
+
+impl Default for BulkItemEditor {
+    fn default() -> Self {
+        Self {
+            title: form::TextFieldState::new(String::new(), false),
+            branch: form::TextFieldState::new(String::new(), false),
+            description: form::TextFieldState::new(String::new(), true),
+            field_focus: BulkItemField::Title,
+            editing: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BulkItemField {
+    #[default]
+    Title,
+    Branch,
+    Description,
+}
+
+impl BulkItemField {
+    fn next(self) -> Self {
+        match self {
+            BulkItemField::Title => BulkItemField::Branch,
+            BulkItemField::Branch => BulkItemField::Description,
+            BulkItemField::Description => BulkItemField::Description,
+        }
+    }
+
+    fn prev(self) -> Self {
+        match self {
+            BulkItemField::Title => BulkItemField::Title,
+            BulkItemField::Branch => BulkItemField::Title,
+            BulkItemField::Description => BulkItemField::Branch,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            BulkItemField::Title => "title",
+            BulkItemField::Branch => "branch",
+            BulkItemField::Description => "description",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BulkReviewFocus {
+    #[default]
+    List,
+    Preview,
+}
+
+impl BulkItemEditor {
+    pub fn from_plan_item(item: &StackPlanItem) -> Self {
+        Self {
+            title: form::TextFieldState::new(item.title.clone(), false),
+            branch: form::TextFieldState::new(item.bookmark.clone(), false),
+            description: form::TextFieldState::new(item.description.clone(), true),
+            field_focus: BulkItemField::Title,
+            editing: false,
+        }
+    }
+
+    pub fn commit_to_plan_item(&self, item: &mut StackPlanItem) {
+        item.title = self.title.value.clone();
+        item.bookmark = self.branch.value.clone();
+        item.description = self.description.value.clone();
+    }
+
+    fn field(&self, f: BulkItemField) -> &form::TextFieldState {
+        match f {
+            BulkItemField::Title => &self.title,
+            BulkItemField::Branch => &self.branch,
+            BulkItemField::Description => &self.description,
+        }
+    }
+
+    fn field_mut(&mut self, f: BulkItemField) -> &mut form::TextFieldState {
+        match f {
+            BulkItemField::Title => &mut self.title,
+            BulkItemField::Branch => &mut self.branch,
+            BulkItemField::Description => &mut self.description,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct GenerateState {
     pub pane: Pane,
@@ -207,7 +307,24 @@ pub struct GenerateState {
     pub form: PrForm,
     pub phase: GeneratePhase,
     pub jj_op_dialog: Option<JjOpDialog>,
-    pub last_action: Option<&'static str>,
+    pub last_action: Option<String>,
+    /// Selected PR heads, stored by `change_id` in the order they were toggled.
+    /// The stored order is not load-bearing: consumers re-derive a stable
+    /// oldest-to-newest order from the revsets list (see `selected_heads_present`
+    /// and `derive_stack_ranges`). Stale ids (no longer in
+    /// `StatusStore::revsets`) are dropped on read.
+    pub selected_heads: Vec<String>,
+    /// Phase of the bulk stacked-PR flow. Only `Idle` is active in slice 1.
+    pub bulk: BulkPhase,
+    /// Active side of the bulk review modal. Selecting a list row moves focus
+    /// to Preview; editing only starts from Preview focus.
+    pub bulk_review_focus: BulkReviewFocus,
+    /// Per-PR editor state for the bulk review modal. Seeded from the
+    /// highlighted `StackPlanItem` when entering `Review`; kept in sync as
+    /// the cursor moves.
+    pub bulk_editor: BulkItemEditor,
+    /// Scroll offset for the PR list in the bulk review modal.
+    pub bulk_list_scroll: Cell<u16>,
 }
 
 impl GenerateState {
@@ -224,7 +341,43 @@ impl GenerateState {
             phase: GeneratePhase::Idle,
             jj_op_dialog: None,
             last_action: None,
+            selected_heads: Vec::new(),
+            bulk: BulkPhase::Idle,
+            bulk_review_focus: BulkReviewFocus::List,
+            bulk_editor: BulkItemEditor::default(),
+            bulk_list_scroll: Cell::new(0),
         }
+    }
+
+    /// Toggle `change_id` in/out of the selected-head set.
+    /// If already present it is removed; otherwise it is appended. The stored
+    /// order is toggle order; display and range-derivation order are recomputed
+    /// from the revsets list on read, so a plain append is sufficient here.
+    pub fn toggle_selected_head(&mut self, change_id: &str) {
+        if let Some(pos) = self.selected_heads.iter().position(|id| id == change_id) {
+            self.selected_heads.remove(pos);
+        } else {
+            self.selected_heads.push(change_id.to_string());
+        }
+    }
+
+    /// Return `true` when `change_id` is currently in the selected-head set.
+    pub fn is_head_selected(&self, change_id: &str) -> bool {
+        self.selected_heads.iter().any(|id| id == change_id)
+    }
+
+    /// Collect selected heads that are still present in the loaded revsets,
+    /// preserving their display order (newest-first) from the revsets list.
+    /// This also serves as the stale-id filter: ids absent from `revsets` are
+    /// silently dropped.
+    pub fn selected_heads_present<'a>(
+        &self,
+        revsets: &'a [RevsetSummary],
+    ) -> Vec<&'a RevsetSummary> {
+        revsets
+            .iter()
+            .filter(|r| self.is_head_selected(&r.change_id))
+            .collect()
     }
 
     pub fn is_in_progress(&self) -> bool {
@@ -235,6 +388,52 @@ impl GenerateState {
                 | GeneratePhase::Executing { .. }
                 | GeneratePhase::JjMutating { .. }
         )
+    }
+
+    /// True when any job is in flight: single-PR scalar jobs, bulk stack jobs
+    /// (`Collecting` / `Generating` / `Review { pushing: Some(_) }`), or Tier D
+    /// `JjMutating`. Input gates and Tier D keys use this to stay consistent.
+    pub fn has_busy_job(&self) -> bool {
+        if self.is_in_progress() {
+            return true;
+        }
+        matches!(
+            &self.bulk,
+            BulkPhase::Collecting
+                | BulkPhase::Generating { .. }
+                | BulkPhase::Review {
+                    pushing: Some(_),
+                    ..
+                }
+        )
+    }
+
+    /// Derive the oldest selected head from the revsets list, for the Form's
+    /// derived read-only `head` in bulk mode. Returns `None` when there are no
+    /// selected heads or no loaded revsets.
+    pub fn bulk_derived_head<'a>(&self, revsets: &'a [RevsetSummary]) -> Option<&'a RevsetSummary> {
+        // `selected_heads_present` returns in newest-first display order;
+        // the oldest is the last.
+        self.selected_heads_present(revsets).into_iter().last()
+    }
+
+    /// Seed the `bulk_editor` from the item at `cursor` in the plan.
+    pub fn seed_bulk_editor_from_cursor(&mut self) {
+        if let BulkPhase::Review { plan, cursor, .. } = &self.bulk
+            && let Some(item) = plan.items.get(*cursor)
+        {
+            self.bulk_editor = BulkItemEditor::from_plan_item(item);
+        }
+    }
+
+    /// Flush the current `bulk_editor` values back into the plan at `cursor`.
+    pub fn flush_bulk_editor_to_plan(&mut self) {
+        if let BulkPhase::Review { plan, cursor, .. } = &mut self.bulk {
+            let idx = *cursor;
+            if let Some(item) = plan.items.get_mut(idx) {
+                self.bulk_editor.commit_to_plan_item(item);
+            }
+        }
     }
 
     pub fn done_url(&self) -> Option<&str> {
@@ -426,14 +625,27 @@ pub fn render(state: &GenerateState, status: &StatusStore, frame: &mut Frame, ar
     if let Some(dialog) = &state.jj_op_dialog {
         render_jj_op_dialog(dialog, frame, main);
     }
+    // The bulk modal is drawn last so it sits on top of all other content.
+    if !matches!(state.bulk, BulkPhase::Idle) {
+        render_bulk_modal(state, frame, main);
+    }
 }
 
 fn render_menu(state: &GenerateState, status: &StatusStore, frame: &mut Frame, area: Rect) {
-    let block = theme::pane_block("Changes", state.pane == Pane::Menu);
+    let focused = state.pane == Pane::Menu;
+    let selected_count = match status.revsets.value() {
+        Some(Revsets::Loaded(items)) => state.selected_heads_present(items).len(),
+        _ => 0,
+    };
+    let title = if selected_count > 0 {
+        format!("Changes  ({selected_count} selected)")
+    } else {
+        "Changes".to_string()
+    };
+    let block = theme::pane_block(&title, focused);
     let inner = block.inner(area);
     let inner_width = inner.width.saturating_sub(1) as usize;
     frame.render_widget(block, area);
-    let focused = state.pane == Pane::Menu;
     let (lines, scroll): (Vec<Line>, u16) = match status.revsets.value() {
         Some(Revsets::Loaded(items)) if !items.is_empty() => {
             let mut lines: Vec<Line> = Vec::new();
@@ -443,11 +655,12 @@ fn render_menu(state: &GenerateState, status: &StatusStore, frame: &mut Frame, a
                 if i > 0 {
                     lines.push(separator_line(inner_width));
                 }
-                let selected = i == state.revset_selected;
+                let cursor = i == state.revset_selected;
+                let head_selected = state.is_head_selected(&item.change_id);
                 let row_start = lines.len() as u16;
-                let row = revset_row_lines(item, selected, focused, inner_width);
+                let row = revset_row_lines(item, cursor, head_selected, focused, inner_width);
                 let row_end = row_start + row.len() as u16;
-                if selected {
+                if cursor {
                     sel_start = row_start;
                     sel_end = row_end.saturating_sub(1);
                 }
@@ -486,12 +699,26 @@ fn render_menu(state: &GenerateState, status: &StatusStore, frame: &mut Frame, a
 
 fn revset_row_lines(
     item: &RevsetSummary,
-    selected: bool,
+    cursor: bool,
+    head_selected: bool,
     focused: bool,
     width: usize,
 ) -> Vec<Line<'static>> {
-    let marker = theme::selection_marker(selected);
-    let style = if selected {
+    // Gutter: 2 chars wide.
+    // cursor and head_selected are orthogonal — show both when both are true.
+    let gutter: &'static str = match (cursor, head_selected) {
+        (true, true) => "▶●",
+        (true, false) => "▶ ",
+        (false, true) => " ●",
+        (false, false) => "  ",
+    };
+    let gutter_style = if head_selected {
+        theme::accent()
+    } else {
+        theme::muted()
+    };
+
+    let style = if cursor {
         theme::selected(focused)
     } else {
         theme::text()
@@ -499,7 +726,7 @@ fn revset_row_lines(
 
     let primary_lines = wrap_chars(&revset_primary(item), width.saturating_sub(2));
     let mut lines = vec![Line::from(vec![
-        Span::styled(marker, theme::muted()),
+        Span::styled(gutter, gutter_style),
         Span::styled(primary_lines.first().cloned().unwrap_or_default(), style),
     ])];
     for line in primary_lines.into_iter().skip(1) {
@@ -527,6 +754,11 @@ fn revset_row_lines(
     lines
 }
 
+/// True when the form is in bulk mode (>=1 head selected) and `id` is `Head`.
+fn is_bulk_head_field(state: &GenerateState, id: FieldId) -> bool {
+    id == FieldId::Head && !state.selected_heads.is_empty()
+}
+
 fn render_form(state: &GenerateState, frame: &mut Frame, area: Rect) {
     let block = theme::pane_block("PR Form", state.pane == Pane::Form);
     let inner = block.inner(area);
@@ -551,6 +783,36 @@ fn render_form(state: &GenerateState, frame: &mut Frame, area: Rect) {
             theme::muted()
         };
         let label = field_label(id);
+
+        // In bulk mode the `head` field is derived from the selection and
+        // rendered read-only with a `(from selection)` hint regardless of the
+        // underlying picker state.
+        if is_bulk_head_field(state, id) {
+            let head_val = state.form.head();
+            let display = if head_val.is_empty() {
+                "(from selection)".to_string()
+            } else {
+                let (s, _) = truncate_ellipsis(head_val, w.saturating_sub(4));
+                format!("{s}  (from selection)")
+            };
+            form_line(
+                frame,
+                inner,
+                cy,
+                scroll,
+                Line::from(Span::styled(format!("{marker}{label}:"), style)),
+            );
+            cy += 1;
+            form_line(
+                frame,
+                inner,
+                cy,
+                scroll,
+                Line::from(Span::styled(format!("  {display}"), theme::muted())),
+            );
+            cy += 1;
+            continue;
+        }
 
         match state.form.field(id) {
             FieldState::Text(t) => {
@@ -880,6 +1142,583 @@ fn render_jj_op_dialog(dialog: &JjOpDialog, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
+// ========================= Bulk modal render ================================
+
+fn render_bulk_modal(state: &GenerateState, frame: &mut Frame, area: Rect) {
+    frame.render_widget(theme::backdrop(), area);
+    // The bulk modal takes most of the screen to accommodate the two-pane layout.
+    let width = area.width.saturating_sub(8).max(40);
+    let height = area.height.saturating_sub(4).max(12);
+    let rect = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, rect);
+
+    match &state.bulk {
+        BulkPhase::Idle => {}
+        BulkPhase::Collecting => render_bulk_loading(
+            frame,
+            rect,
+            "Collecting context…",
+            state.selected_heads.len(),
+        ),
+        BulkPhase::Generating {
+            inputs,
+            drafts,
+            warnings,
+            next,
+            total,
+            ..
+        } => render_bulk_generating(frame, rect, inputs, drafts, warnings, *next, *total),
+        BulkPhase::Failed { message } => render_bulk_failed(frame, rect, message),
+        BulkPhase::Review {
+            plan,
+            cursor,
+            pushing,
+            ..
+        } => {
+            render_bulk_review(state, plan, *cursor, *pushing, frame, rect);
+        }
+    }
+}
+
+fn render_bulk_loading(frame: &mut Frame, rect: Rect, status_msg: &str, selected_count: usize) {
+    let block = theme::modal_block("Stacked PR Generation");
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  {status_msg}"),
+            theme::accent().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!(
+                "  {} PR{} queued",
+                selected_count,
+                if selected_count == 1 { "" } else { "s" }
+            ),
+            theme::muted(),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Esc", theme::selected(true)),
+            Span::styled(" cancel", theme::muted()),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn render_bulk_generating(
+    frame: &mut Frame,
+    rect: Rect,
+    inputs: &[crate::domain::StackPrInput],
+    drafts: &[Option<crate::domain::StackDraft>],
+    warnings: &[Vec<String>],
+    next: usize,
+    total: usize,
+) {
+    let block = theme::modal_block("Stacked PR Generation");
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let done = drafts.iter().filter(|draft| draft.is_some()).count();
+    let active = if total == 0 {
+        0
+    } else {
+        next.saturating_sub(1).min(total.saturating_sub(1))
+    };
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!(
+                "  Generating draft {} of {total}",
+                done.saturating_add(1).min(total)
+            ),
+            theme::accent().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("  {done}/{total} drafts ready"),
+            theme::muted(),
+        )),
+        Line::from(""),
+    ];
+
+    let reserved = lines.len() + 2;
+    let rows = (inner.height as usize).saturating_sub(reserved).max(1);
+    let offset = active.saturating_add(1).saturating_sub(rows);
+    for index in offset..total.min(offset + rows) {
+        let Some(input) = inputs.get(index) else {
+            continue;
+        };
+        let row_done = drafts.get(index).and_then(Option::as_ref).is_some();
+        let row_warning = warnings.get(index).is_some_and(|w| !w.is_empty());
+        let (marker, style) = if row_warning {
+            ("! ", theme::warning())
+        } else if row_done {
+            ("✓ ", theme::success())
+        } else if index == active {
+            ("… ", theme::accent())
+        } else {
+            ("○ ", theme::muted())
+        };
+        let subject_w = inner.width.saturating_sub(8) as usize;
+        let (subject, _) = truncate_ellipsis(&input.subject, subject_w);
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {marker}"), style),
+            Span::styled(format!("PR {} ", index + 1), theme::muted()),
+            Span::styled(subject, theme::text()),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("Esc", theme::selected(true)),
+        Span::styled(" cancel", theme::muted()),
+    ]));
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn render_bulk_failed(frame: &mut Frame, rect: Rect, message: &str) {
+    let block = theme::modal_block("Stacked PR Generation Failed");
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Generation failed.",
+            theme::error().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::raw(format!("  {message}"))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Esc", theme::selected(true)),
+            Span::styled(" close", theme::muted()),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn render_bulk_review(
+    state: &GenerateState,
+    plan: &crate::domain::StackPlan,
+    cursor: usize,
+    pushing: Option<usize>,
+    frame: &mut Frame,
+    rect: Rect,
+) {
+    let block = theme::modal_block("Review Stacked PRs");
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    // Header line: base, PR count, shared metadata summary, blocker count.
+    let blocker_count: usize = plan.items.iter().map(|i| i.blockers.len()).sum();
+    let header_parts = {
+        let mut parts = vec![
+            format!(
+                "base: {}",
+                if plan.items.is_empty() {
+                    "-"
+                } else {
+                    &plan.items[0].input.base
+                }
+            ),
+            format!("{} PRs", plan.items.len()),
+        ];
+        if !plan.labels.is_empty() {
+            parts.push(format!("labels: {}", plan.labels.join(", ")));
+        }
+        if !plan.milestone.is_empty() {
+            parts.push(format!("milestone: {}", plan.milestone));
+        }
+        if blocker_count > 0 {
+            parts.push(format!(
+                "{blocker_count} blocker{}",
+                if blocker_count == 1 { "" } else { "s" }
+            ));
+        }
+        parts.join("  |  ")
+    };
+
+    // Split inner area: header row, then two-pane.
+    if inner.height < 4 {
+        // Too small to render the two-pane layout.
+        let lines = vec![Line::from(Span::styled(
+            format!("  {header_parts}"),
+            theme::muted(),
+        ))];
+        frame.render_widget(Paragraph::new(lines), inner);
+        return;
+    }
+
+    let [header_area, body_area] = ratatui::layout::Layout::vertical([
+        ratatui::layout::Constraint::Length(1),
+        ratatui::layout::Constraint::Fill(1),
+    ])
+    .areas(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("  {header_parts}"),
+            theme::muted(),
+        ))),
+        header_area,
+    );
+
+    // Master-detail: left = PR list, middle = separator, right = per-PR form.
+    let list_width = (body_area.width.saturating_sub(1) / 2).clamp(20, 40);
+    let [list_area, separator_area, form_area] = ratatui::layout::Layout::horizontal([
+        ratatui::layout::Constraint::Length(list_width),
+        ratatui::layout::Constraint::Length(1),
+        ratatui::layout::Constraint::Fill(1),
+    ])
+    .areas(body_area);
+
+    render_bulk_separator(frame, separator_area);
+    render_bulk_pr_list(state, plan, cursor, pushing, frame, list_area);
+    render_bulk_pr_form(state, plan, cursor, pushing, frame, form_area);
+}
+
+fn render_bulk_separator(frame: &mut Frame, area: Rect) {
+    let lines = (0..area.height)
+        .map(|_| Line::from(Span::styled("|", theme::muted())))
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_bulk_pr_list(
+    state: &GenerateState,
+    plan: &crate::domain::StackPlan,
+    cursor: usize,
+    pushing: Option<usize>,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let w = area.width as usize;
+    let n = plan.items.len();
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut sel_y = 0u16;
+    let mut sel_end = 0u16;
+
+    for (i, item) in plan.items.iter().enumerate() {
+        let focused = i == cursor;
+        let pushing_current = pushing == Some(i);
+        let list_focused = state.bulk_review_focus == BulkReviewFocus::List;
+        let style = if focused {
+            theme::selected(list_focused)
+        } else if pushing_current {
+            theme::accent()
+        } else {
+            theme::text()
+        };
+        let marker = if pushing_current {
+            "⏳ "
+        } else if focused {
+            "▶ "
+        } else {
+            "  "
+        };
+
+        let row_start = lines.len() as u16;
+
+        // Status badge.
+        let status_badge = match &item.status {
+            crate::domain::PrStatus::Pending => "○",
+            crate::domain::PrStatus::Bookmarked => "◉",
+            crate::domain::PrStatus::Pushed => "↑",
+            crate::domain::PrStatus::Created { .. } => "✓",
+            crate::domain::PrStatus::Failed { .. } => "✗",
+        };
+        let has_blocker = !item.blockers.is_empty();
+        let has_warning = !item.warnings.is_empty();
+        let flag = if has_blocker {
+            "!"
+        } else if has_warning {
+            "~"
+        } else {
+            " "
+        };
+
+        // Primary row: marker + index + status + title. The title wraps inside
+        // the row group, so the scroll span below can keep the full selected
+        // row visible.
+        let title_w = w.saturating_sub(5);
+        let wrapped_title = wrap_chars(&item.title, title_w);
+        for (line_index, title_line) in wrapped_title.iter().enumerate() {
+            let prefix = if line_index == 0 {
+                format!("{marker}{status_badge}{flag} ")
+            } else {
+                "     ".to_string()
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{prefix}{title_line}"),
+                style,
+            )));
+        }
+
+        // Sub-row: bookmark.
+        let bookmark_w = w.saturating_sub(4);
+        let (bm_display, _) = truncate_ellipsis(&item.bookmark, bookmark_w);
+        lines.push(Line::from(Span::styled(
+            format!("  ↳ {bm_display}"),
+            if focused {
+                theme::selected(false)
+            } else {
+                theme::muted()
+            },
+        )));
+
+        if i + 1 < n {
+            lines.push(separator_line(w.saturating_sub(2)));
+        }
+
+        if focused {
+            sel_y = row_start;
+            sel_end = (lines.len() as u16).saturating_sub(1);
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push(placeholder_line("No PRs in plan."));
+    }
+
+    // Natural scroll: only move the window when the cursor crosses the edge.
+    let visible = area.height;
+    let max_off = (lines.len() as u16).saturating_sub(visible);
+    let cur_off = state.bulk_list_scroll.get().min(max_off);
+    let scroll = if visible == 0 {
+        0
+    } else if sel_y < cur_off {
+        sel_y
+    } else if sel_end + 1 > cur_off + visible {
+        (sel_end + 1).saturating_sub(visible).min(max_off)
+    } else {
+        cur_off
+    };
+    state.bulk_list_scroll.set(scroll);
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        area,
+    );
+}
+
+fn render_bulk_pr_form(
+    state: &GenerateState,
+    plan: &crate::domain::StackPlan,
+    cursor: usize,
+    pushing: Option<usize>,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let Some(item) = plan.items.get(cursor) else {
+        frame.render_widget(Paragraph::new(placeholder_line("No PR selected.")), area);
+        return;
+    };
+
+    let w = area.width as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Read-only head / base.
+    let (head_s, _) = truncate_ellipsis(&item.input.head, w.saturating_sub(8));
+    let (base_s, _) = truncate_ellipsis(&item.input.base, w.saturating_sub(8));
+    lines.push(Line::from(vec![
+        Span::styled("  head: ", theme::muted()),
+        Span::styled(head_s, theme::text()),
+        Span::styled("  (read-only)", theme::muted()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  base: ", theme::muted()),
+        Span::styled(base_s, theme::text()),
+        Span::styled("  (read-only)", theme::muted()),
+    ]));
+    if pushing == Some(cursor) {
+        let message = if state.last_action.as_deref() == Some("checking current PR state") {
+            "  checking: bookmarks and existing PRs"
+        } else {
+            "  pushing: bookmark -> push -> create PR"
+        };
+        lines.push(Line::from(Span::styled(
+            message,
+            theme::accent().add_modifier(Modifier::BOLD),
+        )));
+    } else {
+        match &item.status {
+            crate::domain::PrStatus::Pending => {
+                lines.push(kv_line("push status", "pending".into()))
+            }
+            crate::domain::PrStatus::Bookmarked => {
+                lines.push(kv_line("push status", "bookmark set".into()))
+            }
+            crate::domain::PrStatus::Pushed => {
+                lines.push(kv_line("push status", "bookmark pushed".into()))
+            }
+            crate::domain::PrStatus::Created { url } => {
+                lines.push(kv_line("push status", "created".into()));
+                lines.push(kv_line("url", url.clone()));
+            }
+            crate::domain::PrStatus::Failed { step, message } => {
+                lines.push(Line::from(Span::styled(
+                    format!("  failed at {}: {message}", step.label()),
+                    theme::error().add_modifier(Modifier::BOLD),
+                )));
+            }
+        }
+    }
+    lines.push(separator_line(w.saturating_sub(2)));
+
+    // Editable fields — reuse bulk_editor from state.
+    let editor = &state.bulk_editor;
+    for field in [
+        BulkItemField::Title,
+        BulkItemField::Branch,
+        BulkItemField::Description,
+    ] {
+        let preview_focused = state.bulk_review_focus == BulkReviewFocus::Preview || editor.editing;
+        let focused = editor.field_focus == field;
+        let editing = focused && editor.editing;
+        let marker = if preview_focused && focused {
+            "▶ "
+        } else {
+            "  "
+        };
+        let style = if preview_focused && focused {
+            theme::selected(true)
+        } else {
+            theme::muted()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker}{}:", field.label()),
+            style,
+        )));
+
+        let t = editor.field(field);
+        let indent: u16 = 2;
+        let value_w = w.saturating_sub(indent as usize);
+        let content = if editing { &t.buffer } else { &t.value };
+
+        if field == BulkItemField::Description {
+            let preview: Vec<&str> = content.lines().take(4).collect();
+            if preview.is_empty() || content.is_empty() {
+                lines.push(Line::from(Span::styled("  (empty)", theme::muted())));
+            } else {
+                for line in preview {
+                    for wrapped in wrap_chars(line, value_w) {
+                        lines.push(Line::from(Span::styled(
+                            format!("  {wrapped}"),
+                            theme::text(),
+                        )));
+                    }
+                }
+            }
+        } else if editing {
+            // Render the editor widget inline for single-line fields.
+            let avail_y = area.y + lines.len() as u16;
+            if avail_y < area.y + area.height {
+                let rect = Rect {
+                    x: area.x + indent,
+                    y: avail_y,
+                    width: area.width.saturating_sub(indent),
+                    height: 1,
+                };
+                frame.render_widget(&t.editor, rect);
+                lines.push(Line::from("")); // placeholder to track cy
+            } else {
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", fmt_or_dash(content)),
+                    theme::text(),
+                )));
+            }
+        } else {
+            let (display, _) = truncate_ellipsis(content, value_w.saturating_sub(2));
+            lines.push(Line::from(Span::styled(
+                format!("  {}", fmt_or_dash(&display)),
+                theme::text(),
+            )));
+        }
+    }
+
+    // Blockers / warnings.
+    for blocker in &item.blockers {
+        lines.push(Line::from(Span::styled(
+            format!("  ! {blocker}"),
+            theme::error(),
+        )));
+    }
+    for warning in &item.warnings {
+        lines.push(Line::from(Span::styled(
+            format!("  ~ {warning}"),
+            theme::warning(),
+        )));
+    }
+
+    // Shared metadata.
+    if !plan.labels.is_empty() {
+        lines.push(separator_line(w.saturating_sub(2)));
+        lines.push(Line::from(vec![
+            Span::styled("  labels: ", theme::muted()),
+            Span::styled(plan.labels.join(", "), theme::text()),
+        ]));
+    }
+
+    let all_created = plan
+        .items
+        .iter()
+        .all(|item| matches!(item.status, crate::domain::PrStatus::Created { .. }));
+    let any_failed = plan
+        .items
+        .iter()
+        .enumerate()
+        .find_map(|(index, item)| match &item.status {
+            crate::domain::PrStatus::Failed { step, message } => {
+                Some((index, step.label(), message))
+            }
+            _ => None,
+        });
+
+    if !plan.items.is_empty() && (all_created || any_failed.is_some()) {
+        lines.push(separator_line(w.saturating_sub(2)));
+        lines.push(section_heading_line("result"));
+        if all_created {
+            lines.push(Line::from(Span::styled(
+                "  stack push complete",
+                theme::success().add_modifier(Modifier::BOLD),
+            )));
+        } else if let Some((index, step, message)) = any_failed {
+            lines.push(Line::from(Span::styled(
+                format!("  PR {} failed at {}: {message}", index + 1, step),
+                theme::error().add_modifier(Modifier::BOLD),
+            )));
+        }
+        for (index, item) in plan.items.iter().enumerate() {
+            if let crate::domain::PrStatus::Created { url } = &item.status {
+                lines.push(kv_line(&format!("pr {}", index + 1), url.clone()));
+            }
+        }
+    }
+
+    if let Some(note) = &state.last_action {
+        lines.push(separator_line(w.saturating_sub(2)));
+        lines.push(Line::from(Span::styled(
+            format!("  {note}"),
+            theme::muted(),
+        )));
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
 fn render_preview(state: &GenerateState, status: &StatusStore, frame: &mut Frame, area: Rect) {
     let block = theme::pane_block("Preview", state.pane == Pane::Preview);
     let inner = block.inner(area);
@@ -905,7 +1744,7 @@ fn render_preview(state: &GenerateState, status: &StatusStore, frame: &mut Frame
         GeneratePhase::Failed { message } => preview_failed_lines(message),
     });
     lines.extend(next_step_lines(state, status));
-    if let Some(hint) = state.last_action {
+    if let Some(hint) = &state.last_action {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             format!("  {hint}"),
@@ -1457,16 +2296,35 @@ fn wrap_chars(value: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current = String::new();
     for word in value.split_whitespace() {
-        let current_len = current.chars().count();
         let word_len = word.chars().count();
-        if current_len == 0 {
-            current.push_str(word);
-        } else if current_len + 1 + word_len <= width {
-            current.push(' ');
-            current.push_str(word);
-        } else {
+        let current_len = current.chars().count();
+
+        if current_len > 0 && current_len + 1 + word_len > width {
             lines.push(current);
-            current = word.to_string();
+            current = String::new();
+        }
+
+        if word_len <= width {
+            if current.is_empty() {
+                current.push_str(word);
+            } else {
+                current.push(' ');
+                current.push_str(word);
+            }
+            continue;
+        }
+
+        let mut chunk = String::new();
+        for ch in word.chars() {
+            if chunk.chars().count() == width {
+                lines.push(chunk);
+                chunk = String::new();
+            }
+            chunk.push(ch);
+        }
+        current = chunk;
+        if current.chars().count() == width {
+            lines.push(std::mem::take(&mut current));
         }
     }
     if !current.is_empty() {
@@ -1520,6 +2378,56 @@ fn render_help(state: &GenerateState, frame: &mut Frame, area: Rect) {
                 ]
             }
         }
+    } else if !matches!(state.bulk, BulkPhase::Idle) {
+        // Bulk modal is open — show bulk-specific hints.
+        match &state.bulk {
+            BulkPhase::Collecting | BulkPhase::Generating { .. } => {
+                vec![theme::HelpHint::primary("Esc", "cancel")]
+            }
+            BulkPhase::Review {
+                pushing: Some(_), ..
+            } => {
+                vec![
+                    theme::HelpHint::new("j/k", "navigate"),
+                    theme::HelpHint::primary("Wait", "push running…"),
+                ]
+            }
+            BulkPhase::Review { .. } => {
+                if state.bulk_editor.editing {
+                    let multiline = state.bulk_editor.field_focus == BulkItemField::Description;
+                    if multiline {
+                        vec![
+                            theme::HelpHint::primary("Esc", "commit"),
+                            theme::HelpHint::new("Enter", "newline"),
+                        ]
+                    } else {
+                        vec![
+                            theme::HelpHint::primary("Enter", "commit"),
+                            theme::HelpHint::new("Esc", "commit"),
+                        ]
+                    }
+                } else if state.bulk_review_focus == BulkReviewFocus::List {
+                    vec![
+                        theme::HelpHint::primary("Enter", "preview"),
+                        theme::HelpHint::new("j/k", "select PR"),
+                        theme::HelpHint::new("p", "push current"),
+                        theme::HelpHint::new("P", "push all"),
+                        theme::HelpHint::new("Esc", "close"),
+                    ]
+                } else {
+                    vec![
+                        theme::HelpHint::primary("Enter/i", "edit"),
+                        theme::HelpHint::new("j/k", "fields"),
+                        theme::HelpHint::new("Tab", "fields"),
+                        theme::HelpHint::new("p", "push current"),
+                        theme::HelpHint::new("P", "push all"),
+                        theme::HelpHint::new("Esc", "list"),
+                    ]
+                }
+            }
+            BulkPhase::Failed { .. } => vec![theme::HelpHint::primary("Esc", "close")],
+            BulkPhase::Idle => unreachable!(),
+        }
     } else {
         normal_help_hints(state)
     };
@@ -1539,9 +2447,13 @@ fn normal_help_hints(state: &GenerateState) -> Vec<theme::HelpHint<'static>> {
         (Pane::Menu, _) => {
             hints.push(HelpHint::primary("Enter", "pick"));
             hints.push(HelpHint::new("r", "refresh"));
-            if !state.is_in_progress() && state.jj_op_dialog.is_none() {
+            if !state.has_busy_job() && state.jj_op_dialog.is_none() {
+                hints.push(HelpHint::new("space", "toggle head"));
                 hints.push(HelpHint::new("s", "squash below"));
                 hints.push(HelpHint::new("J/K", "move"));
+                if !state.selected_heads.is_empty() {
+                    hints.push(HelpHint::new("G", "review stack"));
+                }
             }
         }
         (Pane::Preview, GeneratePhase::DraftReady { .. }) => {
@@ -1565,7 +2477,7 @@ fn normal_help_hints(state: &GenerateState) -> Vec<theme::HelpHint<'static>> {
     }
 
     // `g` (re)generates from any pane but Menu while no job is running.
-    if state.pane != Pane::Menu && !state.is_in_progress() {
+    if state.pane != Pane::Menu && !state.has_busy_job() {
         let label = if matches!(
             state.phase,
             GeneratePhase::DraftReady { .. } | GeneratePhase::Confirming { .. }
@@ -1631,6 +2543,8 @@ mod tests {
         state.form.description.set_value("Body".into());
         state.phase = phase;
         state.pane = pane;
+        // selected_heads, bulk, bulk_editor, and bulk_list_scroll default to
+        // their zero values via GenerateState::new
         state
     }
 
@@ -1766,5 +2680,46 @@ mod tests {
                 assert_eq!(primaries, 1, "expected one primary hint in {pane:?}");
             }
         }
+    }
+
+    fn named_revset(change_id: &str) -> RevsetSummary {
+        RevsetSummary {
+            label: format!("trunk()..{change_id}"),
+            change_id: change_id.into(),
+            commit_id: format!("{change_id}-commit"),
+            bookmarks: Vec::new(),
+            description: String::new(),
+            description_body: String::new(),
+            author: String::new(),
+            stats: String::new(),
+            commit_count: 1,
+            commit_ids: vec![format!("{change_id}-commit")],
+            change_ids: vec![change_id.into()],
+            recent_log: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn selected_heads_present_follows_display_order_and_drops_stale_ids() {
+        let mut state = GenerateState::new("main".into());
+        // Selected in an arbitrary order, including an id that no longer exists.
+        state.selected_heads = vec!["old".into(), "gone".into(), "new".into()];
+
+        // A reorder of the revset list must not change which heads resolve, only
+        // the order they come back in (always newest-first display order).
+        let revsets = vec![
+            named_revset("new"),
+            named_revset("mid"),
+            named_revset("old"),
+        ];
+        let present: Vec<&str> = state
+            .selected_heads_present(&revsets)
+            .into_iter()
+            .map(|r| r.change_id.as_str())
+            .collect();
+
+        // "gone" is dropped; "new"/"old" come back in display (newest-first) order.
+        assert_eq!(present, vec!["new", "old"]);
     }
 }

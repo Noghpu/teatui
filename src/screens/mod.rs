@@ -46,6 +46,14 @@ pub enum Transition {
     OpenBackendPicker,
     /// User confirmed a jj stack-shaping operation from the Changes pane.
     JjOp(JjOp),
+    /// User pressed `G` to start stacked-PR generation from the selected heads.
+    GenerateStack,
+    /// User asked to cancel an in-flight stack generation or close the review modal.
+    CancelStack,
+    /// User asked to push the highlighted PR in the bulk review modal.
+    PushStackPr(usize),
+    /// User asked to push the whole stack oldest-to-newest in the bulk review modal.
+    PushStackAll,
 }
 
 pub enum NewScreen {
