@@ -1,11 +1,217 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
 
 use super::bookmark::slugify;
+use super::stack::{StackDraft, StackPrInput};
 use crate::config::LlmApi;
 use crate::runtime::http::{self, CancelHandle, HttpError};
 use crate::runtime::{Job, JobOutcome};
+
+// ========================== Stack LLM job ===================================
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CacheHealth {
+    /// OpenAI-compatible `usage.prompt_tokens_details.cached_tokens` or
+    /// llama.cpp `timings.cache_n`.
+    pub cached_tokens: Option<u64>,
+    /// OpenAI-compatible `usage.prompt_tokens` or llama.cpp `timings.prompt_n`.
+    pub prompt_tokens: Option<u64>,
+    /// Ollama `prompt_eval_count`, when present.
+    pub prompt_eval_count: Option<u64>,
+    /// Ollama `prompt_eval_duration`, converted from ns to ms.
+    pub prompt_eval_duration_ms: Option<u64>,
+}
+
+/// Result type for [`StackPrLlmJob`]. Each job drafts exactly one stack row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StackLlmResult {
+    Ready {
+        index: usize,
+        draft: StackDraft,
+        cache: CacheHealth,
+    },
+    Errored {
+        index: usize,
+        message: String,
+        fallback: StackDraft,
+        cache: CacheHealth,
+    },
+    /// The user aborted the request mid-flight.
+    Cancelled { index: usize },
+}
+
+/// LLM job for one row of stacked-PR generation. The large shared prefix is an
+/// `Arc<str>` so sequential jobs do not clone the whole stack context.
+pub struct StackPrLlmJob {
+    pub base_url: String,
+    pub model: String,
+    pub api: LlmApi,
+    pub api_key: Option<String>,
+    pub prefix: Arc<str>,
+    pub suffix: String,
+    pub temperature: Option<f32>,
+    pub max_tokens: Option<u32>,
+    pub timeout: Duration,
+    /// Shared cancel handle so `Esc` can abort the request.
+    pub cancel: CancelHandle,
+    /// Input row used for fallback and result indexing.
+    pub input: StackPrInput,
+}
+
+impl Job for StackPrLlmJob {
+    fn name(&self) -> &'static str {
+        "domain.llm.stack_generate_pr"
+    }
+    fn run(self: Box<Self>) -> JobOutcome {
+        let result = match self.api {
+            LlmApi::Ollama => call_ollama_stack_pr(*self),
+            LlmApi::Openai => call_openai_stack_pr(*self),
+        };
+        JobOutcome::Done(Box::new(result))
+    }
+}
+
+fn call_ollama_stack_pr(job: StackPrLlmJob) -> StackLlmResult {
+    let index = job.input.index;
+    let url = format!("{}/api/generate", job.base_url.trim_end_matches('/'));
+    let mut options = serde_json::Map::new();
+    if let Some(t) = job.temperature {
+        options.insert("temperature".into(), serde_json::json!(t));
+    }
+    if let Some(n) = job.max_tokens {
+        options.insert("num_predict".into(), serde_json::json!(n));
+    }
+    let prompt = format!("{}{}", job.prefix, job.suffix);
+    let body = serde_json::json!({
+        "model": job.model,
+        "prompt": prompt,
+        "stream": false,
+        "options": options,
+    });
+
+    let raw = match transport_send(&url, None, &body, job.timeout, &job.cancel) {
+        Ok(raw) => raw,
+        Err(result) => return stack_from_transport_error(index, result, &job.input),
+    };
+    if let Some(message) = http_error_message(raw.status, &raw.body) {
+        return stack_row_error(index, message, &job.input, CacheHealth::default());
+    }
+    let parsed: GenerateResponse = match serde_json::from_str(&raw.body) {
+        Ok(p) => p,
+        Err(e) => {
+            return stack_row_error(
+                index,
+                format!("invalid response shape: {e}"),
+                &job.input,
+                CacheHealth::default(),
+            );
+        }
+    };
+    let cache = CacheHealth::from_ollama(&parsed);
+    stack_row_from_content(index, &parsed.response, &job.input, cache)
+}
+
+fn call_openai_stack_pr(job: StackPrLlmJob) -> StackLlmResult {
+    let index = job.input.index;
+    let url = format!("{}/v1/chat/completions", job.base_url.trim_end_matches('/'));
+    let prompt = format!("{}{}", job.prefix, job.suffix);
+    let mut body = serde_json::json!({
+        "model": job.model,
+        "messages": [{ "role": "user", "content": prompt }],
+        "stream": false,
+    });
+    if let Some(t) = job.temperature {
+        body["temperature"] = serde_json::json!(t);
+    }
+    if let Some(n) = job.max_tokens {
+        body["max_tokens"] = serde_json::json!(n);
+    }
+
+    let raw = match transport_send(
+        &url,
+        job.api_key.as_deref(),
+        &body,
+        job.timeout,
+        &job.cancel,
+    ) {
+        Ok(raw) => raw,
+        Err(result) => return stack_from_transport_error(index, result, &job.input),
+    };
+    if let Some(message) = http_error_message(raw.status, &raw.body) {
+        return stack_row_error(index, message, &job.input, CacheHealth::default());
+    }
+    let parsed: ChatResponse = match serde_json::from_str(&raw.body) {
+        Ok(p) => p,
+        Err(e) => {
+            return stack_row_error(
+                index,
+                format!("invalid response shape: {e}"),
+                &job.input,
+                CacheHealth::default(),
+            );
+        }
+    };
+    let cache = CacheHealth::from_openai(&parsed);
+    match parsed.choices.into_iter().next() {
+        Some(choice) => stack_row_from_content(index, &choice.message.content, &job.input, cache),
+        None => stack_row_error(index, "no choices in response".into(), &job.input, cache),
+    }
+}
+
+/// Convert a transport-level [`LlmResult`] error into a row-level
+/// [`StackLlmResult`].
+fn stack_from_transport_error(
+    index: usize,
+    result: LlmResult,
+    input: &StackPrInput,
+) -> StackLlmResult {
+    match result {
+        LlmResult::Cancelled => StackLlmResult::Cancelled { index },
+        LlmResult::Errored { message } => {
+            stack_row_error(index, message, input, CacheHealth::default())
+        }
+        LlmResult::Ready(_) => unreachable!("transport errors are never Ready"),
+    }
+}
+
+fn stack_row_from_content(
+    index: usize,
+    content: &str,
+    input: &StackPrInput,
+    cache: CacheHealth,
+) -> StackLlmResult {
+    match parse_draft(content) {
+        LlmResult::Ready(draft) => StackLlmResult::Ready {
+            index,
+            draft: StackDraft {
+                index,
+                pr_type: draft.pr_type,
+                branch_slug: draft.branch_slug,
+                title: draft.title,
+                description: draft.description,
+            },
+            cache,
+        },
+        LlmResult::Errored { message } => stack_row_error(index, message, input, cache),
+        LlmResult::Cancelled => StackLlmResult::Cancelled { index },
+    }
+}
+
+fn stack_row_error(
+    index: usize,
+    message: String,
+    input: &StackPrInput,
+    cache: CacheHealth,
+) -> StackLlmResult {
+    StackLlmResult::Errored {
+        index,
+        message,
+        fallback: fallback_stack_draft(input),
+        cache,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedDraft {
@@ -316,12 +522,16 @@ fn extract_error_message(body: &str) -> Option<String> {
 #[derive(Deserialize)]
 struct GenerateResponse {
     response: String,
+    prompt_eval_count: Option<u64>,
+    prompt_eval_duration: Option<u64>,
 }
 
 #[derive(Deserialize)]
 struct ChatResponse {
     #[serde(default)]
     choices: Vec<ChatChoice>,
+    usage: Option<ChatUsage>,
+    timings: Option<ChatTimings>,
 }
 
 #[derive(Deserialize)]
@@ -336,11 +546,69 @@ struct ChatMessage {
 }
 
 #[derive(Deserialize)]
+struct ChatUsage {
+    prompt_tokens: Option<u64>,
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Deserialize)]
+struct PromptTokensDetails {
+    cached_tokens: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct ChatTimings {
+    cache_n: Option<u64>,
+    prompt_n: Option<u64>,
+}
+
+impl CacheHealth {
+    fn from_ollama(response: &GenerateResponse) -> Self {
+        Self {
+            cached_tokens: None,
+            prompt_tokens: None,
+            prompt_eval_count: response.prompt_eval_count,
+            prompt_eval_duration_ms: response.prompt_eval_duration.map(|ns| ns / 1_000_000),
+        }
+    }
+
+    fn from_openai(response: &ChatResponse) -> Self {
+        let usage = response.usage.as_ref();
+        let timings = response.timings.as_ref();
+        Self {
+            cached_tokens: usage
+                .and_then(|u| u.prompt_tokens_details.as_ref())
+                .and_then(|d| d.cached_tokens)
+                .or_else(|| timings.and_then(|t| t.cache_n)),
+            prompt_tokens: usage
+                .and_then(|u| u.prompt_tokens)
+                .or_else(|| timings.and_then(|t| t.prompt_n)),
+            prompt_eval_count: None,
+            prompt_eval_duration_ms: None,
+        }
+    }
+}
+
+#[derive(Deserialize)]
 struct DraftJson {
     #[serde(rename = "type")]
     pr_type: String,
     branch_slug: String,
     title: String,
+    description: String,
+}
+
+/// One element of the batched LLM JSON array response.
+#[derive(Deserialize, Default)]
+struct StackDraftJson {
+    change_index: Option<usize>,
+    #[serde(rename = "type", default)]
+    pr_type: String,
+    #[serde(default)]
+    branch_slug: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
     description: String,
 }
 
@@ -409,6 +677,80 @@ fn normalize_branch_slug(branch_slug: &str, title: &str, pr_type: &str) -> Strin
         slugify(title)
     } else {
         slug
+    }
+}
+
+/// Parse a raw batched LLM response into one [`StackDraft`] per [`StackPrInput`].
+///
+/// Expects the response to be a JSON array where each item has:
+/// `{ "change_index", "type", "branch_slug", "title", "description" }`.
+///
+/// Matching is by `change_index`. Any missing or malformed row is filled from
+/// local fallbacks: `type = "chore"`, `title` from `input.subject`,
+/// `description = ""`, `branch_slug = slugify(subject)`. A single bad row
+/// never discards valid rows; the result always has exactly `inputs.len()`
+/// entries in index order.
+pub fn parse_stack_drafts(raw: &str, inputs: &[StackPrInput]) -> Vec<StackDraft> {
+    let stripped = strip_code_fences(raw.trim());
+
+    // Parse as a generic JSON array first so that one malformed element does
+    // not discard valid ones. Each element is then individually re-parsed into
+    // `StackDraftJson`; non-objects are silently dropped.
+    let raw_array: Vec<serde_json::Value> = serde_json::from_str(stripped).unwrap_or_default();
+
+    let rows: Vec<StackDraftJson> = raw_array
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect();
+
+    // Build a lookup by change_index so we can fill gaps.
+    let by_index: std::collections::HashMap<usize, &StackDraftJson> = rows
+        .iter()
+        .filter_map(|r| r.change_index.map(|i| (i, r)))
+        .collect();
+
+    inputs
+        .iter()
+        .map(|input| {
+            if let Some(row) = by_index.get(&input.index) {
+                // Attempt to use this row; fall back per field if it's empty.
+                let title = row.title.trim().to_string();
+                let description = row.description.trim().to_string();
+                let pr_type = normalize_pr_type(&row.pr_type).to_string();
+                let branch_slug = normalize_branch_slug(&row.branch_slug, &title, &pr_type);
+                let (title, branch_slug) = if title.is_empty() {
+                    let fallback_title = input.subject.trim().to_string();
+                    let fallback_slug = normalize_branch_slug("", &fallback_title, &pr_type);
+                    (fallback_title, fallback_slug)
+                } else {
+                    (title, branch_slug)
+                };
+                StackDraft {
+                    index: input.index,
+                    pr_type,
+                    branch_slug,
+                    title,
+                    description,
+                }
+            } else {
+                // Row missing or change_index absent — full fallback.
+                fallback_stack_draft(input)
+            }
+        })
+        .collect()
+}
+
+/// Build a fallback `StackDraft` from the input when the LLM row is absent or
+/// unusable.
+pub fn fallback_stack_draft(input: &StackPrInput) -> StackDraft {
+    let title = input.subject.trim().to_string();
+    let branch_slug = slugify(&title);
+    StackDraft {
+        index: input.index,
+        pr_type: "chore".to_string(),
+        branch_slug,
+        title,
+        description: String::new(),
     }
 }
 
@@ -584,5 +926,247 @@ mod tests {
             }
             other => panic!("expected Ready, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn stack_row_uses_single_pr_parser_and_preserves_index() {
+        let input = make_input(2, "Fallback subject");
+        let cache = CacheHealth {
+            cached_tokens: Some(128),
+            prompt_tokens: Some(132),
+            prompt_eval_count: None,
+            prompt_eval_duration_ms: None,
+        };
+        let raw =
+            r#"{"type":"feat","branch_slug":"add-cache","title":"Add cache","description":"Body"}"#;
+
+        match stack_row_from_content(2, raw, &input, cache.clone()) {
+            StackLlmResult::Ready {
+                index,
+                draft,
+                cache: got_cache,
+            } => {
+                assert_eq!(index, 2);
+                assert_eq!(draft.index, 2);
+                assert_eq!(draft.pr_type, "feat");
+                assert_eq!(draft.branch_slug, "add-cache");
+                assert_eq!(draft.title, "Add cache");
+                assert_eq!(got_cache, cache);
+            }
+            other => panic!("expected Ready, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stack_row_bad_content_returns_fallback_with_error() {
+        let input = make_input(1, "Fallback title");
+
+        match stack_row_from_content(1, "", &input, CacheHealth::default()) {
+            StackLlmResult::Errored {
+                index,
+                message,
+                fallback,
+                ..
+            } => {
+                assert_eq!(index, 1);
+                assert!(message.contains("empty"));
+                assert_eq!(fallback.index, 1);
+                assert_eq!(fallback.pr_type, "chore");
+                assert_eq!(fallback.title, "Fallback title");
+                assert_eq!(fallback.branch_slug, "fallback-title");
+            }
+            other => panic!("expected Errored, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn openai_cache_telemetry_reads_usage_details() {
+        let raw = r#"{
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 2048,
+                "prompt_tokens_details": { "cached_tokens": 1984 }
+            }
+        }"#;
+        let parsed: ChatResponse = serde_json::from_str(raw).expect("deserialize");
+        let cache = CacheHealth::from_openai(&parsed);
+        assert_eq!(cache.cached_tokens, Some(1984));
+        assert_eq!(cache.prompt_tokens, Some(2048));
+    }
+
+    #[test]
+    fn openai_cache_telemetry_falls_back_to_llama_timings() {
+        let raw = r#"{
+            "choices": [],
+            "timings": { "cache_n": 2014, "prompt_n": 2018 }
+        }"#;
+        let parsed: ChatResponse = serde_json::from_str(raw).expect("deserialize");
+        let cache = CacheHealth::from_openai(&parsed);
+        assert_eq!(cache.cached_tokens, Some(2014));
+        assert_eq!(cache.prompt_tokens, Some(2018));
+    }
+
+    #[test]
+    fn ollama_cache_telemetry_converts_duration_to_ms() {
+        let parsed: GenerateResponse = serde_json::from_str(
+            r#"{
+                "response": "{}",
+                "prompt_eval_count": 4000,
+                "prompt_eval_duration": 1500000000
+            }"#,
+        )
+        .expect("deserialize");
+        let cache = CacheHealth::from_ollama(&parsed);
+        assert_eq!(cache.prompt_eval_count, Some(4000));
+        assert_eq!(cache.prompt_eval_duration_ms, Some(1500));
+    }
+
+    // =================== parse_stack_drafts tests ===================
+
+    fn make_input(index: usize, subject: &str) -> StackPrInput {
+        StackPrInput {
+            index,
+            base: "main".into(),
+            head: format!("head-{index}"),
+            included_change_ids: vec![format!("ch-{index}")],
+            subject: subject.into(),
+        }
+    }
+
+    #[test]
+    fn stack_drafts_valid_full_array() {
+        let inputs = vec![make_input(0, "First PR"), make_input(1, "Second PR")];
+        let raw = r#"[
+            {"change_index": 0, "type": "feat", "branch_slug": "first-pr", "title": "First PR", "description": "Desc 0"},
+            {"change_index": 1, "type": "fix",  "branch_slug": "second-pr","title": "Second PR","description": "Desc 1"}
+        ]"#;
+        let drafts = parse_stack_drafts(raw, &inputs);
+        assert_eq!(drafts.len(), 2);
+        assert_eq!(drafts[0].index, 0);
+        assert_eq!(drafts[0].pr_type, "feat");
+        assert_eq!(drafts[0].branch_slug, "first-pr");
+        assert_eq!(drafts[0].title, "First PR");
+        assert_eq!(drafts[0].description, "Desc 0");
+        assert_eq!(drafts[1].index, 1);
+        assert_eq!(drafts[1].pr_type, "fix");
+        assert_eq!(drafts[1].branch_slug, "second-pr");
+    }
+
+    #[test]
+    fn stack_drafts_one_malformed_row_falls_back_others_intact() {
+        let inputs = vec![
+            make_input(0, "Good PR"),
+            make_input(1, "Bad PR"),
+            make_input(2, "Also Good PR"),
+        ];
+        // Row 1 has malformed JSON (will be dropped); row 0 and 2 are valid.
+        let raw = r#"[
+            {"change_index": 0, "type": "feat", "branch_slug": "good-pr",      "title": "Good PR",      "description": "Desc 0"},
+            "this is not an object",
+            {"change_index": 2, "type": "docs", "branch_slug": "also-good-pr", "title": "Also Good PR", "description": "Desc 2"}
+        ]"#;
+        let drafts = parse_stack_drafts(raw, &inputs);
+        assert_eq!(drafts.len(), 3, "must always return inputs.len() drafts");
+        // Row 0 intact
+        assert_eq!(drafts[0].pr_type, "feat");
+        assert_eq!(drafts[0].title, "Good PR");
+        // Row 1 fell back
+        assert_eq!(drafts[1].pr_type, "chore");
+        assert_eq!(drafts[1].title, "Bad PR");
+        assert_eq!(drafts[1].branch_slug, "bad-pr");
+        // Row 2 intact
+        assert_eq!(drafts[2].pr_type, "docs");
+        assert_eq!(drafts[2].title, "Also Good PR");
+    }
+
+    #[test]
+    fn stack_drafts_missing_index_filled_by_fallback() {
+        let inputs = vec![make_input(0, "PR Zero"), make_input(1, "PR One")];
+        // Only change_index 0 is present; 1 is missing.
+        let raw = r#"[
+            {"change_index": 0, "type": "feat", "branch_slug": "pr-zero", "title": "PR Zero", "description": "D0"}
+        ]"#;
+        let drafts = parse_stack_drafts(raw, &inputs);
+        assert_eq!(drafts.len(), 2);
+        assert_eq!(drafts[0].pr_type, "feat");
+        assert_eq!(drafts[0].title, "PR Zero");
+        // Missing index 1 falls back.
+        assert_eq!(drafts[1].index, 1);
+        assert_eq!(drafts[1].pr_type, "chore");
+        assert_eq!(drafts[1].title, "PR One");
+        assert_eq!(drafts[1].branch_slug, "pr-one");
+    }
+
+    #[test]
+    fn stack_drafts_garbage_payload_all_fallback() {
+        let inputs = vec![make_input(0, "Fallback A"), make_input(1, "Fallback B")];
+        let drafts = parse_stack_drafts("not json at all", &inputs);
+        assert_eq!(drafts.len(), 2);
+        assert_eq!(drafts[0].pr_type, "chore");
+        assert_eq!(drafts[0].title, "Fallback A");
+        assert_eq!(drafts[0].branch_slug, "fallback-a");
+        assert_eq!(drafts[1].pr_type, "chore");
+        assert_eq!(drafts[1].title, "Fallback B");
+        assert_eq!(drafts[1].branch_slug, "fallback-b");
+    }
+
+    #[test]
+    fn stack_drafts_slug_normalized_per_row() {
+        let inputs = vec![make_input(0, "Add Stuff")];
+        // branch_slug has uppercase and pr/ prefix; should be normalized.
+        let raw = r#"[
+            {"change_index": 0, "type": "feat", "branch_slug": "pr/feat/Add Stuff!", "title": "Add Stuff", "description": "D"}
+        ]"#;
+        let drafts = parse_stack_drafts(raw, &inputs);
+        assert_eq!(drafts[0].branch_slug, "add-stuff");
+    }
+
+    #[test]
+    fn stack_drafts_code_fenced_array() {
+        let inputs = vec![make_input(0, "Fenced PR")];
+        let raw = "```json\n[{\"change_index\":0,\"type\":\"feat\",\"branch_slug\":\"fenced-pr\",\"title\":\"Fenced PR\",\"description\":\"D\"}]\n```";
+        let drafts = parse_stack_drafts(raw, &inputs);
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].pr_type, "feat");
+        assert_eq!(drafts[0].title, "Fenced PR");
+    }
+
+    #[test]
+    fn stack_drafts_extra_and_indexless_rows_do_not_displace_valid_ones() {
+        // The model returns a valid row for index 0, a structurally-valid object
+        // with no `change_index` (must be dropped, not mis-assigned), and an
+        // extra row for an index that has no matching input (must be ignored).
+        // Index 1 has no usable row and must fall back.
+        let inputs = vec![make_input(0, "Real Zero"), make_input(1, "Real One")];
+        let raw = r#"[
+            {"change_index": 0, "type": "feat", "branch_slug": "real-zero", "title": "Real Zero", "description": "D0"},
+            {"type": "fix", "branch_slug": "ghost", "title": "Indexless Ghost", "description": "no index"},
+            {"change_index": 9, "type": "docs", "branch_slug": "extra", "title": "Extra Row", "description": "unmatched"}
+        ]"#;
+        let drafts = parse_stack_drafts(raw, &inputs);
+        assert_eq!(drafts.len(), 2);
+        assert_eq!(drafts[0].title, "Real Zero");
+        assert_eq!(drafts[0].pr_type, "feat");
+        // Index 1 falls back; the indexless and out-of-range rows never leak in.
+        assert_eq!(drafts[1].index, 1);
+        assert_eq!(drafts[1].pr_type, "chore");
+        assert_eq!(drafts[1].title, "Real One");
+        assert_eq!(drafts[1].branch_slug, "real-one");
+    }
+
+    #[test]
+    fn stack_drafts_duplicate_index_is_deterministic_last_wins() {
+        // Two rows claim change_index 0. The result must be deterministic and
+        // still produce exactly inputs.len() drafts in index order.
+        let inputs = vec![make_input(0, "Subject Zero")];
+        let raw = r#"[
+            {"change_index": 0, "type": "feat", "branch_slug": "first", "title": "First Claim", "description": "A"},
+            {"change_index": 0, "type": "fix",  "branch_slug": "second","title": "Second Claim","description": "B"}
+        ]"#;
+        let drafts = parse_stack_drafts(raw, &inputs);
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].pr_type, "fix");
+        assert_eq!(drafts[0].title, "Second Claim");
+        assert_eq!(drafts[0].branch_slug, "second");
     }
 }
