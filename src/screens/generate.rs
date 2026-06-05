@@ -325,6 +325,10 @@ pub struct GenerateState {
     pub bulk_editor: BulkItemEditor,
     /// Scroll offset for the PR list in the bulk review modal.
     pub bulk_list_scroll: Cell<u16>,
+    /// Scroll offset for the right (Selected PR) pane in the bulk review modal.
+    /// Updated at render time using the natural-scroll pattern so the focused
+    /// field stays fully visible. Cell allows mutation through a shared reference.
+    pub bulk_form_scroll: Cell<u16>,
 }
 
 impl GenerateState {
@@ -346,6 +350,7 @@ impl GenerateState {
             bulk_review_focus: BulkReviewFocus::List,
             bulk_editor: BulkItemEditor::default(),
             bulk_list_scroll: Cell::new(0),
+            bulk_form_scroll: Cell::new(0),
         }
     }
 
@@ -816,81 +821,10 @@ fn render_form(state: &GenerateState, frame: &mut Frame, area: Rect) {
 
         match state.form.field(id) {
             FieldState::Text(t) => {
-                form_line(
-                    frame,
-                    inner,
-                    cy,
-                    scroll,
-                    Line::from(Span::styled(format!("{marker}{label}:"), style)),
+                let value_w = w.saturating_sub(2);
+                render_text_field(
+                    frame, inner, &mut cy, scroll, t, label, marker, style, editing, value_w,
                 );
-                cy += 1;
-
-                let indent: u16 = 2;
-                let value_w = w.saturating_sub(indent as usize);
-                let value_h: u16 = if t.multiline {
-                    multiline_value_height(t, value_w, editing)
-                } else {
-                    1
-                };
-                let sy = inner.y as i32 + cy as i32 - scroll as i32;
-                if sy >= inner.y as i32 && (sy as u16) < inner.y + inner.height {
-                    let vis_h = value_h.min((inner.y + inner.height).saturating_sub(sy as u16));
-                    if editing {
-                        let rect = Rect {
-                            x: inner.x + indent,
-                            y: sy as u16,
-                            width: inner.width.saturating_sub(indent),
-                            height: vis_h,
-                        };
-                        frame.render_widget(&t.editor, rect);
-                    } else {
-                        let rect = Rect {
-                            x: inner.x,
-                            y: sy as u16,
-                            width: inner.width,
-                            height: vis_h,
-                        };
-                        let lines = if t.multiline {
-                            let mut v: Vec<Line> = t
-                                .value
-                                .lines()
-                                .flat_map(|l| {
-                                    wrap_chars(l, value_w).into_iter().map(|s| {
-                                        Line::from(Span::styled(format!("  {s}"), theme::text()))
-                                    })
-                                })
-                                .take(value_h as usize)
-                                .collect();
-                            // If the content exceeds the visible height,
-                            // mark the last visible row with "…" so the
-                            // user knows there's more below.
-                            let total_lines: usize =
-                                t.value.lines().map(|l| wrap_chars(l, value_w).len()).sum();
-                            if total_lines > value_h as usize
-                                && let Some(last) = v.last_mut()
-                            {
-                                *last = Line::from(Span::styled("  …", theme::muted()));
-                            }
-                            if v.is_empty() {
-                                v.push(empty_value_line());
-                            }
-                            while v.len() < value_h as usize {
-                                v.push(Line::from(""));
-                            }
-                            v
-                        } else if t.value.is_empty() {
-                            vec![empty_value_line()]
-                        } else {
-                            let (display, _) = truncate_ellipsis(&t.value, value_w);
-                            vec![Line::from(Span::styled(
-                                format!("  {display}"),
-                                theme::text(),
-                            ))]
-                        };
-                        frame.render_widget(Paragraph::new(lines), rect);
-                    }
-                }
-                cy += value_h;
 
                 for error in &t.errors {
                     form_line(
@@ -951,6 +885,107 @@ fn form_block(frame: &mut Frame, inner: Rect, cy: u16, scroll: u16, lines: Vec<L
             },
         );
     }
+}
+
+/// Render one editable text field (label row + value box) using the
+/// viewport-clipped positional model shared by the form pane and the bulk modal.
+///
+/// - Advances `*cy` past the label and the value box.
+/// - When `editing`: renders the live `&t.editor` widget (cursor visible).
+/// - When not editing: renders the static value — single-line truncated with
+///   ellipsis; multiline wrapped via `wrap_chars` with the trailing `…` overflow
+///   marker and `empty_value_line()` padding.
+/// - Value height: `1` for single-line, `multiline_value_height(t, value_w,
+///   editing)` for multiline.
+///
+/// Error lines are NOT included; the form-pane call site appends them after
+/// this call so its visual output is unchanged.
+#[allow(clippy::too_many_arguments)]
+fn render_text_field(
+    frame: &mut Frame,
+    inner: Rect,
+    cy: &mut u16,
+    scroll: u16,
+    t: &form::TextFieldState,
+    label: &str,
+    marker: &str,
+    label_style: Style,
+    editing: bool,
+    value_w: usize,
+) {
+    // Label row.
+    form_line(
+        frame,
+        inner,
+        *cy,
+        scroll,
+        Line::from(Span::styled(format!("{marker}{label}:"), label_style)),
+    );
+    *cy += 1;
+
+    let indent: u16 = 2;
+    let value_h: u16 = if t.multiline {
+        multiline_value_height(t, value_w, editing)
+    } else {
+        1
+    };
+
+    let sy = inner.y as i32 + *cy as i32 - scroll as i32;
+    if sy >= inner.y as i32 && (sy as u16) < inner.y + inner.height {
+        let vis_h = value_h.min((inner.y + inner.height).saturating_sub(sy as u16));
+        if editing {
+            let rect = Rect {
+                x: inner.x + indent,
+                y: sy as u16,
+                width: inner.width.saturating_sub(indent),
+                height: vis_h,
+            };
+            frame.render_widget(&t.editor, rect);
+        } else {
+            let rect = Rect {
+                x: inner.x,
+                y: sy as u16,
+                width: inner.width,
+                height: vis_h,
+            };
+            let lines = if t.multiline {
+                let mut v: Vec<Line> = t
+                    .value
+                    .lines()
+                    .flat_map(|l| {
+                        wrap_chars(l, value_w)
+                            .into_iter()
+                            .map(|s| Line::from(Span::styled(format!("  {s}"), theme::text())))
+                    })
+                    .take(value_h as usize)
+                    .collect();
+                let total_lines: usize =
+                    t.value.lines().map(|l| wrap_chars(l, value_w).len()).sum();
+                if total_lines > value_h as usize
+                    && let Some(last) = v.last_mut()
+                {
+                    *last = Line::from(Span::styled("  …", theme::muted()));
+                }
+                if v.is_empty() {
+                    v.push(empty_value_line());
+                }
+                while v.len() < value_h as usize {
+                    v.push(Line::from(""));
+                }
+                v
+            } else if t.value.is_empty() {
+                vec![empty_value_line()]
+            } else {
+                let (display, _) = truncate_ellipsis(&t.value, value_w);
+                vec![Line::from(Span::styled(
+                    format!("  {display}"),
+                    theme::text(),
+                ))]
+            };
+            frame.render_widget(Paragraph::new(lines), rect);
+        }
+    }
+    *cy += value_h;
 }
 
 fn form_scroll(state: &GenerateState, width: usize, visible: u16) -> u16 {
@@ -1084,8 +1119,12 @@ fn render_picker_modal(
                 theme::text()
             };
             let suffix = warning.map_or(String::new(), |text| format!("  ({text})"));
+            let label_width = (inner.width as usize)
+                .saturating_sub(marker.chars().count())
+                .saturating_sub(suffix.chars().count());
+            let (label, _) = truncate_ellipsis(&option.label, label_width);
             lines.push(Line::from(Span::styled(
-                format!("{marker}{}{suffix}", option.label),
+                format!("{marker}{label}{suffix}"),
                 style,
             )));
         }
@@ -1113,33 +1152,62 @@ fn render_jj_op_dialog(dialog: &JjOpDialog, frame: &mut Frame, area: Rect) {
     frame.render_widget(block, rect);
 
     let lines = match dialog {
-        JjOpDialog::Confirm(pending) => vec![
-            Line::from(Span::styled(pending.question(), theme::text())),
-            Line::from(""),
-            Line::from(Span::styled(
+        JjOpDialog::Confirm(pending) => {
+            let mut lines =
+                wrapped_styled_lines("", &pending.question(), inner.width as usize, theme::text());
+            lines.push(Line::from(""));
+            lines.extend(wrapped_styled_lines(
+                "",
                 "This rewrites the stack. Conflicts will be probed and reverted.",
+                inner.width as usize,
                 theme::warning(),
-            )),
-            Line::from(""),
-            Line::from(vec![
+            ));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
                 Span::styled("Enter", theme::selected(true)),
                 Span::styled(" confirm   ", theme::muted()),
                 Span::styled("Esc", theme::selected(false)),
                 Span::styled(" cancel", theme::muted()),
-            ]),
-        ],
-        JjOpDialog::Error { message, .. } => vec![
-            Line::from(Span::styled("Cannot run jj operation.", theme::error())),
-            Line::from(""),
-            Line::from(Span::raw(message.clone())),
-            Line::from(""),
-            Line::from(vec![
+            ]));
+            bounded_lines(lines, inner.height as usize)
+        }
+        JjOpDialog::Error { message, .. } => {
+            let mut lines = vec![
+                Line::from(Span::styled(
+                    "Cannot run jj operation.",
+                    theme::error().add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+            ];
+            let footer = Line::from(vec![
                 Span::styled("Enter/Esc", theme::selected(true)),
                 Span::styled(" close", theme::muted()),
-            ]),
-        ],
+            ]);
+            let msg_rows = (inner.height as usize).saturating_sub(lines.len() + 2);
+            lines.extend(bounded_lines(
+                wrapped_styled_lines("", message, inner.width as usize, theme::text()),
+                msg_rows,
+            ));
+            lines.push(Line::from(""));
+            lines.push(footer);
+            bounded_lines(lines, inner.height as usize)
+        }
     };
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn bounded_lines(mut lines: Vec<Line<'static>>, max_rows: usize) -> Vec<Line<'static>> {
+    if max_rows == 0 {
+        return Vec::new();
+    }
+    if lines.len() <= max_rows {
+        return lines;
+    }
+    lines.truncate(max_rows);
+    if let Some(last) = lines.last_mut() {
+        *last = Line::from(Span::styled("…", theme::muted()));
+    }
+    lines
 }
 
 // ========================= Bulk modal render ================================
@@ -1290,20 +1358,26 @@ fn render_bulk_failed(frame: &mut Frame, rect: Rect, message: &str) {
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(""),
         Line::from(Span::styled(
             "  Generation failed.",
             theme::error().add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from(Span::raw(format!("  {message}"))),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("Esc", theme::selected(true)),
-            Span::styled(" close", theme::muted()),
-        ]),
     ];
+    let footer = Line::from(vec![
+        Span::styled("Esc", theme::selected(true)),
+        Span::styled(" close", theme::muted()),
+    ]);
+    let msg_rows = (inner.height as usize).saturating_sub(lines.len() + 2);
+    lines.extend(bounded_lines(
+        wrapped_styled_lines("  ", message, inner.width as usize, theme::text()),
+        msg_rows,
+    ));
+    lines.push(Line::from(""));
+    lines.push(footer);
+    let lines = bounded_lines(lines, inner.height as usize);
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
@@ -1318,80 +1392,97 @@ fn render_bulk_review(
     let block = theme::modal_block("Review Stacked PRs");
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
+    let [body_area, footer_area] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
 
-    // Header line: base, PR count, shared metadata summary, blocker count.
-    let blocker_count: usize = plan.items.iter().map(|i| i.blockers.len()).sum();
-    let header_parts = {
-        let mut parts = vec![
-            format!(
-                "base: {}",
-                if plan.items.is_empty() {
-                    "-"
-                } else {
-                    &plan.items[0].input.base
-                }
-            ),
-            format!("{} PRs", plan.items.len()),
-        ];
-        if !plan.labels.is_empty() {
-            parts.push(format!("labels: {}", plan.labels.join(", ")));
-        }
-        if !plan.milestone.is_empty() {
-            parts.push(format!("milestone: {}", plan.milestone));
-        }
-        if blocker_count > 0 {
-            parts.push(format!(
-                "{blocker_count} blocker{}",
-                if blocker_count == 1 { "" } else { "s" }
-            ));
-        }
-        parts.join("  |  ")
-    };
+    frame.render_widget(
+        Paragraph::new(bulk_review_footer_line(plan, footer_area.width)),
+        footer_area,
+    );
 
-    // Split inner area: header row, then two-pane.
-    if inner.height < 4 {
-        // Too small to render the two-pane layout.
-        let lines = vec![Line::from(Span::styled(
-            format!("  {header_parts}"),
-            theme::muted(),
-        ))];
-        frame.render_widget(Paragraph::new(lines), inner);
+    if body_area.width == 0 || body_area.height == 0 {
         return;
     }
 
-    let [header_area, body_area] = ratatui::layout::Layout::vertical([
-        ratatui::layout::Constraint::Length(1),
-        ratatui::layout::Constraint::Fill(1),
-    ])
-    .areas(inner);
-
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!("  {header_parts}"),
-            theme::muted(),
-        ))),
-        header_area,
-    );
-
-    // Master-detail: left = PR list, middle = separator, right = per-PR form.
-    let list_width = (body_area.width.saturating_sub(1) / 2).clamp(20, 40);
-    let [list_area, separator_area, form_area] = ratatui::layout::Layout::horizontal([
-        ratatui::layout::Constraint::Length(list_width),
-        ratatui::layout::Constraint::Length(1),
-        ratatui::layout::Constraint::Fill(1),
+    let gap = if body_area.width >= 80 { 2 } else { 1 };
+    let list_width = (body_area.width.saturating_sub(gap) / 2).clamp(24, 44);
+    let [list_shell, _gutter_area, form_shell] = Layout::horizontal([
+        Constraint::Length(list_width),
+        Constraint::Length(gap),
+        Constraint::Fill(1),
     ])
     .areas(body_area);
 
-    render_bulk_separator(frame, separator_area);
+    let list_block = theme::pane_block("Stack", state.bulk_review_focus == BulkReviewFocus::List);
+    let list_area = list_block.inner(list_shell);
+    frame.render_widget(list_block, list_shell);
+
+    let form_block = theme::pane_block(
+        "Selected PR",
+        state.bulk_review_focus == BulkReviewFocus::Preview,
+    );
+    let form_area = form_block.inner(form_shell);
+    frame.render_widget(form_block, form_shell);
+
+    render_bulk_review_panes(state, plan, cursor, pushing, frame, list_area, form_area);
+}
+
+fn render_bulk_review_panes(
+    state: &GenerateState,
+    plan: &crate::domain::StackPlan,
+    cursor: usize,
+    pushing: Option<usize>,
+    frame: &mut Frame,
+    list_area: Rect,
+    form_area: Rect,
+) {
     render_bulk_pr_list(state, plan, cursor, pushing, frame, list_area);
     render_bulk_pr_form(state, plan, cursor, pushing, frame, form_area);
 }
 
-fn render_bulk_separator(frame: &mut Frame, area: Rect) {
-    let lines = (0..area.height)
-        .map(|_| Line::from(Span::styled("|", theme::muted())))
-        .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(lines), area);
+fn bulk_review_footer_line(plan: &crate::domain::StackPlan, width: u16) -> Line<'static> {
+    let blocker_count: usize = plan.items.iter().map(|item| item.blockers.len()).sum();
+    let mut chips = vec![
+        theme::StatusChip::plain(
+            format!(
+                "base: {}",
+                plan.items
+                    .first()
+                    .map(|item| item.input.base.as_str())
+                    .unwrap_or("-")
+            ),
+            0,
+        ),
+        theme::StatusChip::plain(format!("{} PRs", plan.items.len()), 1),
+    ];
+
+    if !plan.labels.is_empty() {
+        chips.push(theme::StatusChip::plain(
+            format!("labels: {}", plan.labels.join(", ")),
+            2,
+        ));
+    }
+    if !plan.milestone.is_empty() {
+        chips.push(theme::StatusChip::plain(
+            format!("milestone: {}", plan.milestone),
+            3,
+        ));
+    }
+    if blocker_count > 0 {
+        chips.push(theme::StatusChip::plain(
+            format!(
+                "{blocker_count} blocker{}",
+                if blocker_count == 1 { "" } else { "s" }
+            ),
+            4,
+        ));
+    }
+
+    if width == 0 {
+        Line::from(" ")
+    } else {
+        theme::status_line(chips, width)
+    }
 }
 
 fn render_bulk_pr_list(
@@ -1528,58 +1619,63 @@ fn render_bulk_pr_form(
     };
 
     let w = area.width as usize;
-    let mut lines: Vec<Line<'static>> = Vec::new();
+    let editor = &state.bulk_editor;
+    let value_w = w.saturating_sub(2);
+
+    let scroll = bulk_form_scroll(state, plan, item, cursor, pushing, w, area.height);
+
+    // --- Render pass ---
+    // Use the same inner rect as `area` (the caller already passed the inner
+    // rect from the pane block).
+    let inner = area;
+    let mut cy = 0u16;
 
     // Read-only head / base.
     let (head_s, _) = truncate_ellipsis(&item.input.head, w.saturating_sub(8));
     let (base_s, _) = truncate_ellipsis(&item.input.base, w.saturating_sub(8));
-    lines.push(Line::from(vec![
-        Span::styled("  head: ", theme::muted()),
-        Span::styled(head_s, theme::text()),
-        Span::styled("  (read-only)", theme::muted()),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("  base: ", theme::muted()),
-        Span::styled(base_s, theme::text()),
-        Span::styled("  (read-only)", theme::muted()),
-    ]));
-    if pushing == Some(cursor) {
-        let message = if state.last_action.as_deref() == Some("checking current PR state") {
-            "  checking: bookmarks and existing PRs"
-        } else {
-            "  pushing: bookmark -> push -> create PR"
-        };
-        lines.push(Line::from(Span::styled(
-            message,
-            theme::accent().add_modifier(Modifier::BOLD),
-        )));
-    } else {
-        match &item.status {
-            crate::domain::PrStatus::Pending => {
-                lines.push(kv_line("push status", "pending".into()))
-            }
-            crate::domain::PrStatus::Bookmarked => {
-                lines.push(kv_line("push status", "bookmark set".into()))
-            }
-            crate::domain::PrStatus::Pushed => {
-                lines.push(kv_line("push status", "bookmark pushed".into()))
-            }
-            crate::domain::PrStatus::Created { url } => {
-                lines.push(kv_line("push status", "created".into()));
-                lines.push(kv_line("url", url.clone()));
-            }
-            crate::domain::PrStatus::Failed { step, message } => {
-                lines.push(Line::from(Span::styled(
-                    format!("  failed at {}: {message}", step.label()),
-                    theme::error().add_modifier(Modifier::BOLD),
-                )));
-            }
-        }
-    }
-    lines.push(separator_line(w.saturating_sub(2)));
+    form_line(
+        frame,
+        inner,
+        cy,
+        scroll,
+        Line::from(vec![
+            Span::styled("  head: ", theme::muted()),
+            Span::styled(head_s, theme::text()),
+            Span::styled("  (read-only)", theme::muted()),
+        ]),
+    );
+    cy += 1;
+    form_line(
+        frame,
+        inner,
+        cy,
+        scroll,
+        Line::from(vec![
+            Span::styled("  base: ", theme::muted()),
+            Span::styled(base_s, theme::text()),
+            Span::styled("  (read-only)", theme::muted()),
+        ]),
+    );
+    cy += 1;
 
-    // Editable fields — reuse bulk_editor from state.
-    let editor = &state.bulk_editor;
+    render_bulk_lines(
+        frame,
+        inner,
+        &mut cy,
+        scroll,
+        bulk_item_status_lines(state, item, cursor, pushing, w),
+    );
+
+    form_line(
+        frame,
+        inner,
+        cy,
+        scroll,
+        separator_line(w.saturating_sub(2)),
+    );
+    cy += 1;
+
+    // Editable fields via the shared renderer.
     for field in [
         BulkItemField::Title,
         BulkItemField::Branch,
@@ -1598,78 +1694,239 @@ fn render_bulk_pr_form(
         } else {
             theme::muted()
         };
-        lines.push(Line::from(Span::styled(
-            format!("{marker}{}:", field.label()),
-            style,
-        )));
-
         let t = editor.field(field);
-        let indent: u16 = 2;
-        let value_w = w.saturating_sub(indent as usize);
-        let content = if editing { &t.buffer } else { &t.value };
+        render_text_field(
+            frame,
+            inner,
+            &mut cy,
+            scroll,
+            t,
+            field.label(),
+            marker,
+            style,
+            editing,
+            value_w,
+        );
+    }
 
-        if field == BulkItemField::Description {
-            let preview: Vec<&str> = content.lines().take(4).collect();
-            if preview.is_empty() || content.is_empty() {
-                lines.push(Line::from(Span::styled("  (empty)", theme::muted())));
-            } else {
-                for line in preview {
-                    for wrapped in wrap_chars(line, value_w) {
-                        lines.push(Line::from(Span::styled(
-                            format!("  {wrapped}"),
-                            theme::text(),
-                        )));
-                    }
-                }
-            }
-        } else if editing {
-            // Render the editor widget inline for single-line fields.
-            let avail_y = area.y + lines.len() as u16;
-            if avail_y < area.y + area.height {
-                let rect = Rect {
-                    x: area.x + indent,
-                    y: avail_y,
-                    width: area.width.saturating_sub(indent),
-                    height: 1,
-                };
-                frame.render_widget(&t.editor, rect);
-                lines.push(Line::from("")); // placeholder to track cy
-            } else {
-                lines.push(Line::from(Span::styled(
-                    format!("  {}", fmt_or_dash(content)),
-                    theme::text(),
-                )));
-            }
+    render_bulk_lines(
+        frame,
+        inner,
+        &mut cy,
+        scroll,
+        bulk_annotation_lines(item, w),
+    );
+    render_bulk_lines(frame, inner, &mut cy, scroll, bulk_result_lines(plan, w));
+
+    if let Some(note) = &state.last_action {
+        render_bulk_lines(frame, inner, &mut cy, scroll, bulk_note_lines(note, w));
+    }
+}
+
+fn bulk_form_scroll(
+    state: &GenerateState,
+    plan: &crate::domain::StackPlan,
+    item: &crate::domain::StackPlanItem,
+    cursor: usize,
+    pushing: Option<usize>,
+    width: usize,
+    visible: u16,
+) -> u16 {
+    let editor = &state.bulk_editor;
+    let value_w = width.saturating_sub(2);
+    let mut cy = 0u16;
+    cy += 2; // read-only head + base
+
+    let status_start = cy;
+    cy = cy.saturating_add(line_count(&bulk_item_status_lines(
+        state, item, cursor, pushing, width,
+    )));
+    let status_end = cy.saturating_sub(1);
+
+    cy += 1; // separator
+
+    let mut focused_start = 0u16;
+    let mut focused_end = 0u16;
+    for field in [
+        BulkItemField::Title,
+        BulkItemField::Branch,
+        BulkItemField::Description,
+    ] {
+        let is_focused = editor.field_focus == field;
+        let editing = is_focused && editor.editing;
+        let t = editor.field(field);
+        let label_row = cy;
+        cy += 1; // label
+        let value_h = if t.multiline {
+            multiline_value_height(t, value_w, editing)
         } else {
-            let (display, _) = truncate_ellipsis(content, value_w.saturating_sub(2));
-            lines.push(Line::from(Span::styled(
-                format!("  {}", fmt_or_dash(&display)),
-                theme::text(),
-            )));
+            1
+        };
+        cy = cy.saturating_add(value_h);
+        if is_focused {
+            focused_start = label_row;
+            focused_end = cy.saturating_sub(1);
         }
     }
 
-    // Blockers / warnings.
-    for blocker in &item.blockers {
-        lines.push(Line::from(Span::styled(
-            format!("  ! {blocker}"),
-            theme::error(),
-        )));
-    }
-    for warning in &item.warnings {
-        lines.push(Line::from(Span::styled(
-            format!("  ~ {warning}"),
-            theme::warning(),
-        )));
+    let annotation_start = cy;
+    cy = cy.saturating_add(line_count(&bulk_annotation_lines(item, width)));
+    let annotation_end = cy.saturating_sub(1);
+
+    let result_start = cy;
+    cy = cy.saturating_add(line_count(&bulk_result_lines(plan, width)));
+    let result_end = cy.saturating_sub(1);
+
+    if let Some(note) = &state.last_action {
+        cy = cy.saturating_add(line_count(&bulk_note_lines(note, width)));
     }
 
-    // Shared metadata.
-    if !plan.labels.is_empty() {
-        lines.push(separator_line(w.saturating_sub(2)));
-        lines.push(Line::from(vec![
-            Span::styled("  labels: ", theme::muted()),
-            Span::styled(plan.labels.join(", "), theme::text()),
-        ]));
+    let (target_start, target_end) = bulk_scroll_target(
+        editor.editing,
+        item,
+        plan,
+        (focused_start, focused_end),
+        (status_start, status_end),
+        (annotation_start, annotation_end),
+        (result_start, result_end),
+    );
+
+    let scroll = scroll_window_offset(
+        state.bulk_form_scroll.get(),
+        target_start,
+        target_end,
+        visible,
+        cy,
+    );
+    state.bulk_form_scroll.set(scroll);
+    scroll
+}
+
+fn bulk_scroll_target(
+    editing: bool,
+    item: &crate::domain::StackPlanItem,
+    plan: &crate::domain::StackPlan,
+    focused: (u16, u16),
+    status: (u16, u16),
+    annotations: (u16, u16),
+    result: (u16, u16),
+) -> (u16, u16) {
+    if editing {
+        return focused;
+    }
+    if matches!(item.status, crate::domain::PrStatus::Failed { .. }) {
+        return status;
+    }
+    if !item.blockers.is_empty() {
+        return annotations;
+    }
+    if plan
+        .items
+        .iter()
+        .any(|item| matches!(item.status, crate::domain::PrStatus::Failed { .. }))
+    {
+        return result;
+    }
+    focused
+}
+
+fn line_count(lines: &[Line<'static>]) -> u16 {
+    lines.len().min(u16::MAX as usize) as u16
+}
+
+fn scroll_window_offset(cur: u16, start: u16, end: u16, visible: u16, total: u16) -> u16 {
+    if visible == 0 {
+        return 0;
+    }
+    let max_off = total.saturating_sub(visible);
+    let cur = cur.min(max_off);
+    if start < cur {
+        start
+    } else if end.saturating_add(1) > cur.saturating_add(visible) {
+        end.saturating_add(1).saturating_sub(visible).min(max_off)
+    } else {
+        cur
+    }
+}
+
+fn render_bulk_lines(
+    frame: &mut Frame,
+    inner: Rect,
+    cy: &mut u16,
+    scroll: u16,
+    lines: Vec<Line<'static>>,
+) {
+    if lines.is_empty() {
+        return;
+    }
+    let height = line_count(&lines);
+    form_block(frame, inner, *cy, scroll, lines);
+    *cy = (*cy).saturating_add(height);
+}
+
+fn bulk_item_status_lines(
+    state: &GenerateState,
+    item: &crate::domain::StackPlanItem,
+    cursor: usize,
+    pushing: Option<usize>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    if pushing == Some(cursor) {
+        let message = if state.last_action.as_deref() == Some("checking current PR state") {
+            "checking: bookmarks and existing PRs"
+        } else {
+            "pushing: bookmark -> push -> create PR"
+        };
+        return wrapped_styled_lines(
+            "  ",
+            message,
+            width,
+            theme::accent().add_modifier(Modifier::BOLD),
+        );
+    }
+
+    match &item.status {
+        crate::domain::PrStatus::Pending => vec![kv_line_fit("push status", "pending", width)],
+        crate::domain::PrStatus::Bookmarked => {
+            vec![kv_line_fit("push status", "bookmark set", width)]
+        }
+        crate::domain::PrStatus::Pushed => {
+            vec![kv_line_fit("push status", "bookmark pushed", width)]
+        }
+        crate::domain::PrStatus::Created { url } => vec![
+            kv_line_fit("push status", "created", width),
+            kv_line_fit("url", url, width),
+        ],
+        crate::domain::PrStatus::Failed { step, message } => {
+            let mut lines = vec![Line::from(Span::styled(
+                format!("  failed at {}", step.label()),
+                theme::error().add_modifier(Modifier::BOLD),
+            ))];
+            lines.extend(wrapped_styled_lines("  ", message, width, theme::error()));
+            lines
+        }
+    }
+}
+
+fn bulk_annotation_lines(item: &crate::domain::StackPlanItem, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for blocker in &item.blockers {
+        lines.extend(wrapped_styled_lines("  ! ", blocker, width, theme::error()));
+    }
+    for warning in &item.warnings {
+        lines.extend(wrapped_styled_lines(
+            "  ~ ",
+            warning,
+            width,
+            theme::warning(),
+        ));
+    }
+    lines
+}
+
+fn bulk_result_lines(plan: &crate::domain::StackPlan, width: usize) -> Vec<Line<'static>> {
+    if plan.items.is_empty() {
+        return Vec::new();
     }
 
     let all_created = plan
@@ -1687,36 +1944,38 @@ fn render_bulk_pr_form(
             _ => None,
         });
 
-    if !plan.items.is_empty() && (all_created || any_failed.is_some()) {
-        lines.push(separator_line(w.saturating_sub(2)));
-        lines.push(section_heading_line("result"));
-        if all_created {
-            lines.push(Line::from(Span::styled(
-                "  stack push complete",
-                theme::success().add_modifier(Modifier::BOLD),
-            )));
-        } else if let Some((index, step, message)) = any_failed {
-            lines.push(Line::from(Span::styled(
-                format!("  PR {} failed at {}: {message}", index + 1, step),
-                theme::error().add_modifier(Modifier::BOLD),
-            )));
-        }
-        for (index, item) in plan.items.iter().enumerate() {
-            if let crate::domain::PrStatus::Created { url } = &item.status {
-                lines.push(kv_line(&format!("pr {}", index + 1), url.clone()));
-            }
-        }
+    if !all_created && any_failed.is_none() {
+        return Vec::new();
     }
 
-    if let Some(note) = &state.last_action {
-        lines.push(separator_line(w.saturating_sub(2)));
+    let mut lines = vec![
+        separator_line(width.saturating_sub(2)),
+        section_heading_line("result"),
+    ];
+    if all_created {
         lines.push(Line::from(Span::styled(
-            format!("  {note}"),
-            theme::muted(),
+            "  stack push complete",
+            theme::success().add_modifier(Modifier::BOLD),
         )));
+    } else if let Some((index, step, message)) = any_failed {
+        lines.push(Line::from(Span::styled(
+            format!("  PR {} failed at {}", index + 1, step),
+            theme::error().add_modifier(Modifier::BOLD),
+        )));
+        lines.extend(wrapped_styled_lines("  ", message, width, theme::error()));
     }
+    for (index, item) in plan.items.iter().enumerate() {
+        if let crate::domain::PrStatus::Created { url } = &item.status {
+            lines.push(kv_line_fit(&format!("pr {}", index + 1), url, width));
+        }
+    }
+    lines
+}
 
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+fn bulk_note_lines(note: &str, width: usize) -> Vec<Line<'static>> {
+    let mut lines = vec![separator_line(width.saturating_sub(2))];
+    lines.extend(wrapped_styled_lines("  ", note, width, theme::muted()));
+    lines
 }
 
 fn render_preview(state: &GenerateState, status: &StatusStore, frame: &mut Frame, area: Rect) {
@@ -1732,7 +1991,9 @@ fn render_preview(state: &GenerateState, status: &StatusStore, frame: &mut Frame
         GeneratePhase::Idle => preview_idle_lines(state, status),
         GeneratePhase::Collecting => preview_collecting_lines(state),
         GeneratePhase::Generating { context, prompt } => preview_generating_lines(context, prompt),
-        GeneratePhase::DraftReady { draft, prompt } => preview_draft_lines(state, draft, prompt),
+        GeneratePhase::DraftReady { draft, prompt } => {
+            preview_draft_lines(state, draft, prompt, inner.width)
+        }
         GeneratePhase::Confirming {
             draft,
             prompt,
@@ -1741,7 +2002,7 @@ fn render_preview(state: &GenerateState, status: &StatusStore, frame: &mut Frame
         GeneratePhase::Executing { draft } => preview_executing_lines(draft),
         GeneratePhase::JjMutating { op, summary } => preview_jj_mutating_lines(*op, summary),
         GeneratePhase::Done { url } => preview_done_lines(url),
-        GeneratePhase::Failed { message } => preview_failed_lines(message),
+        GeneratePhase::Failed { message } => preview_failed_lines(message, inner.width),
     });
     lines.extend(next_step_lines(state, status));
     if let Some(hint) = &state.last_action {
@@ -1852,6 +2113,7 @@ fn preview_draft_lines(
     state: &GenerateState,
     draft: &GeneratedDraft,
     prompt: &PromptBuild,
+    width: u16,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![
         status_line(&format!(
@@ -1860,7 +2122,7 @@ fn preview_draft_lines(
         )),
         hint_line("The generated draft is editable in the center pane."),
     ];
-    lines.extend(draft_lines(state, draft));
+    lines.extend(draft_lines(state, draft, width));
     lines.extend(manifest_warning_lines(prompt));
     lines
 }
@@ -1922,14 +2184,18 @@ fn preview_done_lines(url: &str) -> Vec<Line<'static>> {
     ]
 }
 
-fn preview_failed_lines(message: &str) -> Vec<Line<'static>> {
-    vec![
-        Line::from(Span::styled(
-            "  failed",
-            theme::error().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::raw(format!("  {message}"))),
-    ]
+fn preview_failed_lines(message: &str, width: u16) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        "  failed",
+        theme::error().add_modifier(Modifier::BOLD),
+    ))];
+    lines.extend(wrapped_styled_lines(
+        "  ",
+        message,
+        width as usize,
+        theme::error(),
+    ));
+    lines
 }
 
 fn next_step_lines(state: &GenerateState, status: &StatusStore) -> Vec<Line<'static>> {
@@ -1994,6 +2260,33 @@ fn kv_line(key: &str, value: String) -> Line<'static> {
         Span::styled(format!("  {key}: "), theme::muted()),
         Span::styled(value, theme::text()),
     ])
+}
+
+fn kv_line_fit(key: &str, value: &str, width: usize) -> Line<'static> {
+    let prefix = format!("  {key}: ");
+    let prefix_width = prefix.chars().count();
+    if width <= prefix_width {
+        let (display, _) = truncate_ellipsis(&prefix, width);
+        return Line::from(Span::styled(display, theme::muted()));
+    }
+
+    let (display, _) = truncate_ellipsis(value, width - prefix_width);
+    Line::from(vec![
+        Span::styled(prefix, theme::muted()),
+        Span::styled(display, theme::text()),
+    ])
+}
+
+fn wrapped_styled_lines(
+    prefix: &str,
+    text: &str,
+    width: usize,
+    style: Style,
+) -> Vec<Line<'static>> {
+    wrap_prefixed(prefix, text, width)
+        .into_iter()
+        .map(|line| Line::from(Span::styled(line, style)))
+        .collect()
 }
 
 fn fmt_bytes(n: usize) -> String {
@@ -2132,7 +2425,7 @@ fn section_heading_line(title: &str) -> Line<'static> {
     theme::header(format!("{title}:"))
 }
 
-fn draft_lines(state: &GenerateState, draft: &GeneratedDraft) -> Vec<Line<'static>> {
+fn draft_lines(state: &GenerateState, draft: &GeneratedDraft, width: u16) -> Vec<Line<'static>> {
     let mut lines = section_header("draft");
     lines.push(kv_line("branch", fmt_or_dash(state.form.branch())));
     lines.push(kv_line("title", draft.title.clone()));
@@ -2143,7 +2436,12 @@ fn draft_lines(state: &GenerateState, draft: &GeneratedDraft) -> Vec<Line<'stati
         lines.push(Line::from(Span::styled("  (empty)", theme::muted())));
     } else {
         for line in draft.description.lines() {
-            lines.push(Line::from(Span::raw(format!("  {line}"))));
+            lines.extend(wrapped_styled_lines(
+                "  ",
+                line,
+                width as usize,
+                theme::text(),
+            ));
         }
     }
     lines
@@ -2289,6 +2587,45 @@ fn separator_line(width: usize) -> Line<'static> {
     ))
 }
 
+fn wrap_prefixed(prefix: &str, text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let prefix_width = prefix.chars().count();
+    if width <= prefix_width {
+        let (display, _) = truncate_ellipsis(prefix, width);
+        let mut lines = vec![display];
+        for physical in text.lines() {
+            lines.extend(wrap_chars(physical, width));
+        }
+        if text.is_empty() {
+            lines.push(String::new());
+        }
+        return lines;
+    }
+
+    let continuation = " ".repeat(prefix_width);
+    let text_width = width - prefix_width;
+    let mut lines = Vec::new();
+    let mut first = true;
+    for physical in text.lines() {
+        for wrapped in wrap_chars(physical, text_width) {
+            if first {
+                lines.push(format!("{prefix}{wrapped}"));
+                first = false;
+            } else {
+                lines.push(format!("{continuation}{wrapped}"));
+            }
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push(prefix.to_string());
+    }
+    lines
+}
+
 fn wrap_chars(value: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![String::new()];
@@ -2408,7 +2745,7 @@ fn render_help(state: &GenerateState, frame: &mut Frame, area: Rect) {
                     }
                 } else if state.bulk_review_focus == BulkReviewFocus::List {
                     vec![
-                        theme::HelpHint::primary("Enter", "preview"),
+                        theme::HelpHint::primary("Enter/→", "preview"),
                         theme::HelpHint::new("j/k", "select PR"),
                         theme::HelpHint::new("p", "push current"),
                         theme::HelpHint::new("P", "push all"),
@@ -2421,7 +2758,7 @@ fn render_help(state: &GenerateState, frame: &mut Frame, area: Rect) {
                         theme::HelpHint::new("Tab", "fields"),
                         theme::HelpHint::new("p", "push current"),
                         theme::HelpHint::new("P", "push all"),
-                        theme::HelpHint::new("Esc", "list"),
+                        theme::HelpHint::new("Esc/←", "list"),
                     ]
                 }
             }
@@ -2543,8 +2880,8 @@ mod tests {
         state.form.description.set_value("Body".into());
         state.phase = phase;
         state.pane = pane;
-        // selected_heads, bulk, bulk_editor, and bulk_list_scroll default to
-        // their zero values via GenerateState::new
+        // selected_heads, bulk, bulk_editor, bulk_list_scroll, and bulk_form_scroll
+        // default to their zero values via GenerateState::new
         state
     }
 

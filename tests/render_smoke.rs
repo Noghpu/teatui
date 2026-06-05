@@ -261,6 +261,7 @@ fn generate_with(phase: GeneratePhase) -> GenerateState {
         bulk_review_focus: BulkReviewFocus::List,
         bulk_editor: BulkItemEditor::default(),
         bulk_list_scroll: std::cell::Cell::new(0),
+        bulk_form_scroll: std::cell::Cell::new(0),
     }
 }
 
@@ -784,6 +785,28 @@ fn generate_bulk_review_failed_item_renders() {
 }
 
 #[test]
+fn generate_bulk_review_long_push_error_stays_readable() {
+    let mut s = generate_with(GeneratePhase::Idle);
+    let mut plan = sample_stack_plan(2);
+    plan.items[1].status = PrStatus::Failed {
+        step: teatui::domain::ExecuteStep::Create,
+        message: "tea pr create rejected the request because the remote returned a detailed validation message and the final-token-visible marker must remain readable".into(),
+    };
+    s.bulk = BulkPhase::Review {
+        plan,
+        cursor: 1,
+        pushing: None,
+        push_all: false,
+    };
+    s.bulk_review_focus = BulkReviewFocus::Preview;
+    s.seed_bulk_editor_from_cursor();
+    s.bulk_editor.field_focus = BulkItemField::Description;
+
+    let text = generate_small_text(&s, &populated_status());
+    assert!(text.contains("final-token-visible"), "{text}");
+}
+
+#[test]
 fn generate_bulk_failed_renders() {
     let mut s = generate_with(GeneratePhase::Idle);
     s.bulk = BulkPhase::Failed {
@@ -854,6 +877,26 @@ fn generate_bulk_small_terminal_each_phase_renders() {
         s.seed_bulk_editor_from_cursor();
         draw_generate_small(&s, &populated_status());
     }
+}
+
+#[test]
+fn generate_bulk_review_description_editing_renders() {
+    // Exercise the shared render_text_field path for the Description field
+    // in the bulk modal while editing — the TextArea widget (with cursor) must
+    // be drawn rather than a static preview.
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.bulk = BulkPhase::Review {
+        plan: sample_stack_plan(2),
+        cursor: 1,
+        pushing: None,
+        push_all: false,
+    };
+    s.bulk_review_focus = BulkReviewFocus::Preview;
+    s.seed_bulk_editor_from_cursor();
+    s.bulk_editor.field_focus = teatui::screens::generate::BulkItemField::Description;
+    s.bulk_editor.editing = true;
+    s.bulk_editor.description.begin_edit();
+    draw_generate(&s, &populated_status());
 }
 
 // ========================== Backend switcher ================================
