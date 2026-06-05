@@ -2,10 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
-use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
+use ratatui::{Frame, Terminal};
 
 use teatui::domain::{
     BaseBookmark, BulkPhase, ChangeContext, ContextBundle, DiffContext, GeneratedDraft, JjOp,
@@ -384,21 +384,7 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
             screens::generate::render(&state, &status, frame, frame.area());
         }
         SnapshotKind::GenerateBulkReview => {
-            let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
-            state.selected_heads.push("zzzzzzzz".into());
-            state.selected_heads.push("yyyyyyyy".into());
-            let mut plan = sample_stack_plan(2);
-            plan.items[0].title =
-                "Refine stacked review modal focus with a title that wraps naturally".into();
-            state.bulk = BulkPhase::Review {
-                plan,
-                cursor: 0,
-                pushing: None,
-                push_all: false,
-            };
-            state.seed_bulk_editor_from_cursor();
-            state.ensure_field_options_synced(&status);
-            screens::generate::render(&state, &status, frame, frame.area());
+            render_bulk_review_snapshot(frame, &status);
         }
         SnapshotKind::GenerateBulkPushCurrent => {
             let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
@@ -484,6 +470,24 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
         }
     })?;
     Ok(terminal.backend().buffer().clone())
+}
+
+fn render_bulk_review_snapshot(frame: &mut Frame, status: &StatusStore) {
+    let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
+    state.selected_heads.push("zzzzzzzz".into());
+    state.selected_heads.push("yyyyyyyy".into());
+    let mut plan = sample_stack_plan(2);
+    plan.items[0].title =
+        "Refine stacked review modal focus with a title that wraps naturally".into();
+    state.bulk = BulkPhase::Review {
+        plan,
+        cursor: 0,
+        pushing: None,
+        push_all: false,
+    };
+    state.seed_bulk_editor_from_cursor();
+    state.ensure_field_options_synced(status);
+    screens::generate::render(&state, status, frame, frame.area());
 }
 
 fn populated_status() -> StatusStore {
@@ -609,6 +613,7 @@ fn generate_with(phase: GeneratePhase, pane: Pane, field_focus: FieldId) -> Gene
         bulk_review_focus: BulkReviewFocus::List,
         bulk_editor: BulkItemEditor::default(),
         bulk_list_scroll: std::cell::Cell::new(0),
+        bulk_form_scroll: std::cell::Cell::new(0),
     }
 }
 

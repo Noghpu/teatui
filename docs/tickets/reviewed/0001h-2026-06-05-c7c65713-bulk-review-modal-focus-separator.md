@@ -2,8 +2,8 @@
 id: 0001h-2026-06-05-c7c65713-bulk-review-modal-focus-separator
 created_at: 2026-06-05T12:32:32+02:00
 created_by_model: gpt-5/medium
-state: implemented
-state_updated_at: 2026-06-05T15:46:59+02:00
+state: reviewed
+state_updated_at: 2026-06-05T17:32:08+02:00
 ---
 # Bulk review modal: separator and two-step preview focus
 
@@ -184,3 +184,31 @@ Important files changed:
 
 Residual risks or follow-up:
 - Visual inspection was from the deterministic text snapshot on the Windows dev host; interactive terminal feel still needs Linux runtime validation for the broader app constraint.
+---
+
+<!-- ticket-section:review-postmortem v1 -->
+## Review Postmortem
+
+Metadata:
+- model: gpt-5.5-medium
+- reviewed_at: 2026-06-05T17:32:08+02:00
+- state: reviewed
+
+Facts:
+- Reviewed the implemented ticket payload and required context documents: AGENTS.md, docs/rewrite-plan.md, and docs/stacked-pr-plan.md.
+- Inspected the bulk review input path in src/screens/generate/input.rs. Enter from BulkReviewFocus::List flushes/seeds the current item and switches to Preview without setting bulk_editor.editing; Enter or i from Preview starts editing; Esc from Preview returns to List; Esc from List closes after flushing.
+- Inspected the bulk review rendering path in src/screens/generate.rs. The production render path uses a one-column separator, wraps left-list PR titles with row-span-aware natural scrolling, and dims preview field focus while list focus is active.
+- Confirmed App enters BulkPhase::Review with BulkReviewFocus::List and seeds the editor from cursor.
+- Confirmed render smoke coverage includes the empty, one-item, multi-item, preview-focus wrapped-title, push-in-flight, done, failed, blocker, and small-terminal bulk review cases.
+- Ran just verify successfully: fmt, check, clippy -D warnings, unit tests, and render smoke all passed.
+- Ran just snapshots successfully; inspected target/ui-snapshots/generate-bulk-review.txt and related variants, confirming the separator and wrapped title render without overlap in the deterministic snapshot.
+
+Inferences:
+- The implementation satisfies the ticket's two-step focus acceptance criteria and preserves push-in-flight mutation gating.
+- The follow-up open ticket for boxed panes/shared metadata is outside this review ticket and should remain queued separately.
+
+Changes made during review:
+- No source changes were needed after review; only the ticket queue state is being moved from implemented to reviewed.
+
+Residual risks:
+- Interactive terminal feel still needs Linux runtime validation, consistent with the repository's broader Linux-only caveat.
