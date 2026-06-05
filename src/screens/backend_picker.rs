@@ -11,13 +11,13 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::config::LlmBackend;
 use crate::domain::{LlmHealth, StatusStore};
 use crate::runtime::Cached;
 
-use super::theme;
+use super::{theme, util};
 
 #[derive(Debug, Default)]
 pub struct BackendPicker {
@@ -87,19 +87,11 @@ pub fn render(
     frame: &mut Frame,
     area: Rect,
 ) {
-    frame.render_widget(theme::backdrop(), area);
-
     let width = area.width.saturating_sub(8).clamp(40, 72);
     // backends + border (2) + blank + hint (2), clamped to the screen.
     let desired = backends.len() as u16 + 5;
     let height = desired.clamp(6, area.height.saturating_sub(2));
-    let rect = Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    );
-    frame.render_widget(Clear, rect);
+    let rect = util::open_modal(frame, area, width, height);
 
     let block = theme::modal_block("Switch LLM backend");
     let inner = block.inner(rect);
@@ -108,16 +100,14 @@ pub fn render(
     // Reserve the last two inner rows for a blank + hint line. Scroll naturally:
     // hold the window steady and only move it when the highlight crosses an edge.
     let list_rows = (inner.height as usize).saturating_sub(2).max(1);
-    let max_offset = backends.len().saturating_sub(list_rows);
-    let cur = picker.scroll.get().min(max_offset);
-    let offset = if picker.highlighted < cur {
-        picker.highlighted
-    } else if picker.highlighted >= cur + list_rows {
-        picker.highlighted - list_rows + 1
-    } else {
-        cur
-    };
-    picker.scroll.set(offset);
+    let window = util::scroll_window(
+        picker.scroll.get(),
+        picker.highlighted,
+        picker.highlighted,
+        list_rows,
+        backends.len(),
+    );
+    picker.scroll.set(window.offset);
 
     let mut lines: Vec<Line> = Vec::new();
     if backends.is_empty() {
@@ -126,7 +116,8 @@ pub fn render(
             theme::muted(),
         )));
     } else {
-        for (idx, backend) in backends.iter().enumerate().skip(offset).take(list_rows) {
+        for idx in window.range.clone() {
+            let backend = &backends[idx];
             lines.push(backend_row(
                 backend,
                 idx == picker.highlighted,
@@ -178,7 +169,7 @@ fn backend_row(
 
     // Layout: "▶ " + "● " + body (padded) + " ✓". Fixed parts use 6 cols.
     let body_w = width.saturating_sub(6);
-    let body = truncate(
+    let body = util::truncate(
         &format!(
             "{}   {}   {}",
             backend.name, backend.model, backend.base_url
@@ -206,18 +197,6 @@ fn health_indicator(health: Option<&Cached<LlmHealth>>) -> (&'static str, Style)
         Some(LlmHealth::Unreachable { .. }) => ("✗", theme::warning()),
         None => ("◌", theme::muted()),
     }
-}
-
-fn truncate(value: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    if value.chars().count() <= width {
-        return value.to_string();
-    }
-    let mut out: String = value.chars().take(width.saturating_sub(1)).collect();
-    out.push('…');
-    out
 }
 
 #[cfg(test)]
