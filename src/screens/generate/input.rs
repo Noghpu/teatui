@@ -345,9 +345,13 @@ fn on_bulk_review_key(state: &mut GenerateState, key: KeyEvent) -> Transition {
 fn on_bulk_editor_key(state: &mut GenerateState, key: KeyEvent) -> Transition {
     let f = state.bulk_editor.field_focus;
     let multiline = f == BulkItemField::Description;
-    let commit = key.code == KeyCode::Esc || (!multiline && key.code == KeyCode::Enter);
+    let commit = text_commit_key(multiline, key);
+    let cancel = key.code == KeyCode::Esc;
 
-    if commit {
+    if cancel {
+        state.bulk_editor.field_mut(f).cancel();
+        state.bulk_editor.editing = false;
+    } else if commit {
         state.bulk_editor.field_mut(f).commit();
         state.bulk_editor.editing = false;
         // Write the edit back into the plan so the list row updates.
@@ -421,12 +425,12 @@ fn on_editing_key(state: &mut GenerateState, key: KeyEvent) -> Transition {
     let id = state.field_focus;
     match state.form.field(id).kind() {
         FieldKind::Text { multiline } => {
-            // Esc commits and exits — there is no separate "cancel" for
-            // textareas; if the user wants to discard a change they can
-            // re-enter and overwrite. Enter commits a single-line field;
-            // in multiline it inserts a newline as expected.
-            let commit = key.code == KeyCode::Esc || (!multiline && key.code == KeyCode::Enter);
-            if commit {
+            let cancel = key.code == KeyCode::Esc;
+            let commit = text_commit_key(multiline, key);
+            if cancel {
+                state.form.field_mut(id).cancel();
+                state.input_mode = InputMode::Normal;
+            } else if commit {
                 state.form.edit(|form| form.field_mut(id).commit());
                 state.input_mode = InputMode::Normal;
             } else if let FieldState::Text(text) = state.form.field_mut(id) {
@@ -460,6 +464,15 @@ fn on_editing_key(state: &mut GenerateState, key: KeyEvent) -> Transition {
     }
 }
 
+fn text_commit_key(multiline: bool, key: KeyEvent) -> bool {
+    if multiline {
+        (key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL))
+            || (key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::ALT))
+    } else {
+        key.code == KeyCode::Enter
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,6 +485,10 @@ mod tests {
 
     fn ctrl_key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    fn alt_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::ALT)
     }
 
     fn revset(change_id: &str, description: &str) -> RevsetSummary {
@@ -626,6 +643,75 @@ mod tests {
             transition,
             Transition::Navigate(NewScreen::Landing)
         ));
+    }
+
+    #[test]
+    fn esc_cancels_single_line_form_edit() {
+        use crate::screens::generate::FieldId;
+        let mut state = draft_state();
+        state.pane = Pane::Form;
+        state.field_focus = FieldId::Title;
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::Enter));
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::Char('x')));
+
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Esc));
+
+        assert!(matches!(transition, Transition::Dirty));
+        assert_eq!(state.input_mode, InputMode::Normal);
+        assert_eq!(state.form.title(), "Add foo");
+    }
+
+    #[test]
+    fn enter_commits_single_line_form_edit() {
+        use crate::screens::generate::FieldId;
+        let mut state = draft_state();
+        state.pane = Pane::Form;
+        state.field_focus = FieldId::Title;
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::Enter));
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::Char('x')));
+
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Enter));
+
+        assert!(matches!(transition, Transition::Dirty));
+        assert_eq!(state.input_mode, InputMode::Normal);
+        assert_eq!(state.form.title(), "Add foox");
+    }
+
+    #[test]
+    fn ctrl_s_commits_multiline_form_edit() {
+        use crate::screens::generate::FieldId;
+        let mut state = draft_state();
+        state.pane = Pane::Form;
+        state.field_focus = FieldId::Description;
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::Enter));
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::Enter));
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::Char('x')));
+
+        let transition = on_key(
+            &mut state,
+            &StatusStore::new(),
+            ctrl_key(KeyCode::Char('s')),
+        );
+
+        assert!(matches!(transition, Transition::Dirty));
+        assert_eq!(state.input_mode, InputMode::Normal);
+        assert_eq!(state.form.description(), "Body\nx");
+    }
+
+    #[test]
+    fn alt_enter_commits_multiline_form_edit() {
+        use crate::screens::generate::FieldId;
+        let mut state = draft_state();
+        state.pane = Pane::Form;
+        state.field_focus = FieldId::Description;
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::Enter));
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::Char('x')));
+
+        let transition = on_key(&mut state, &StatusStore::new(), alt_key(KeyCode::Enter));
+
+        assert!(matches!(transition, Transition::Dirty));
+        assert_eq!(state.input_mode, InputMode::Normal);
+        assert_eq!(state.form.description(), "Bodyx");
     }
 
     #[test]

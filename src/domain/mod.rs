@@ -4,6 +4,7 @@ pub mod execute;
 pub mod jj_mutate;
 pub mod llm;
 pub mod probe;
+pub(crate) mod process;
 pub mod prompt;
 pub mod stack;
 pub mod status_store;

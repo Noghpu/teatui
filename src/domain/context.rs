@@ -1,5 +1,4 @@
-use std::process::{Command, Stdio};
-
+use super::process;
 use crate::domain::stack::StackPrInput;
 use crate::runtime::{Job, JobOutcome};
 
@@ -183,7 +182,7 @@ pub fn divide_budget(total: usize, n: usize) -> Vec<usize> {
 fn collect_range(jj: &str, base: &str, head: &str, budget: usize) -> Result<ContextBundle, String> {
     let revset = range_revset(base, head)?;
     let status = if head.trim() == "@" {
-        run_jj(jj, &["status"])?
+        process::jj(jj, &["status"])?
     } else {
         String::new()
     };
@@ -252,7 +251,7 @@ fn collect_changes(jj: &str, revset: &str) -> Result<Vec<ChangeContext>, String>
     // the full hunks live in the aggregate diff.
     const TEMPLATE: &str =
         r#""\x1E" ++ change_id ++ "\x1F" ++ description.lines().join("\x1F") ++ "\x1D\n""#;
-    let raw = run_jj(
+    let raw = process::jj(
         jj,
         &[
             "--ignore-working-copy",
@@ -276,7 +275,7 @@ fn collect_changes(jj: &str, revset: &str) -> Result<Vec<ChangeContext>, String>
 /// snapshot was already taken by `jj status` in `collect_range` (or is unneeded
 /// when head isn't `@`), so this is a pure read.
 fn collect_diff_stat(jj: &str, revset: &str) -> Result<String, String> {
-    run_jj(
+    process::jj(
         jj,
         &["--ignore-working-copy", "diff", "-r", revset, "--stat"],
     )
@@ -286,7 +285,7 @@ fn collect_diff_stat(jj: &str, revset: &str) -> Result<String, String> {
 /// than jj's default line-numbered color-words output, and the format LLMs parse
 /// most reliably.
 fn collect_diff_git(jj: &str, revset: &str) -> Result<String, String> {
-    run_jj(
+    process::jj(
         jj,
         &["--ignore-working-copy", "diff", "-r", revset, "--git"],
     )
@@ -328,23 +327,6 @@ fn range_revset(base: &str, head: &str) -> Result<String, String> {
         return Err("head is required".into());
     }
     Ok(format!("{base}..{head}"))
-}
-
-fn run_jj(jj: &str, args: &[&str]) -> Result<String, String> {
-    let mut cmd = Command::new(jj);
-    cmd.arg("--no-pager");
-    cmd.args(args);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let out = cmd.output().map_err(|e| format!("{jj} {args:?}: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "{jj} {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Truncate `s` to roughly `budget` bytes, preserving UTF-8 boundaries.
