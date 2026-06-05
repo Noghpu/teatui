@@ -294,6 +294,26 @@ fn on_bulk_review_key(state: &mut GenerateState, key: KeyEvent) -> Transition {
             state.bulk_review_focus = BulkReviewFocus::Preview;
             Transition::Dirty
         }
+        KeyCode::Right => {
+            if state.bulk_review_focus == BulkReviewFocus::List {
+                state.flush_bulk_editor_to_plan();
+                state.seed_bulk_editor_from_cursor();
+                state.bulk_review_focus = BulkReviewFocus::Preview;
+                Transition::Dirty
+            } else {
+                // Already in Preview — no-op.
+                Transition::None
+            }
+        }
+        KeyCode::Left => {
+            if state.bulk_review_focus == BulkReviewFocus::Preview {
+                state.bulk_review_focus = BulkReviewFocus::List;
+                Transition::Dirty
+            } else {
+                // Already in List — do NOT close the modal.
+                Transition::None
+            }
+        }
         KeyCode::Char('i') | KeyCode::Enter
             if state.bulk_review_focus == BulkReviewFocus::Preview =>
         {
@@ -519,6 +539,7 @@ mod tests {
             bulk_review_focus: crate::screens::generate::BulkReviewFocus::List,
             bulk_editor: crate::screens::generate::BulkItemEditor::default(),
             bulk_list_scroll: std::cell::Cell::new(0),
+            bulk_form_scroll: std::cell::Cell::new(0),
         }
     }
 
@@ -973,6 +994,73 @@ mod tests {
             assert!(
                 !state.bulk_editor.editing,
                 "{code:?} must not start editing"
+            );
+        }
+    }
+
+    #[test]
+    fn right_from_bulk_review_list_focuses_preview_without_editing() {
+        let mut state = two_item_review(None);
+        state.bulk_review_focus = BulkReviewFocus::List;
+
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Right));
+
+        assert!(matches!(transition, Transition::Dirty));
+        assert_eq!(state.bulk_review_focus, BulkReviewFocus::Preview);
+        assert!(!state.bulk_editor.editing);
+    }
+
+    #[test]
+    fn left_from_bulk_review_preview_returns_to_list() {
+        let mut state = two_item_review(None);
+        state.bulk_review_focus = BulkReviewFocus::Preview;
+
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Left));
+
+        assert!(matches!(transition, Transition::Dirty));
+        assert_eq!(state.bulk_review_focus, BulkReviewFocus::List);
+        assert!(matches!(state.bulk, BulkPhase::Review { .. }));
+    }
+
+    #[test]
+    fn right_while_already_preview_is_noop() {
+        let mut state = two_item_review(None);
+        state.bulk_review_focus = BulkReviewFocus::Preview;
+
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Right));
+
+        assert!(matches!(transition, Transition::None));
+        assert_eq!(state.bulk_review_focus, BulkReviewFocus::Preview);
+    }
+
+    #[test]
+    fn left_while_already_list_does_not_close_modal() {
+        let mut state = two_item_review(None);
+        state.bulk_review_focus = BulkReviewFocus::List;
+
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Left));
+
+        assert!(matches!(transition, Transition::None));
+        assert_eq!(state.bulk_review_focus, BulkReviewFocus::List);
+        // Modal must remain open.
+        assert!(matches!(state.bulk, BulkPhase::Review { .. }));
+    }
+
+    #[test]
+    fn left_right_do_not_switch_panes_during_push() {
+        for code in [KeyCode::Left, KeyCode::Right] {
+            let mut state = two_item_review(Some(0));
+            let initial_focus = state.bulk_review_focus;
+
+            let transition = on_key(&mut state, &StatusStore::new(), key(code));
+
+            assert!(
+                matches!(transition, Transition::None),
+                "{code:?} must be ignored while a push is running"
+            );
+            assert_eq!(
+                state.bulk_review_focus, initial_focus,
+                "{code:?} must not switch panes during push"
             );
         }
     }
