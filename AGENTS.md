@@ -56,6 +56,13 @@ pins the highlight to one edge and scrolls the whole list on every keypress.
 The pattern: `if hl < off { off = hl } else if hl >= off + rows { off = hl -
 rows + 1 }`, with `off` pre-clamped to `len - rows`.
 
+Don't re-derive this by hand. `screens::util::scroll_window(cur, start, end,
+visible, total)` wraps the formula and returns a `ScrollWindow { offset,
+range }`: store `offset` in your `Cell`, then either pass it to
+`Paragraph::scroll` (whole-list rendering) or iterate `range` (sliced
+rendering). Pass `start == end` for single-row highlights, or the first/last
+row of a grouped multi-line item to keep its whole span visible.
+
 ## Architecture at a glance
 
 ```
@@ -97,7 +104,13 @@ When adding a screen, also:
 
 When adding a background job:
 1. Implement `Job` in `domain::<topic>`. Return `JobOutcome::Done(Box<T>)`.
-2. Add `match any.downcast::<T>()` arm to `App::absorb_payload`.
+2. Add a `try_payload!(any, T, payload => { … })` arm in `App::absorb_payload`.
+   The macro handles the type-erased downcast and the early return; the body is
+   the only thing you write. Either mutate `StatusStore`/screen state inline and
+   set `self.dirty = true` at the end of the body, or delegate to a typed
+   `handle_*` method that owns its own dirty flag and stale-phase guards (do
+   *not* set `self.dirty` in the arm for the delegating case, or stale results
+   will force needless redraws).
 3. Mutate `StatusStore` or screen state from the handler.
 
 ## Deferred — PR management pass
@@ -106,3 +119,61 @@ Not in scope for the current rewrite. See the "Deferred — PR management
 pass" section in [docs/rewrite-plan.md](docs/rewrite-plan.md) for the
 findings carried forward from the pre-rewrite code (`pull_requests.rs`
 list/filter/comment flow, `repo_options.rs` disk cache pattern, etc.).
+
+### Pre-management groundwork (land before the management pass)
+
+The PR and issue management modes are both scrollable lists with a
+comment view/compose flow, so they should build on shared rendering and
+process primitives rather than re-deriving them. The first shared
+helpers have landed (`screens::util`, `screens::widgets`, and
+`domain::process`). Three open tickets track the remaining concrete
+groundwork; do them before starting the management screens so the new
+code imports instead of copies:
+
+- `0001o … app-job-payload-dispatch` — centralize the repetitive
+  `App::absorb_payload` downcast boilerplate before more background job
+  result types are added.
+- `0001p … probe-process-helper-migration` — move the remaining
+  mechanical `probe.rs` subprocess call sites onto `domain::process`,
+  preserving each probe's current missing-tool/outside-workspace/fallback
+  semantics.
+- `0001q … scrollable-list-window-helper` — wrap the repeated
+  visible-row/natural-scroll/offset/range pattern without extracting row
+  rendering yet.
+
+### Deferred refactors (extract when the management screens exist, not before)
+
+These are intentionally NOT pre-built — doing so now would abstract on
+guesses. Apply the rule of three: the first management screen is the
+third concrete example for list rows and comments. If a future feature
+adds a different third example, extract then, with that feature in hand.
+
+- **Shared list-row builder.** The "focus marker + status badge +
+  wrapped title + muted sub-row" shape is hand-built in
+  `revset_row_lines` (Changes pane) and the row loop in
+  `render_bulk_pr_list` (bulk PRs). PR/issue rows would be the third
+  copy. Extract a shared row builder when writing the first management
+  list; generalize against the second. Don't unify on two examples.
+- **List/comment data layer.** Paginated remote lists + filter +
+  refresh + comment read/write is a data-fetch/cache decision
+  (`Cached<T>` + a per-fetch `Job` + filter state), not a rendering
+  dedup — it has no existing pattern to share. It is closest to the
+  pre-rewrite `pull_requests.rs`/`repo_options.rs` disk-cache flow noted
+  above. Design it when the management feature is scoped.
+- **Comment composer / generic form framework.** Reuse
+  `screens::widgets` primitives when comments arrive, but do not
+  generalize the Generate form and bulk PR editor into a framework until
+  a real comment composer exists.
+- **LLM request builders/parsers.** The single-PR and stacked-PR LLM
+  paths have similar Ollama/OpenAI body construction and response
+  parsing. Extract shared request/parse helpers only when another
+  LLM-backed flow is added or provider behavior needs to change.
+- **Render/dev fixtures.** `tests/render_smoke.rs` and
+  `src/bin/ui-snapshots.rs` duplicate sample status, revsets, stack
+  plans, prompts, drafts, and command previews. Extract shared
+  cfg-gated fixtures when adding the first new management render-smoke
+  cases.
+- **Modal body helper.** `screens::util::open_modal` and themed blocks
+  are enough for now. Add a simple modal-lines/body helper
+  opportunistically when touching modals again, but do not schedule a
+  standalone abstraction pass.

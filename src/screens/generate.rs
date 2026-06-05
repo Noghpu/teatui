@@ -8,9 +8,9 @@ use std::cell::Cell;
 use crossterm::event::KeyEvent;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::domain::{
     BulkPhase, ContextBundle, ExecuteStep, GeneratedDraft, JjOp, JjOpKind, PromptBuild,
@@ -19,8 +19,12 @@ use crate::domain::{
 use crate::runtime::Cached;
 
 pub use self::form::{FieldId, FieldKind, FieldState, InputMode, PrForm};
-use super::Transition;
-use super::theme;
+use super::widgets::{
+    field_header_line, form_block, form_line, hint_line, kv_line, kv_line_fit,
+    multiline_value_height, placeholder_line, render_text_field, section_header,
+    section_heading_line, separator_line, status_line, wrapped_styled_lines,
+};
+use super::{Transition, theme, util};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Pane {
@@ -672,15 +676,14 @@ fn render_menu(state: &GenerateState, status: &StatusStore, frame: &mut Frame, a
                 lines.extend(row);
             }
             // Only scroll when the selected item hits the viewport edge.
-            let visible = inner.height;
-            let cur = state.scroll_menu.get();
-            let scroll = if sel_start < cur {
-                sel_start
-            } else if sel_end + 1 > cur + visible {
-                (sel_end + 1).saturating_sub(visible)
-            } else {
-                cur
-            };
+            let scroll = util::scroll_window(
+                state.scroll_menu.get() as usize,
+                sel_start as usize,
+                sel_end as usize,
+                inner.height as usize,
+                lines.len(),
+            )
+            .offset as u16;
             state.scroll_menu.set(scroll);
             (lines, scroll)
         }
@@ -729,7 +732,7 @@ fn revset_row_lines(
         theme::text()
     };
 
-    let primary_lines = wrap_chars(&revset_primary(item), width.saturating_sub(2));
+    let primary_lines = util::wrap_chars(&revset_primary(item), width.saturating_sub(2));
     let mut lines = vec![Line::from(vec![
         Span::styled(gutter, gutter_style),
         Span::styled(primary_lines.first().cloned().unwrap_or_default(), style),
@@ -741,7 +744,7 @@ fn revset_row_lines(
     // Secondary description line when the row's headline is the bookmark.
     if !item.bookmarks.is_empty() && is_meaningful_description(&item.description) {
         lines.extend(
-            wrap_chars(&item.description, width.saturating_sub(4))
+            util::wrap_chars(&item.description, width.saturating_sub(4))
                 .into_iter()
                 .map(|line| Line::from(Span::styled(format!("    {line}"), theme::muted()))),
         );
@@ -749,7 +752,7 @@ fn revset_row_lines(
 
     if item.commit_count > 1 {
         let summary = format!("{}c", item.commit_count);
-        let (truncated, _) = truncate_ellipsis(&summary, width.saturating_sub(4));
+        let (truncated, _) = util::truncate_ellipsis(&summary, width.saturating_sub(4));
         lines.push(Line::from(Span::styled(
             format!("    {truncated}"),
             theme::muted(),
@@ -797,7 +800,7 @@ fn render_form(state: &GenerateState, frame: &mut Frame, area: Rect) {
             let display = if head_val.is_empty() {
                 "(from selection)".to_string()
             } else {
-                let (s, _) = truncate_ellipsis(head_val, w.saturating_sub(4));
+                let (s, _) = util::truncate_ellipsis(head_val, w.saturating_sub(4));
                 format!("{s}  (from selection)")
             };
             form_line(
@@ -847,169 +850,31 @@ fn render_form(state: &GenerateState, frame: &mut Frame, area: Rect) {
     }
 }
 
-fn form_line(frame: &mut Frame, inner: Rect, cy: u16, scroll: u16, line: Line<'static>) {
-    let sy = inner.y as i32 + cy as i32 - scroll as i32;
-    if sy >= inner.y as i32 && (sy as u16) < inner.y + inner.height {
-        frame.render_widget(
-            Paragraph::new(line),
-            Rect {
-                x: inner.x,
-                y: sy as u16,
-                width: inner.width,
-                height: 1,
-            },
-        );
-    }
-}
-
-fn form_block(frame: &mut Frame, inner: Rect, cy: u16, scroll: u16, lines: Vec<Line<'static>>) {
-    let fh = lines.len() as u16;
-    let sy = inner.y as i32 + cy as i32 - scroll as i32;
-    let vp_bot = inner.y + inner.height;
-    if sy >= vp_bot as i32 || sy + fh as i32 <= inner.y as i32 {
-        return;
-    }
-    let skip = (inner.y as i32 - sy).max(0) as u16;
-    let vis_y = sy.max(inner.y as i32) as u16;
-    let vis_h = fh.saturating_sub(skip).min(vp_bot - vis_y);
-    if vis_h > 0 {
-        frame.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .scroll((skip, 0)),
-            Rect {
-                x: inner.x,
-                y: vis_y,
-                width: inner.width,
-                height: vis_h,
-            },
-        );
-    }
-}
-
-/// Render one editable text field (label row + value box) using the
-/// viewport-clipped positional model shared by the form pane and the bulk modal.
-///
-/// - Advances `*cy` past the label and the value box.
-/// - When `editing`: renders the live `&t.editor` widget (cursor visible).
-/// - When not editing: renders the static value — single-line truncated with
-///   ellipsis; multiline wrapped via `wrap_chars` with the trailing `…` overflow
-///   marker and `empty_value_line()` padding.
-/// - Value height: `1` for single-line, `multiline_value_height(t, value_w,
-///   editing)` for multiline.
-///
-/// Error lines are NOT included; the form-pane call site appends them after
-/// this call so its visual output is unchanged.
-#[allow(clippy::too_many_arguments)]
-fn render_text_field(
-    frame: &mut Frame,
-    inner: Rect,
-    cy: &mut u16,
-    scroll: u16,
-    t: &form::TextFieldState,
-    label: &str,
-    marker: &str,
-    label_style: Style,
-    editing: bool,
-    value_w: usize,
-) {
-    // Label row.
-    form_line(
-        frame,
-        inner,
-        *cy,
-        scroll,
-        Line::from(Span::styled(format!("{marker}{label}:"), label_style)),
-    );
-    *cy += 1;
-
-    let indent: u16 = 2;
-    let value_h: u16 = if t.multiline {
-        multiline_value_height(t, value_w, editing)
-    } else {
-        1
-    };
-
-    let sy = inner.y as i32 + *cy as i32 - scroll as i32;
-    if sy >= inner.y as i32 && (sy as u16) < inner.y + inner.height {
-        let vis_h = value_h.min((inner.y + inner.height).saturating_sub(sy as u16));
-        if editing {
-            let rect = Rect {
-                x: inner.x + indent,
-                y: sy as u16,
-                width: inner.width.saturating_sub(indent),
-                height: vis_h,
-            };
-            frame.render_widget(&t.editor, rect);
-        } else {
-            let rect = Rect {
-                x: inner.x,
-                y: sy as u16,
-                width: inner.width,
-                height: vis_h,
-            };
-            let lines = if t.multiline {
-                let mut v: Vec<Line> = t
-                    .value
-                    .lines()
-                    .flat_map(|l| {
-                        wrap_chars(l, value_w)
-                            .into_iter()
-                            .map(|s| Line::from(Span::styled(format!("  {s}"), theme::text())))
-                    })
-                    .take(value_h as usize)
-                    .collect();
-                let total_lines: usize =
-                    t.value.lines().map(|l| wrap_chars(l, value_w).len()).sum();
-                if total_lines > value_h as usize
-                    && let Some(last) = v.last_mut()
-                {
-                    *last = Line::from(Span::styled("  …", theme::muted()));
-                }
-                if v.is_empty() {
-                    v.push(empty_value_line());
-                }
-                while v.len() < value_h as usize {
-                    v.push(Line::from(""));
-                }
-                v
-            } else if t.value.is_empty() {
-                vec![empty_value_line()]
-            } else {
-                let (display, _) = truncate_ellipsis(&t.value, value_w);
-                vec![Line::from(Span::styled(
-                    format!("  {display}"),
-                    theme::text(),
-                ))]
-            };
-            frame.render_widget(Paragraph::new(lines), rect);
-        }
-    }
-    *cy += value_h;
-}
-
 fn form_scroll(state: &GenerateState, width: usize, visible: u16) -> u16 {
     let mut cy = 0u16;
+    let mut focused_start = 0u16;
+    let mut focused_end = 0u16;
     for (index, id) in FieldId::ALL.into_iter().enumerate() {
         if index > 0 {
             cy += 1;
         }
         let fh = form_field_height(state, id, width);
         if id == state.field_focus {
-            let cur = state.scroll_form.get();
-            let scroll = if cy < cur {
-                cy
-            } else if cy + fh > cur + visible {
-                cy + fh - visible
-            } else {
-                cur
-            };
-            state.scroll_form.set(scroll);
-            return scroll;
+            focused_start = cy;
+            focused_end = cy.saturating_add(fh).saturating_sub(1);
         }
         cy += fh;
     }
-    0
+    let scroll = util::scroll_window(
+        state.scroll_form.get() as usize,
+        focused_start as usize,
+        focused_end as usize,
+        visible as usize,
+        cy as usize,
+    )
+    .offset as u16;
+    state.scroll_form.set(scroll);
+    scroll
 }
 
 fn form_field_height(state: &GenerateState, id: FieldId, width: usize) -> u16 {
@@ -1027,36 +892,15 @@ fn form_field_height(state: &GenerateState, id: FieldId, width: usize) -> u16 {
     }
 }
 
-/// Display height of a multiline text field's value box: tall enough to show all
-/// the wrapped content, but never shorter than [`MULTILINE_MIN_HEIGHT`] (the box
-/// keeps its familiar minimum size even when nearly empty).
-fn multiline_value_height(t: &form::TextFieldState, value_w: usize, editing: bool) -> u16 {
-    const MULTILINE_MIN_HEIGHT: u16 = 6;
-    let content = if editing { &t.buffer } else { &t.value };
-    let lines: usize = if content.is_empty() {
-        1
-    } else {
-        content.lines().map(|l| wrap_chars(l, value_w).len()).sum()
-    };
-    (lines as u16).max(MULTILINE_MIN_HEIGHT)
-}
-
 fn render_picker_modal(
     state: &GenerateState,
     picker: &form::PickerFieldState,
     frame: &mut Frame,
     area: Rect,
 ) {
-    frame.render_widget(theme::backdrop(), area);
     let width = area.width.saturating_sub(16).clamp(24, 52);
     let height = area.height.saturating_sub(6).clamp(6, 14);
-    let rect = Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    );
-    frame.render_widget(Clear, rect);
+    let rect = util::open_modal(frame, area, width, height);
     let id = state.field_focus;
     let block = theme::modal_block(id.label());
     let inner = block.inner(rect);
@@ -1080,17 +924,16 @@ fn render_picker_modal(
         // the scrollable option list. Scroll naturally: hold the window steady
         // and only move it when the highlight crosses the top or bottom edge.
         let rows = (inner.height as usize).saturating_sub(lines.len()).max(1);
-        let max_offset = visible.len().saturating_sub(rows);
-        let cur = picker.scroll.get().min(max_offset);
-        let offset = if picker.highlighted < cur {
-            picker.highlighted
-        } else if picker.highlighted >= cur + rows {
-            picker.highlighted - rows + 1
-        } else {
-            cur
-        };
-        picker.scroll.set(offset);
-        for (idx, option) in visible.into_iter().enumerate().skip(offset).take(rows) {
+        let window = util::scroll_window(
+            picker.scroll.get(),
+            picker.highlighted,
+            picker.highlighted,
+            rows,
+            visible.len(),
+        );
+        picker.scroll.set(window.offset);
+        for idx in window.range.clone() {
+            let option = visible[idx];
             let focused = idx == picker.highlighted;
             let warning = state.form.picker_option_warning(id, &option.value);
             let marker = if picker.multi_select {
@@ -1122,7 +965,7 @@ fn render_picker_modal(
             let label_width = (inner.width as usize)
                 .saturating_sub(marker.chars().count())
                 .saturating_sub(suffix.chars().count());
-            let (label, _) = truncate_ellipsis(&option.label, label_width);
+            let (label, _) = util::truncate_ellipsis(&option.label, label_width);
             lines.push(Line::from(Span::styled(
                 format!("{marker}{label}{suffix}"),
                 style,
@@ -1133,16 +976,9 @@ fn render_picker_modal(
 }
 
 fn render_jj_op_dialog(dialog: &JjOpDialog, frame: &mut Frame, area: Rect) {
-    frame.render_widget(theme::backdrop(), area);
     let width = area.width.saturating_sub(16).clamp(34, 72);
     let height = area.height.saturating_sub(8).clamp(8, 12);
-    let rect = Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    );
-    frame.render_widget(Clear, rect);
+    let rect = util::open_modal(frame, area, width, height);
     let title = match dialog {
         JjOpDialog::Confirm(pending) => pending.title().to_string(),
         JjOpDialog::Error { title, .. } => title.clone(),
@@ -1213,17 +1049,10 @@ fn bounded_lines(mut lines: Vec<Line<'static>>, max_rows: usize) -> Vec<Line<'st
 // ========================= Bulk modal render ================================
 
 fn render_bulk_modal(state: &GenerateState, frame: &mut Frame, area: Rect) {
-    frame.render_widget(theme::backdrop(), area);
     // The bulk modal takes most of the screen to accommodate the two-pane layout.
     let width = area.width.saturating_sub(8).max(40);
     let height = area.height.saturating_sub(4).max(12);
-    let rect = Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    );
-    frame.render_widget(Clear, rect);
+    let rect = util::open_modal(frame, area, width, height);
 
     match &state.bulk {
         BulkPhase::Idle => {}
@@ -1336,7 +1165,7 @@ fn render_bulk_generating(
             ("○ ", theme::muted())
         };
         let subject_w = inner.width.saturating_sub(8) as usize;
-        let (subject, _) = truncate_ellipsis(&input.subject, subject_w);
+        let (subject, _) = util::truncate_ellipsis(&input.subject, subject_w);
         lines.push(Line::from(vec![
             Span::styled(format!("  {marker}"), style),
             Span::styled(format!("PR {} ", index + 1), theme::muted()),
@@ -1543,7 +1372,7 @@ fn render_bulk_pr_list(
         // the row group, so the scroll span below can keep the full selected
         // row visible.
         let title_w = w.saturating_sub(5);
-        let wrapped_title = wrap_chars(&item.title, title_w);
+        let wrapped_title = util::wrap_chars(&item.title, title_w);
         for (line_index, title_line) in wrapped_title.iter().enumerate() {
             let prefix = if line_index == 0 {
                 format!("{marker}{status_badge}{flag} ")
@@ -1558,7 +1387,7 @@ fn render_bulk_pr_list(
 
         // Sub-row: bookmark.
         let bookmark_w = w.saturating_sub(4);
-        let (bm_display, _) = truncate_ellipsis(&item.bookmark, bookmark_w);
+        let (bm_display, _) = util::truncate_ellipsis(&item.bookmark, bookmark_w);
         lines.push(Line::from(Span::styled(
             format!("  ↳ {bm_display}"),
             if focused {
@@ -1583,18 +1412,14 @@ fn render_bulk_pr_list(
     }
 
     // Natural scroll: only move the window when the cursor crosses the edge.
-    let visible = area.height;
-    let max_off = (lines.len() as u16).saturating_sub(visible);
-    let cur_off = state.bulk_list_scroll.get().min(max_off);
-    let scroll = if visible == 0 {
-        0
-    } else if sel_y < cur_off {
-        sel_y
-    } else if sel_end + 1 > cur_off + visible {
-        (sel_end + 1).saturating_sub(visible).min(max_off)
-    } else {
-        cur_off
-    };
+    let scroll = util::scroll_window(
+        state.bulk_list_scroll.get() as usize,
+        sel_y as usize,
+        sel_end as usize,
+        area.height as usize,
+        lines.len(),
+    )
+    .offset as u16;
     state.bulk_list_scroll.set(scroll);
 
     frame.render_widget(
@@ -1631,8 +1456,8 @@ fn render_bulk_pr_form(
     let mut cy = 0u16;
 
     // Read-only head / base.
-    let (head_s, _) = truncate_ellipsis(&item.input.head, w.saturating_sub(8));
-    let (base_s, _) = truncate_ellipsis(&item.input.base, w.saturating_sub(8));
+    let (head_s, _) = util::truncate_ellipsis(&item.input.head, w.saturating_sub(8));
+    let (base_s, _) = util::truncate_ellipsis(&item.input.base, w.saturating_sub(8));
     form_line(
         frame,
         inner,
@@ -1791,13 +1616,14 @@ fn bulk_form_scroll(
         (result_start, result_end),
     );
 
-    let scroll = scroll_window_offset(
-        state.bulk_form_scroll.get(),
-        target_start,
-        target_end,
-        visible,
-        cy,
-    );
+    let scroll = util::scroll_window(
+        state.bulk_form_scroll.get() as usize,
+        target_start as usize,
+        target_end as usize,
+        visible as usize,
+        cy as usize,
+    )
+    .offset as u16;
     state.bulk_form_scroll.set(scroll);
     scroll
 }
@@ -1832,21 +1658,6 @@ fn bulk_scroll_target(
 
 fn line_count(lines: &[Line<'static>]) -> u16 {
     lines.len().min(u16::MAX as usize) as u16
-}
-
-fn scroll_window_offset(cur: u16, start: u16, end: u16, visible: u16, total: u16) -> u16 {
-    if visible == 0 {
-        return 0;
-    }
-    let max_off = total.saturating_sub(visible);
-    let cur = cur.min(max_off);
-    if start < cur {
-        start
-    } else if end.saturating_add(1) > cur.saturating_add(visible) {
-        end.saturating_add(1).saturating_sub(visible).min(max_off)
-    } else {
-        cur
-    }
 }
 
 fn render_bulk_lines(
@@ -2240,55 +2051,6 @@ fn fmt_or_dash(s: &str) -> String {
     }
 }
 
-fn placeholder_line(text: &str) -> Line<'static> {
-    Line::from(Span::styled(text.to_string(), theme::muted()))
-}
-
-/// Empty-textarea placeholder, indented to align with normal value lines.
-/// Reused everywhere a text field shows no content so single-line and
-/// multiline fields read identically when empty.
-fn empty_value_line() -> Line<'static> {
-    Line::from(Span::styled("  (empty)", theme::muted()))
-}
-
-fn hint_line(text: &str) -> Line<'static> {
-    Line::from(Span::styled(format!("  {text}"), theme::muted()))
-}
-
-fn kv_line(key: &str, value: String) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("  {key}: "), theme::muted()),
-        Span::styled(value, theme::text()),
-    ])
-}
-
-fn kv_line_fit(key: &str, value: &str, width: usize) -> Line<'static> {
-    let prefix = format!("  {key}: ");
-    let prefix_width = prefix.chars().count();
-    if width <= prefix_width {
-        let (display, _) = truncate_ellipsis(&prefix, width);
-        return Line::from(Span::styled(display, theme::muted()));
-    }
-
-    let (display, _) = truncate_ellipsis(value, width - prefix_width);
-    Line::from(vec![
-        Span::styled(prefix, theme::muted()),
-        Span::styled(display, theme::text()),
-    ])
-}
-
-fn wrapped_styled_lines(
-    prefix: &str,
-    text: &str,
-    width: usize,
-    style: Style,
-) -> Vec<Line<'static>> {
-    wrap_prefixed(prefix, text, width)
-        .into_iter()
-        .map(|line| Line::from(Span::styled(line, style)))
-        .collect()
-}
-
 fn fmt_bytes(n: usize) -> String {
     if n < 1024 {
         format!("{n} B")
@@ -2321,7 +2083,7 @@ fn field_lines(state: &GenerateState, id: FieldId, width: usize) -> Vec<Line<'st
                 lines.push(Line::from(Span::styled("  (empty)", theme::muted())));
             } else {
                 for line in preview {
-                    for wrapped in wrap_chars(line, width.saturating_sub(2)) {
+                    for wrapped in util::wrap_chars(line, width.saturating_sub(2)) {
                         lines.push(Line::from(Span::styled(
                             format!("  {wrapped}"),
                             theme::text(),
@@ -2356,7 +2118,7 @@ fn field_lines(state: &GenerateState, id: FieldId, width: usize) -> Vec<Line<'st
             let selected = if p.value.is_empty() {
                 "(none)".to_string()
             } else {
-                let (truncated, _) = truncate_ellipsis(&p.value, width.saturating_sub(2));
+                let (truncated, _) = util::truncate_ellipsis(&p.value, width.saturating_sub(2));
                 truncated
             };
             lines.push(Line::from(Span::styled(
@@ -2396,10 +2158,6 @@ fn field_label(id: FieldId) -> &'static str {
     }
 }
 
-fn field_header_line(marker: &str, label: &str, style: Style) -> Line<'static> {
-    Line::from(Span::styled(format!("{marker}{label}:"), style))
-}
-
 fn selected_revset<'a>(
     state: &GenerateState,
     status: &'a StatusStore,
@@ -2408,21 +2166,6 @@ fn selected_revset<'a>(
         return None;
     };
     items.get(state.revset_selected)
-}
-
-fn status_line(text: &str) -> Line<'static> {
-    Line::from(Span::styled(
-        format!("  {text}"),
-        theme::accent().add_modifier(Modifier::BOLD),
-    ))
-}
-
-fn section_header(title: &str) -> Vec<Line<'static>> {
-    vec![Line::from(""), section_heading_line(title)]
-}
-
-fn section_heading_line(title: &str) -> Line<'static> {
-    theme::header(format!("{title}:"))
 }
 
 fn draft_lines(state: &GenerateState, draft: &GeneratedDraft, width: u16) -> Vec<Line<'static>> {
@@ -2509,7 +2252,7 @@ fn execution_plan_lines(commands: &CommandPreview, width: u16) -> Vec<Line<'stat
             format!("  {}. {label}", index + 1),
             theme::muted().add_modifier(Modifier::BOLD),
         )));
-        let (truncated, cut) = truncate_ellipsis(command, cmd_width);
+        let (truncated, cut) = util::truncate_ellipsis(command, cmd_width);
         lines.push(Line::from(Span::styled(
             format!("     {truncated}"),
             theme::text(),
@@ -2522,22 +2265,6 @@ fn execution_plan_lines(commands: &CommandPreview, width: u16) -> Vec<Line<'stat
         }
     }
     lines
-}
-
-/// Truncate to at most `width` display chars, suffixing with "…" if cut.
-/// Returns `(string, was_truncated)`.
-fn truncate_ellipsis(value: &str, width: usize) -> (String, bool) {
-    if width == 0 {
-        return (String::new(), !value.is_empty());
-    }
-    let count = value.chars().count();
-    if count <= width {
-        return (value.to_string(), false);
-    }
-    let take = width.saturating_sub(1);
-    let mut out: String = value.chars().take(take).collect();
-    out.push('…');
-    (out, true)
 }
 
 pub(super) fn revset_primary(item: &RevsetSummary) -> String {
@@ -2580,110 +2307,19 @@ fn is_meaningful_description(value: &str) -> bool {
         && trimmed != "no description set"
 }
 
-fn separator_line(width: usize) -> Line<'static> {
-    Line::from(Span::styled(
-        format!("  {}  ", "─".repeat(width.saturating_sub(4))),
-        Style::default().fg(theme::BORDER),
-    ))
-}
-
-fn wrap_prefixed(prefix: &str, text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return Vec::new();
-    }
-
-    let prefix_width = prefix.chars().count();
-    if width <= prefix_width {
-        let (display, _) = truncate_ellipsis(prefix, width);
-        let mut lines = vec![display];
-        for physical in text.lines() {
-            lines.extend(wrap_chars(physical, width));
-        }
-        if text.is_empty() {
-            lines.push(String::new());
-        }
-        return lines;
-    }
-
-    let continuation = " ".repeat(prefix_width);
-    let text_width = width - prefix_width;
-    let mut lines = Vec::new();
-    let mut first = true;
-    for physical in text.lines() {
-        for wrapped in wrap_chars(physical, text_width) {
-            if first {
-                lines.push(format!("{prefix}{wrapped}"));
-                first = false;
-            } else {
-                lines.push(format!("{continuation}{wrapped}"));
-            }
-        }
-    }
-
-    if lines.is_empty() {
-        lines.push(prefix.to_string());
-    }
-    lines
-}
-
-fn wrap_chars(value: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![String::new()];
-    }
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in value.split_whitespace() {
-        let word_len = word.chars().count();
-        let current_len = current.chars().count();
-
-        if current_len > 0 && current_len + 1 + word_len > width {
-            lines.push(current);
-            current = String::new();
-        }
-
-        if word_len <= width {
-            if current.is_empty() {
-                current.push_str(word);
-            } else {
-                current.push(' ');
-                current.push_str(word);
-            }
-            continue;
-        }
-
-        let mut chunk = String::new();
-        for ch in word.chars() {
-            if chunk.chars().count() == width {
-                lines.push(chunk);
-                chunk = String::new();
-            }
-            chunk.push(ch);
-        }
-        current = chunk;
-        if current.chars().count() == width {
-            lines.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
-}
-
 fn render_help(state: &GenerateState, frame: &mut Frame, area: Rect) {
     use theme::HelpHint;
     let hints: Vec<HelpHint> = if state.input_mode == InputMode::Editing {
         match state.form.field(state.field_focus).kind() {
             FieldKind::Text { multiline: true } => vec![
-                HelpHint::primary("Esc", "commit"),
+                HelpHint::primary("Ctrl+S", "commit"),
+                HelpHint::new("Alt+Enter", "commit"),
                 HelpHint::new("Enter", "newline"),
+                HelpHint::new("Esc", "cancel"),
             ],
             FieldKind::Text { multiline: false } => vec![
                 HelpHint::primary("Enter", "commit"),
-                HelpHint::new("Esc", "commit"),
+                HelpHint::new("Esc", "cancel"),
             ],
             FieldKind::Picker {
                 multi_select: true, ..
@@ -2734,13 +2370,15 @@ fn render_help(state: &GenerateState, frame: &mut Frame, area: Rect) {
                     let multiline = state.bulk_editor.field_focus == BulkItemField::Description;
                     if multiline {
                         vec![
-                            theme::HelpHint::primary("Esc", "commit"),
+                            theme::HelpHint::primary("Ctrl+S", "commit"),
+                            theme::HelpHint::new("Alt+Enter", "commit"),
                             theme::HelpHint::new("Enter", "newline"),
+                            theme::HelpHint::new("Esc", "cancel"),
                         ]
                     } else {
                         vec![
                             theme::HelpHint::primary("Enter", "commit"),
-                            theme::HelpHint::new("Esc", "commit"),
+                            theme::HelpHint::new("Esc", "cancel"),
                         ]
                     }
                 } else if state.bulk_review_focus == BulkReviewFocus::List {
