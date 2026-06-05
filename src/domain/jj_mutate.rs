@@ -1,5 +1,4 @@
-use std::process::{Command, Stdio};
-
+use super::process;
 use crate::runtime::{Job, JobOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +87,7 @@ fn run_mutate(job: JjMutateJob) -> JjMutateResult {
     }
 
     let args = job.op.command_args();
-    if let Err(message) = jj(&job.jj_binary, &args) {
+    if let Err(message) = process::jj(&job.jj_binary, &args) {
         return JjMutateResult::Errored {
             op: job.op.kind,
             message,
@@ -97,7 +96,7 @@ fn run_mutate(job: JjMutateJob) -> JjMutateResult {
 
     if let Err(message) = ensure_no_conflicts(&job.jj_binary, &job.conflict_revset) {
         let reason = format!("{}; reverted the jj operation", message);
-        return match jj(&job.jj_binary, &["undo".to_string()]) {
+        return match process::jj(&job.jj_binary, &["undo"]) {
             Ok(_) => JjMutateResult::Reverted {
                 op: job.op.kind,
                 reason,
@@ -122,31 +121,12 @@ fn ensure_no_conflicts(jj_binary: &str, revset: &str) -> Result<(), String> {
         "-T".to_string(),
         "if(self.conflict(), \"C\", \"\")".to_string(),
     ];
-    let out = jj(jj_binary, &args)?;
+    let out = process::jj(jj_binary, &args)?;
     if out.contains('C') {
         Err(format!("conflicts exist in {revset}"))
     } else {
         Ok(())
     }
-}
-
-fn jj(binary: &str, args: &[String]) -> Result<String, String> {
-    let mut cmd = Command::new(binary);
-    cmd.arg("--no-pager");
-    cmd.args(args);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let out = cmd
-        .output()
-        .map_err(|e| format!("{binary} {args:?}: {e}"))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        let body = if stderr.is_empty() { stdout } else { stderr };
-        return Err(format!("{binary} {args:?}: {body}"));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 #[cfg(test)]

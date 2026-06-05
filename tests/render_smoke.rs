@@ -19,8 +19,8 @@ use teatui::domain::{
 };
 use teatui::runtime::Cached;
 use teatui::screens::generate::{
-    BulkItemEditor, BulkReviewFocus, CommandPreview, FieldId, GeneratePhase, GenerateState,
-    InputMode, JjOpDialog, Pane, PendingJjOp,
+    BulkItemEditor, BulkItemField, BulkReviewFocus, CommandPreview, FieldId, GeneratePhase,
+    GenerateState, InputMode, JjOpDialog, Pane, PendingJjOp,
 };
 use teatui::screens::{self, LandingState};
 
@@ -66,6 +66,25 @@ fn draw_generate_small(state: &GenerateState, status: &StatusStore) {
         screens::generate::render(state, status, frame, area);
     })
     .expect("draw");
+}
+
+fn generate_small_text(state: &GenerateState, status: &StatusStore) -> String {
+    let mut t = small_term();
+    t.draw(|frame| {
+        let area = frame.area();
+        screens::generate::render(state, status, frame, area);
+    })
+    .expect("draw");
+    buffer_text(t.backend().buffer())
+}
+
+fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+    buffer
+        .content()
+        .chunks(buffer.area.width as usize)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn populated_status() -> StatusStore {
@@ -893,10 +912,37 @@ fn generate_bulk_review_description_editing_renders() {
     };
     s.bulk_review_focus = BulkReviewFocus::Preview;
     s.seed_bulk_editor_from_cursor();
-    s.bulk_editor.field_focus = teatui::screens::generate::BulkItemField::Description;
+    s.bulk_editor.field_focus = BulkItemField::Description;
     s.bulk_editor.editing = true;
     s.bulk_editor.description.begin_edit();
     draw_generate(&s, &populated_status());
+}
+
+#[test]
+fn generate_bulk_review_long_description_stays_visible_when_scrolled() {
+    let mut s = generate_with(GeneratePhase::Idle);
+    let mut plan = sample_stack_plan(1);
+    plan.items[0].description = (0..36)
+        .map(|i| format!("description line {i:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    s.bulk = BulkPhase::Review {
+        plan,
+        cursor: 0,
+        pushing: None,
+        push_all: false,
+    };
+    s.bulk_review_focus = BulkReviewFocus::Preview;
+    s.seed_bulk_editor_from_cursor();
+    s.bulk_editor.field_focus = BulkItemField::Description;
+
+    let text = generate_small_text(&s, &populated_status());
+    assert!(text.contains("description line 35"), "{text}");
+
+    s.bulk_editor.editing = true;
+    s.bulk_editor.description.begin_edit();
+    let text = generate_small_text(&s, &populated_status());
+    assert!(text.contains("description line 35"), "{text}");
 }
 
 // ========================== Backend switcher ================================
