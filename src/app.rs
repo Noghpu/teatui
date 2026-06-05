@@ -67,6 +67,33 @@ enum StackGenerationAction {
     Finish,
 }
 
+/// Downcast and dispatch one job payload in [`App::absorb_payload`].
+///
+/// Every job result arrives type-erased as `Box<dyn Any + Send>`, so the
+/// consumer must try each known payload type in turn. Written out, each attempt
+/// is the same `match any.downcast::<T>() { Ok(b) => { …; return }, Err(a) => a }`
+/// scaffold. This macro collapses that to one line plus the typed body: on a
+/// match it unboxes the payload, binds it as `$bind`, runs `$body`, and returns;
+/// otherwise it rebinds `$any` to the still-boxed value so the next invocation
+/// can try its own type.
+///
+/// The body keeps each arm's exact side effects — inline status updates still
+/// set `self.dirty`, and delegating arms still defer to a typed handler that
+/// owns its own dirty/stale-guard logic — so adding a payload type means one
+/// `try_payload!` line, not a fresh downcast scaffold.
+macro_rules! try_payload {
+    ($any:ident, $ty:ty, $bind:ident => $body:block) => {
+        let $any = match $any.downcast::<$ty>() {
+            Ok(boxed) => {
+                let $bind = *boxed;
+                $body
+                return;
+            }
+            Err(still_boxed) => still_boxed,
+        };
+    };
+}
+
 impl App {
     pub fn new(config: Config, submitter: JobSubmitter) -> Self {
         let mut status = StatusStore::new();
@@ -1075,175 +1102,106 @@ impl App {
     }
 
     fn absorb_payload(&mut self, name: &'static str, any: Box<dyn Any + Send>) {
-        let any = match any.downcast::<VersionResult>() {
-            Ok(b) => {
-                self.status.set_version(*b);
-                self.dirty = true;
-                return;
-            }
-            Err(a) => a,
-        };
-        let any = match any.downcast::<WorkspaceInfo>() {
-            Ok(b) => {
-                let workspace = *b;
-                if let WorkspaceInfo::Inside {
-                    remote: Some(remote),
-                    ..
-                } = &workspace
-                {
-                    self.status.mark_repo_options_loading();
-                    self.submitter.submit(RepoOptionsProbe {
-                        tea_binary: self.config.commands.tea.clone(),
-                        owner: remote.owner.clone(),
-                        repo: remote.repo.clone(),
-                    });
-                }
-                self.status.set_workspace(workspace);
-                self.dirty = true;
-                return;
-            }
-            Err(a) => a,
-        };
-        let any = match any.downcast::<TeaAuthStatus>() {
-            Ok(b) => {
-                self.status.set_tea_auth(*b);
-                self.dirty = true;
-                return;
-            }
-            Err(a) => a,
-        };
-        let any = match any.downcast::<BackendHealth>() {
-            Ok(b) => {
-                let BackendHealth { name, health } = *b;
-                // The active backend also drives the landing LLM chip.
-                if name == self.config.llm.active_backend().name {
-                    self.status.set_llm(health.clone());
-                }
-                self.status.set_backend_health(name, health);
-                self.dirty = true;
-                return;
-            }
-            Err(a) => a,
-        };
-        let any = match any.downcast::<Revsets>() {
-            Ok(b) => {
-                self.status.set_revsets(*b);
-                self.sync_generate_options();
-                // If the user opened PR-gen before revsets loaded, the
-                // form's `head` field is still empty. Now that the list
-                // is in, snap it to the currently-selected revset so the
-                // Form pane reflects the visible Changes-pane cursor.
-                if let Screen::Generate(state) = &mut self.screen
-                    && state.form.head().is_empty()
-                {
-                    screens::generate::update_head_from_selection(state, &self.status);
-                }
-                // Kick off the deferred stats fetch. This is a heavier
-                // jj subprocess (~1.4s on this workspace) that we keep
-                // off the first-paint path; results merge in via the
-                // RevsetStats handler below.
-                self.submitter.submit(RevsetStatsProbe {
-                    jj_binary: self.config.commands.jj.clone(),
-                    revset: "trunk()..@".into(),
+        try_payload!(any, VersionResult, version => {
+            self.status.set_version(version);
+            self.dirty = true;
+        });
+        try_payload!(any, WorkspaceInfo, workspace => {
+            if let WorkspaceInfo::Inside {
+                remote: Some(remote),
+                ..
+            } = &workspace
+            {
+                self.status.mark_repo_options_loading();
+                self.submitter.submit(RepoOptionsProbe {
+                    tea_binary: self.config.commands.tea.clone(),
+                    owner: remote.owner.clone(),
+                    repo: remote.repo.clone(),
                 });
-                self.refresh_stack_review_blockers();
-                self.dirty = true;
-                return;
             }
-            Err(a) => a,
-        };
-        let any = match any.downcast::<RevsetStats>() {
-            Ok(b) => {
-                self.status.merge_revset_stats(*b);
-                self.dirty = true;
-                return;
+            self.status.set_workspace(workspace);
+            self.dirty = true;
+        });
+        try_payload!(any, TeaAuthStatus, auth => {
+            self.status.set_tea_auth(auth);
+            self.dirty = true;
+        });
+        try_payload!(any, BackendHealth, payload => {
+            let BackendHealth { name, health } = payload;
+            // The active backend also drives the landing LLM chip.
+            if name == self.config.llm.active_backend().name {
+                self.status.set_llm(health.clone());
             }
-            Err(a) => a,
-        };
-        let any = match any.downcast::<BaseBookmarks>() {
-            Ok(b) => {
-                self.status.set_base_bookmarks(*b);
-                self.sync_generate_options();
-                self.refresh_stack_review_blockers();
-                self.dirty = true;
-                return;
+            self.status.set_backend_health(name, health);
+            self.dirty = true;
+        });
+        try_payload!(any, Revsets, revsets => {
+            self.status.set_revsets(revsets);
+            self.sync_generate_options();
+            // If the user opened PR-gen before revsets loaded, the
+            // form's `head` field is still empty. Now that the list
+            // is in, snap it to the currently-selected revset so the
+            // Form pane reflects the visible Changes-pane cursor.
+            if let Screen::Generate(state) = &mut self.screen
+                && state.form.head().is_empty()
+            {
+                screens::generate::update_head_from_selection(state, &self.status);
             }
-            Err(a) => a,
-        };
-        let any = match any.downcast::<crate::domain::StackExistingPrs>() {
-            Ok(b) => {
-                self.status.set_stack_existing_prs(*b);
-                self.refresh_stack_review_blockers();
-                self.dirty = true;
-                return;
-            }
-            Err(a) => a,
-        };
-        let any = match any.downcast::<StackPushPrecheck>() {
-            Ok(b) => {
-                self.handle_stack_push_precheck(*b);
-                return;
-            }
-            Err(a) => a,
-        };
-        let any = match any.downcast::<RepoOptions>() {
-            Ok(b) => {
-                self.status.set_repo_options(*b);
-                self.sync_generate_options();
-                self.dirty = true;
-                return;
-            }
-            Err(a) => a,
-        };
-        let any = match any.downcast::<ContextResult>() {
-            Ok(b) => {
-                self.handle_context_result(*b);
-                return;
-            }
-            Err(a) => a,
-        };
-        let any = match any.downcast::<LlmResult>() {
-            Ok(b) => {
-                self.handle_llm_result(*b);
-                return;
-            }
-            Err(a) => a,
-        };
-        let any = match any.downcast::<ExecuteResult>() {
-            Ok(b) => {
-                self.handle_execute_result(*b);
-                return;
-            }
-            Err(a) => a,
-        };
-        let any = match any.downcast::<StackPushResult>() {
-            Ok(b) => {
-                self.handle_stack_push_result(*b);
-                return;
-            }
-            Err(a) => a,
-        };
-        let any = match any.downcast::<JjMutateResult>() {
-            Ok(b) => {
-                self.handle_jj_mutate_result(*b);
-                return;
-            }
-            Err(a) => a,
-        };
-        let any = match any.downcast::<StackContextResult>() {
-            Ok(b) => {
-                self.handle_stack_context_result(*b);
-                return;
-            }
-            Err(a) => a,
-        };
-        let any = match any.downcast::<StackLlmResult>() {
-            Ok(b) => {
-                self.handle_stack_llm_result(*b);
-                return;
-            }
-            Err(a) => a,
-        };
+            // Kick off the deferred stats fetch. This is a heavier
+            // jj subprocess (~1.4s on this workspace) that we keep
+            // off the first-paint path; results merge in via the
+            // RevsetStats handler below.
+            self.submitter.submit(RevsetStatsProbe {
+                jj_binary: self.config.commands.jj.clone(),
+                revset: "trunk()..@".into(),
+            });
+            self.refresh_stack_review_blockers();
+            self.dirty = true;
+        });
+        try_payload!(any, RevsetStats, stats => {
+            self.status.merge_revset_stats(stats);
+            self.dirty = true;
+        });
+        try_payload!(any, BaseBookmarks, bookmarks => {
+            self.status.set_base_bookmarks(bookmarks);
+            self.sync_generate_options();
+            self.refresh_stack_review_blockers();
+            self.dirty = true;
+        });
+        try_payload!(any, crate::domain::StackExistingPrs, prs => {
+            self.status.set_stack_existing_prs(prs);
+            self.refresh_stack_review_blockers();
+            self.dirty = true;
+        });
+        try_payload!(any, StackPushPrecheck, precheck => {
+            self.handle_stack_push_precheck(precheck);
+        });
+        try_payload!(any, RepoOptions, options => {
+            self.status.set_repo_options(options);
+            self.sync_generate_options();
+            self.dirty = true;
+        });
+        try_payload!(any, ContextResult, result => {
+            self.handle_context_result(result);
+        });
+        try_payload!(any, LlmResult, result => {
+            self.handle_llm_result(result);
+        });
+        try_payload!(any, ExecuteResult, result => {
+            self.handle_execute_result(result);
+        });
+        try_payload!(any, StackPushResult, result => {
+            self.handle_stack_push_result(result);
+        });
+        try_payload!(any, JjMutateResult, result => {
+            self.handle_jj_mutate_result(result);
+        });
+        try_payload!(any, StackContextResult, result => {
+            self.handle_stack_context_result(result);
+        });
+        try_payload!(any, StackLlmResult, result => {
+            self.handle_stack_llm_result(result);
+        });
         let _ = any;
         tracing::warn!(target: "teatui::jobs", name, "unhandled payload type");
     }

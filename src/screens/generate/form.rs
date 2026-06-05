@@ -1,7 +1,7 @@
 use std::cell::Cell;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui_textarea::TextArea;
+use ratatui_textarea::{CursorMove, TextArea};
 
 use crate::domain::{RepoOptions, Revsets, StatusStore};
 
@@ -240,7 +240,10 @@ fn text_area_from(value: &str) -> TextArea<'static> {
     } else {
         value.lines().map(str::to_string).collect()
     };
-    TextArea::new(lines)
+    let mut editor = TextArea::new(lines);
+    editor.move_cursor(CursorMove::Bottom);
+    editor.move_cursor(CursorMove::End);
+    editor
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

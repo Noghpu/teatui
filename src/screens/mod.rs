@@ -2,6 +2,8 @@ pub mod backend_picker;
 pub mod generate;
 pub mod landing;
 pub mod theme;
+mod util;
+mod widgets;
 
 use crate::domain::JjOp;
 
