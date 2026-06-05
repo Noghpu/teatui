@@ -1,7 +1,7 @@
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use super::process;
 use crate::config::LlmApi;
 use crate::runtime::{Job, JobOutcome};
 
@@ -50,13 +50,7 @@ impl Job for VersionProbe {
 }
 
 fn run_version_check(binary: &str) -> ToolStatus {
-    match Command::new(binary)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-    {
+    match process::output(binary, &["--version"]) {
         Ok(out) if out.status.success() => {
             let version = String::from_utf8_lossy(&out.stdout)
                 .lines()
@@ -106,13 +100,7 @@ impl Job for WorkspaceProbe {
         "probe.workspace"
     }
     fn run(self: Box<Self>) -> JobOutcome {
-        let result = match Command::new(&self.jj_binary)
-            .args(["workspace", "root"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-        {
+        let result = match process::jj_output(&self.jj_binary, &["workspace", "root"]) {
             Ok(out) if out.status.success() => {
                 let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 let remote = origin_remote_url(&self.jj_binary)
@@ -136,13 +124,7 @@ impl Job for WorkspaceProbe {
 }
 
 fn origin_remote_url(jj_binary: &str) -> Option<String> {
-    let out = Command::new(jj_binary)
-        .args(["git", "remote", "list"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .ok()?;
+    let out = process::jj_output(jj_binary, &["git", "remote", "list"]).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -156,19 +138,21 @@ fn origin_remote_url(jj_binary: &str) -> Option<String> {
 }
 
 fn parse_remote_info(url: &str) -> Option<RemoteInfo> {
-    let normalized = url
-        .trim()
-        .trim_end_matches(".git")
-        .replace(':', "/")
-        .replace("git@", "");
-    let without_scheme = normalized
+    let trimmed = url.trim().trim_end_matches(".git");
+    let without_scheme = trimmed
         .strip_prefix("https://")
-        .or_else(|| normalized.strip_prefix("http://"))
-        .or(Some(normalized.as_str()))?;
-    let parts: Vec<&str> = without_scheme
-        .split('/')
-        .filter(|p| !p.is_empty())
-        .collect();
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .or_else(|| trimmed.strip_prefix("ssh://git@"))
+        .or_else(|| trimmed.strip_prefix("ssh://"));
+    let pathish = match without_scheme {
+        Some(rest) => rest.to_string(),
+        None => trimmed
+            .strip_prefix("git@")
+            .map(|rest| rest.replacen(':', "/", 1))
+            .unwrap_or_else(|| trimmed.to_string()),
+    };
+    let normalized = without_scheme.map(str::to_string).unwrap_or(pathish);
+    let parts: Vec<&str> = normalized.split('/').filter(|p| !p.is_empty()).collect();
     let host = parts.first()?.to_string();
     let owner = parts.get(parts.len().checked_sub(2)?)?.to_string();
     let repo = parts.last()?.to_string();
@@ -193,13 +177,7 @@ impl Job for TeaAuthProbe {
         "probe.tea.auth"
     }
     fn run(self: Box<Self>) -> JobOutcome {
-        let result = match Command::new(&self.tea_binary)
-            .args(["login", "list"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-        {
+        let result = match process::output(&self.tea_binary, &["login", "list"]) {
             Ok(out) if out.status.success() => {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 let logins = parse_tea_logins(&stdout);
@@ -406,21 +384,10 @@ impl Job for RevsetProbe {
         // `\x1D\n` to mark end-of-record. The parser tolerates a missing
         // diff-stat block — we always read records that way.
         const TEMPLATE: &str = r#""\x1E" ++ commit_id.short() ++ "|" ++ change_id.short() ++ "|" ++ bookmarks.map(|b| b.name()).join(",") ++ "|" ++ description.lines().join("\x1F") ++ "\x1D\n""#;
-        let result = match Command::new(&self.jj_binary)
-            .args([
-                "--no-pager",
-                "log",
-                "-r",
-                &self.revset,
-                "--no-graph",
-                "-T",
-                TEMPLATE,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-        {
+        let result = match process::jj_output(
+            &self.jj_binary,
+            &["log", "-r", &self.revset, "--no-graph", "-T", TEMPLATE],
+        ) {
             Ok(out) if out.status.success() => {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 let summaries = parse_revset_log_with_stats(&stdout);
@@ -467,9 +434,9 @@ impl Job for RevsetStatsProbe {
         // snapshotted `@`. Skipping a second snapshot here avoids redundant
         // work and the repo write-lock it would take.
         const TEMPLATE: &str = r#""\x1E" ++ commit_id.short() ++ "|" ++ change_id.short() ++ "|" ++ bookmarks.map(|b| b.name()).join(",") ++ "|" ++ description.lines().join("\x1F") ++ "\x1D\n""#;
-        let result = match Command::new(&self.jj_binary)
-            .args([
-                "--no-pager",
+        let result = match process::jj(
+            &self.jj_binary,
+            &[
                 "--ignore-working-copy",
                 "log",
                 "-r",
@@ -478,14 +445,9 @@ impl Job for RevsetStatsProbe {
                 "--stat",
                 "-T",
                 TEMPLATE,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-        {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
+            ],
+        ) {
+            Ok(stdout) => {
                 let pairs = parse_revset_log_with_stats(&stdout)
                     .into_iter()
                     .map(|s| (s.change_id, s.stats))
@@ -495,7 +457,7 @@ impl Job for RevsetStatsProbe {
             // Failures fall through silently — first paint already
             // succeeded; missing stats just leave rows without the
             // compact "4f +188 -34" metadata line.
-            _ => RevsetStats::default(),
+            Err(_) => RevsetStats::default(),
         };
         JobOutcome::Done(Box::new(result))
     }
@@ -630,26 +592,19 @@ fn fetch_base_bookmarks(jj_binary: &str) -> BaseBookmarks {
     // `--ignore-working-copy`: bookmark listing reads only repo refs and
     // never depends on the working-copy snapshot, so we skip taking one.
     const TEMPLATE: &str = r#"name() ++ "\t" ++ remote().name() ++ "\n""#;
-    match Command::new(jj_binary)
-        .args([
-            "--no-pager",
+    match process::jj(
+        jj_binary,
+        &[
             "--ignore-working-copy",
             "bookmark",
             "list",
             "--all-remotes",
             "-T",
             TEMPLATE,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-    {
-        Ok(out) if out.status.success() => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            parse_base_bookmarks(&stdout)
-        }
-        _ => Vec::new(),
+        ],
+    ) {
+        Ok(stdout) => parse_base_bookmarks(&stdout),
+        Err(_) => Vec::new(),
     }
 }
 
@@ -691,18 +646,9 @@ impl Job for StackExistingPrsProbe {
 }
 
 fn fetch_existing_prs(tea_binary: &str) -> StackExistingPrs {
-    match Command::new(tea_binary)
-        .args(["pr", "list", "--output", "json"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-    {
-        Ok(out) if out.status.success() => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            parse_existing_prs(&stdout)
-        }
-        _ => Vec::new(),
+    match process::tea(tea_binary, &["pr", "list", "--output", "json"]) {
+        Ok(stdout) => parse_existing_prs(&stdout),
+        Err(_) => Vec::new(),
     }
 }
 
@@ -851,19 +797,10 @@ impl Job for RepoOptionsProbe {
 }
 
 fn tea_names(binary: &str, path: &str) -> Vec<String> {
-    let Ok(out) = Command::new(binary)
-        .args(["api", path])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-    else {
+    let Ok(stdout) = process::tea(binary, &["api", path]) else {
         return Vec::new();
     };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    serde_json::from_slice::<Vec<NameItem>>(&out.stdout)
+    serde_json::from_str::<Vec<NameItem>>(&stdout)
         .unwrap_or_default()
         .into_iter()
         .filter_map(|item| item.name.or(item.login).or(item.title))
@@ -880,6 +817,81 @@ struct NameItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::Job;
+
+    const MISSING_BINARY: &str = "__teatui_missing_probe_binary__";
+
+    fn run_job<T: Send + 'static, J: Job>(job: J) -> T {
+        match Box::new(job).run() {
+            JobOutcome::Done(payload) => *payload.downcast::<T>().expect("payload type"),
+            JobOutcome::Failed(message) => panic!("job failed: {message}"),
+        }
+    }
+
+    #[test]
+    fn version_probe_reports_missing_binary() {
+        assert_eq!(run_version_check(MISSING_BINARY), ToolStatus::Missing);
+    }
+
+    #[test]
+    fn workspace_probe_missing_jj_is_errored_not_outside() {
+        let workspace: WorkspaceInfo = run_job(WorkspaceProbe {
+            jj_binary: MISSING_BINARY.into(),
+        });
+
+        assert_eq!(
+            workspace,
+            WorkspaceInfo::Errored {
+                message: format!("{MISSING_BINARY} not found"),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_https_remote_info() {
+        assert_eq!(
+            parse_remote_info("https://gitea.example.com/owner/repo.git"),
+            Some(RemoteInfo {
+                host: "gitea.example.com".into(),
+                owner: "owner".into(),
+                repo: "repo".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_scp_like_ssh_remote_info() {
+        assert_eq!(
+            parse_remote_info("git@gitea.example.com:owner/repo.git"),
+            Some(RemoteInfo {
+                host: "gitea.example.com".into(),
+                owner: "owner".into(),
+                repo: "repo".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_ssh_scheme_remote_info() {
+        assert_eq!(
+            parse_remote_info("ssh://git@gitea.example.com/owner/repo.git"),
+            Some(RemoteInfo {
+                host: "gitea.example.com".into(),
+                owner: "owner".into(),
+                repo: "repo".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn revset_stats_probe_falls_back_on_missing_jj() {
+        let stats: RevsetStats = run_job(RevsetStatsProbe {
+            jj_binary: MISSING_BINARY.into(),
+            revset: "trunk()..@".into(),
+        });
+
+        assert_eq!(stats, RevsetStats::default());
+    }
 
     #[test]
     fn parses_tea_login_list_with_one_login() {
