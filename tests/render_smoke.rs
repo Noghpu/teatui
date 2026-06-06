@@ -288,6 +288,7 @@ fn generate_with(phase: GeneratePhase) -> GenerateState {
         bulk_editor: BulkItemEditor::default(),
         bulk_list_scroll: std::cell::Cell::new(0),
         bulk_form_scroll: std::cell::Cell::new(0),
+        bulk_messages_scroll: std::cell::Cell::new(0),
     }
 }
 
@@ -623,6 +624,7 @@ fn sample_stack_plan(n: usize) -> StackPlan {
                 status: PrStatus::Pending,
                 warnings: Vec::new(),
                 blockers: Vec::new(),
+                reuse_notes: Vec::new(),
             }
         })
         .collect();
@@ -846,8 +848,34 @@ fn generate_bulk_failed_renders() {
 #[test]
 fn generate_bulk_review_with_bookmark_collision_blocker_renders() {
     let mut plan = sample_stack_plan(2);
-    annotate_blockers(&mut plan, &["pr/feat/pr-0".to_string()], &[]);
+    // Provide only the name, no targets → falls through to "another change" blocker.
+    annotate_blockers(
+        &mut plan,
+        &["pr/feat/pr-0".to_string()],
+        &[],
+        &std::collections::HashMap::new(),
+    );
     assert!(!plan.items[0].blockers.is_empty());
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.bulk = BulkPhase::Review {
+        plan,
+        cursor: 0,
+        pushing: None,
+        push_all: false,
+    };
+    s.seed_bulk_editor_from_cursor();
+    draw_generate(&s, &populated_status());
+}
+
+#[test]
+fn generate_bulk_review_with_bookmark_reuse_note_renders() {
+    let mut plan = sample_stack_plan(1);
+    // Simulate a bookmark already on the same change as the plan item head.
+    let mut targets = std::collections::HashMap::new();
+    targets.insert("pr/feat/pr-0".to_string(), vec!["head-0".to_string()]);
+    annotate_blockers(&mut plan, &[], &[], &targets);
+    assert!(plan.items[0].blockers.is_empty());
+    assert!(!plan.items[0].reuse_notes.is_empty());
     let mut s = generate_with(GeneratePhase::Idle);
     s.bulk = BulkPhase::Review {
         plan,
@@ -870,6 +898,7 @@ fn generate_bulk_review_with_existing_pr_blocker_renders() {
             state: "open".into(),
             url: Some("https://example.com/pulls/17".into()),
         }],
+        &std::collections::HashMap::new(),
     );
     assert!(!plan.items[0].blockers.is_empty());
     let mut s = generate_with(GeneratePhase::Idle);
@@ -952,6 +981,63 @@ fn generate_bulk_review_long_description_stays_visible_when_scrolled() {
     s.bulk_editor.description.begin_edit();
     let text = generate_small_text(&s, &populated_status());
     assert!(text.contains("description line 35"), "{text}");
+}
+
+#[test]
+fn generate_bulk_review_long_description_with_messages_pane_renders() {
+    // Verify that a long Description in the Form pane does not push blockers or
+    // warnings out of reach — they now live in the separate Messages pane.
+    let mut plan = sample_stack_plan(2);
+    plan.items[0].description = (0..30)
+        .map(|i| format!("desc line {i:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    plan.items[0].blockers = vec!["bookmark already exists on another change".into()];
+    plan.items[0].warnings = vec!["no description provided".into()];
+
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.bulk = BulkPhase::Review {
+        plan,
+        cursor: 0,
+        pushing: None,
+        push_all: false,
+    };
+    s.bulk_review_focus = BulkReviewFocus::Preview;
+    s.seed_bulk_editor_from_cursor();
+    s.bulk_editor.field_focus = BulkItemField::Description;
+
+    // Should render without panic at both sizes.
+    draw_generate(&s, &populated_status());
+    draw_generate_small(&s, &populated_status());
+
+    // Switch focus to Messages pane — still no panic.
+    s.bulk_review_focus = BulkReviewFocus::Messages;
+    draw_generate(&s, &populated_status());
+    draw_generate_small(&s, &populated_status());
+}
+
+#[test]
+fn generate_bulk_review_messages_pane_focused_renders() {
+    // Smoke test: Messages pane has focus, contains push result and last action.
+    let mut plan = sample_stack_plan(2);
+    plan.items[0].status = PrStatus::Created {
+        url: "https://example.com/pulls/1".into(),
+    };
+    plan.items[1].status = PrStatus::Created {
+        url: "https://example.com/pulls/2".into(),
+    };
+    let mut s = generate_with(GeneratePhase::Idle);
+    s.bulk = BulkPhase::Review {
+        plan,
+        cursor: 0,
+        pushing: None,
+        push_all: false,
+    };
+    s.bulk_review_focus = BulkReviewFocus::Messages;
+    s.last_action = Some("pushed all PRs successfully".into());
+    s.seed_bulk_editor_from_cursor();
+    draw_generate(&s, &populated_status());
+    draw_generate_small(&s, &populated_status());
 }
 
 // ========================== Backend switcher ================================
