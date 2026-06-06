@@ -251,7 +251,12 @@ impl BulkItemField {
 pub enum BulkReviewFocus {
     #[default]
     List,
+    /// The editable form pane (Title / Branch / Description). Named "Preview"
+    /// internally for historical compatibility; the user-visible pane title is
+    /// "Selected PR".
     Preview,
+    /// The messages/status pane (blockers, warnings, push results, last action).
+    Messages,
 }
 
 impl BulkItemEditor {
@@ -325,6 +330,9 @@ pub struct GenerateState {
     /// Updated at render time using the natural-scroll pattern so the focused
     /// field stays fully visible. Cell allows mutation through a shared reference.
     pub bulk_form_scroll: Cell<u16>,
+    /// Scroll offset for the Messages pane in the bulk review modal.
+    /// Controlled by Up/Down/j/k when the Messages pane has focus.
+    pub bulk_messages_scroll: Cell<usize>,
 }
 
 impl GenerateState {
@@ -347,6 +355,7 @@ impl GenerateState {
             bulk_editor: BulkItemEditor::default(),
             bulk_list_scroll: Cell::new(0),
             bulk_form_scroll: Cell::new(0),
+            bulk_messages_scroll: Cell::new(0),
         }
     }
 
@@ -1227,7 +1236,7 @@ fn render_bulk_review(
 
     let gap = if body_area.width >= 80 { 2 } else { 1 };
     let list_width = (body_area.width.saturating_sub(gap) / 2).clamp(24, 44);
-    let [list_shell, _gutter_area, form_shell] = Layout::horizontal([
+    let [list_shell, _gutter_area, right_area] = Layout::horizontal([
         Constraint::Length(list_width),
         Constraint::Length(gap),
         Constraint::Fill(1),
@@ -1238,6 +1247,26 @@ fn render_bulk_review(
     let list_area = list_block.inner(list_shell);
     frame.render_widget(list_block, list_shell);
 
+    // Split the right side vertically: Form (top, editable fields) and
+    // Messages (bottom, blockers/warnings/results/last-action). Minimum
+    // heights ensure both panes are usable at the 80x24 smoke-test floor.
+    let messages_height = if right_area.height >= 16 {
+        // Allocate at least 5 rows to Messages when there's room.
+        right_area.height / 3
+    } else if right_area.height >= 10 {
+        // Compact: give Messages 4 rows (enough for a pane border + 2 content rows).
+        4
+    } else {
+        // Very small: give Messages 3 rows minimum; Form keeps the rest.
+        3
+    };
+    let form_height = right_area.height.saturating_sub(messages_height);
+    let [form_shell, messages_shell] = Layout::vertical([
+        Constraint::Length(form_height),
+        Constraint::Length(messages_height),
+    ])
+    .areas(right_area);
+
     let form_block = theme::pane_block(
         "Selected PR",
         state.bulk_review_focus == BulkReviewFocus::Preview,
@@ -1245,9 +1274,26 @@ fn render_bulk_review(
     let form_area = form_block.inner(form_shell);
     frame.render_widget(form_block, form_shell);
 
-    render_bulk_review_panes(state, plan, cursor, pushing, frame, list_area, form_area);
+    let messages_block = theme::pane_block(
+        "Messages",
+        state.bulk_review_focus == BulkReviewFocus::Messages,
+    );
+    let messages_area = messages_block.inner(messages_shell);
+    frame.render_widget(messages_block, messages_shell);
+
+    render_bulk_review_panes(
+        state,
+        plan,
+        cursor,
+        pushing,
+        frame,
+        list_area,
+        form_area,
+        messages_area,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_bulk_review_panes(
     state: &GenerateState,
     plan: &crate::domain::StackPlan,
@@ -1256,9 +1302,11 @@ fn render_bulk_review_panes(
     frame: &mut Frame,
     list_area: Rect,
     form_area: Rect,
+    messages_area: Rect,
 ) {
     render_bulk_pr_list(state, plan, cursor, pushing, frame, list_area);
-    render_bulk_pr_form(state, plan, cursor, pushing, frame, form_area);
+    render_bulk_pr_form(state, plan, cursor, frame, form_area);
+    render_bulk_messages(state, plan, cursor, pushing, frame, messages_area);
 }
 
 fn bulk_review_footer_line(plan: &crate::domain::StackPlan, width: u16) -> Line<'static> {
@@ -1351,7 +1399,7 @@ fn render_bulk_pr_list(
             crate::domain::PrStatus::Failed { .. } => "✗",
         };
         let has_blocker = !item.blockers.is_empty();
-        let has_warning = !item.warnings.is_empty();
+        let has_warning = !item.warnings.is_empty() || !item.reuse_notes.is_empty();
         let flag = if has_blocker {
             "!"
         } else if has_warning {
@@ -1426,7 +1474,6 @@ fn render_bulk_pr_form(
     state: &GenerateState,
     plan: &crate::domain::StackPlan,
     cursor: usize,
-    pushing: Option<usize>,
     frame: &mut Frame,
     area: Rect,
 ) {
@@ -1439,7 +1486,7 @@ fn render_bulk_pr_form(
     let editor = &state.bulk_editor;
     let value_w = w.saturating_sub(2);
 
-    let scroll = bulk_form_scroll(state, plan, item, cursor, pushing, w, area.height);
+    let scroll = bulk_form_scroll(state, w, area.height);
 
     // --- Render pass ---
     // Use the same inner rect as `area` (the caller already passed the inner
@@ -1474,14 +1521,6 @@ fn render_bulk_pr_form(
         ]),
     );
     cy += 1;
-
-    render_bulk_lines(
-        frame,
-        inner,
-        &mut cy,
-        scroll,
-        bulk_item_status_lines(state, item, cursor, pushing, w),
-    );
 
     form_line(
         frame,
@@ -1526,40 +1565,94 @@ fn render_bulk_pr_form(
         );
     }
 
-    render_bulk_lines(
-        frame,
-        inner,
-        &mut cy,
-        scroll,
-        bulk_annotation_lines(item, w),
-    );
-    render_bulk_lines(frame, inner, &mut cy, scroll, bulk_result_lines(plan, w));
-
-    if let Some(note) = &state.last_action {
-        render_bulk_lines(frame, inner, &mut cy, scroll, bulk_note_lines(note, w));
-    }
+    // Annotation, result, and last-action lines are now rendered in the
+    // separate Messages pane (render_bulk_messages).
 }
 
-fn bulk_form_scroll(
+/// Render the Messages pane: blockers, warnings, reuse notes, push results,
+/// and last-action text. The pane has its own scroll offset so the user can
+/// navigate to it and scroll with Up/Down/j/k even when the Description is long.
+fn render_bulk_messages(
     state: &GenerateState,
     plan: &crate::domain::StackPlan,
-    item: &crate::domain::StackPlanItem,
     cursor: usize,
     pushing: Option<usize>,
-    width: usize,
-    visible: u16,
-) -> u16 {
+    frame: &mut Frame,
+    area: Rect,
+) {
+    if area.height == 0 {
+        return;
+    }
+    let Some(item) = plan.items.get(cursor) else {
+        frame.render_widget(Paragraph::new(placeholder_line("No PR selected.")), area);
+        return;
+    };
+
+    let w = area.width as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Push progress at the top when actively pushing this item.
+    if pushing == Some(cursor) {
+        let message = if state.last_action.as_deref() == Some("checking current PR state") {
+            "checking: bookmarks and existing PRs"
+        } else {
+            "pushing: bookmark -> push -> create PR"
+        };
+        lines.extend(wrapped_styled_lines(
+            "  ",
+            message,
+            w,
+            theme::accent().add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    lines.extend(bulk_annotation_lines(item, w));
+    let result_lines = bulk_result_lines(plan, w);
+    let has_result = !result_lines.is_empty();
+    if has_result && !lines.is_empty() {
+        lines.push(separator_line(w.saturating_sub(2)));
+    }
+    lines.extend(result_lines);
+
+    // Show the last-action note only when there is no definitive result section.
+    // Avoids echoing "stack push complete" or the push error a second time.
+    if !has_result && pushing != Some(cursor) {
+        if let Some(note) = &state.last_action {
+            lines.extend(bulk_note_lines(note, w));
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push(placeholder_line("no messages"));
+    }
+
+    // Natural scroll for the messages pane. When the pane has focus, the user
+    // controls scroll_offset via Up/Down/j/k. We clamp and persist via
+    // bulk_messages_scroll.
+    let total = lines.len();
+    let visible = area.height as usize;
+    let cur_offset = state.bulk_messages_scroll.get();
+    // Clamp the persisted offset to the valid range (content may have shrunk).
+    let max_off = total.saturating_sub(visible);
+    let clamped = cur_offset.min(max_off);
+    if clamped != cur_offset {
+        state.bulk_messages_scroll.set(clamped);
+    }
+    let scroll = clamped as u16;
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        area,
+    );
+}
+
+fn bulk_form_scroll(state: &GenerateState, width: usize, visible: u16) -> u16 {
     let editor = &state.bulk_editor;
     let value_w = width.saturating_sub(2);
     let mut cy = 0u16;
     cy += 2; // read-only head + base
-
-    let status_start = cy;
-    cy = cy.saturating_add(line_count(&bulk_item_status_lines(
-        state, item, cursor, pushing, width,
-    )));
-    let status_end = cy.saturating_sub(1);
-
     cy += 1; // separator
 
     let mut focused_start = 0u16;
@@ -1586,27 +1679,7 @@ fn bulk_form_scroll(
         }
     }
 
-    let annotation_start = cy;
-    cy = cy.saturating_add(line_count(&bulk_annotation_lines(item, width)));
-    let annotation_end = cy.saturating_sub(1);
-
-    let result_start = cy;
-    cy = cy.saturating_add(line_count(&bulk_result_lines(plan, width)));
-    let result_end = cy.saturating_sub(1);
-
-    if let Some(note) = &state.last_action {
-        cy = cy.saturating_add(line_count(&bulk_note_lines(note, width)));
-    }
-
-    let (target_start, target_end) = bulk_scroll_target(
-        editor.editing,
-        item,
-        plan,
-        (focused_start, focused_end),
-        (status_start, status_end),
-        (annotation_start, annotation_end),
-        (result_start, result_end),
-    );
+    let (target_start, target_end) = (focused_start, focused_end);
 
     let scroll = util::scroll_window(
         state.bulk_form_scroll.get() as usize,
@@ -1618,97 +1691,6 @@ fn bulk_form_scroll(
     .offset as u16;
     state.bulk_form_scroll.set(scroll);
     scroll
-}
-
-fn bulk_scroll_target(
-    editing: bool,
-    item: &crate::domain::StackPlanItem,
-    plan: &crate::domain::StackPlan,
-    focused: (u16, u16),
-    status: (u16, u16),
-    annotations: (u16, u16),
-    result: (u16, u16),
-) -> (u16, u16) {
-    if editing {
-        return focused;
-    }
-    if matches!(item.status, crate::domain::PrStatus::Failed { .. }) {
-        return status;
-    }
-    if !item.blockers.is_empty() {
-        return annotations;
-    }
-    if plan
-        .items
-        .iter()
-        .any(|item| matches!(item.status, crate::domain::PrStatus::Failed { .. }))
-    {
-        return result;
-    }
-    focused
-}
-
-fn line_count(lines: &[Line<'static>]) -> u16 {
-    lines.len().min(u16::MAX as usize) as u16
-}
-
-fn render_bulk_lines(
-    frame: &mut Frame,
-    inner: Rect,
-    cy: &mut u16,
-    scroll: u16,
-    lines: Vec<Line<'static>>,
-) {
-    if lines.is_empty() {
-        return;
-    }
-    let height = line_count(&lines);
-    form_block(frame, inner, *cy, scroll, lines);
-    *cy = (*cy).saturating_add(height);
-}
-
-fn bulk_item_status_lines(
-    state: &GenerateState,
-    item: &crate::domain::StackPlanItem,
-    cursor: usize,
-    pushing: Option<usize>,
-    width: usize,
-) -> Vec<Line<'static>> {
-    if pushing == Some(cursor) {
-        let message = if state.last_action.as_deref() == Some("checking current PR state") {
-            "checking: bookmarks and existing PRs"
-        } else {
-            "pushing: bookmark -> push -> create PR"
-        };
-        return wrapped_styled_lines(
-            "  ",
-            message,
-            width,
-            theme::accent().add_modifier(Modifier::BOLD),
-        );
-    }
-
-    match &item.status {
-        crate::domain::PrStatus::Pending => vec![kv_line_fit("push status", "pending", width)],
-        crate::domain::PrStatus::Bookmarked => {
-            vec![kv_line_fit("push status", "bookmark set", width)]
-        }
-        crate::domain::PrStatus::Pushed => {
-            vec![kv_line_fit("push status", "bookmark pushed", width)]
-        }
-        crate::domain::PrStatus::Created { url } => vec![
-            kv_line_fit("push status", "created", width),
-            kv_line_fit("url", url, width),
-        ],
-        crate::domain::PrStatus::Failed { step, message } => {
-            let mut lines = vec![Line::from(Span::styled(
-                format!("  failed at {}", step.label()),
-                theme::error().add_modifier(Modifier::BOLD),
-            ))];
-            lines.extend(wrapped_styled_lines("  ", message, width, theme::error()));
-            lines
-        }
-    }
 }
 
 fn bulk_annotation_lines(item: &crate::domain::StackPlanItem, width: usize) -> Vec<Line<'static>> {
@@ -1723,6 +1705,9 @@ fn bulk_annotation_lines(item: &crate::domain::StackPlanItem, width: usize) -> V
             width,
             theme::warning(),
         ));
+    }
+    for note in &item.reuse_notes {
+        lines.extend(wrapped_styled_lines("  ~ ", note, width, theme::muted()));
     }
     lines
 }
@@ -1751,10 +1736,7 @@ fn bulk_result_lines(plan: &crate::domain::StackPlan, width: usize) -> Vec<Line<
         return Vec::new();
     }
 
-    let mut lines = vec![
-        separator_line(width.saturating_sub(2)),
-        section_heading_line("result"),
-    ];
+    let mut lines = vec![section_heading_line("result")];
     if all_created {
         lines.push(Line::from(Span::styled(
             "  stack push complete",
@@ -2375,20 +2357,30 @@ fn render_help(state: &GenerateState, frame: &mut Frame, area: Rect) {
                     }
                 } else if state.bulk_review_focus == BulkReviewFocus::List {
                     vec![
-                        theme::HelpHint::primary("Enter/→", "preview"),
+                        theme::HelpHint::primary("Enter/→", "form"),
                         theme::HelpHint::new("j/k", "select PR"),
                         theme::HelpHint::new("p", "push current"),
                         theme::HelpHint::new("P", "push all"),
+                        theme::HelpHint::new("r", "refresh"),
                         theme::HelpHint::new("Esc", "close"),
                     ]
-                } else {
+                } else if state.bulk_review_focus == BulkReviewFocus::Preview {
                     vec![
                         theme::HelpHint::primary("Enter/i", "edit"),
                         theme::HelpHint::new("j/k", "fields"),
                         theme::HelpHint::new("Tab", "fields"),
+                        theme::HelpHint::new("→", "messages"),
                         theme::HelpHint::new("p", "push current"),
                         theme::HelpHint::new("P", "push all"),
+                        theme::HelpHint::new("r", "refresh"),
                         theme::HelpHint::new("Esc/←", "list"),
+                    ]
+                } else {
+                    // Messages pane focus
+                    vec![
+                        theme::HelpHint::primary("j/k", "scroll"),
+                        theme::HelpHint::new("PgUp/PgDn", "page"),
+                        theme::HelpHint::new("←/Esc", "form"),
                     ]
                 }
             }
@@ -2510,8 +2502,8 @@ mod tests {
         state.form.description.set_value("Body".into());
         state.phase = phase;
         state.pane = pane;
-        // selected_heads, bulk, bulk_editor, bulk_list_scroll, and bulk_form_scroll
-        // default to their zero values via GenerateState::new
+        // selected_heads, bulk, bulk_editor, bulk_list_scroll, bulk_form_scroll,
+        // and bulk_messages_scroll default to their zero values via GenerateState::new
         state
     }
 

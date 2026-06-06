@@ -58,6 +58,9 @@ pub enum Transition {
     PushStackPr(usize),
     /// User asked to push the whole stack oldest-to-newest in the bulk review modal.
     PushStackAll,
+    /// User asked to refresh blocker inputs (bookmarks + existing PRs) from inside
+    /// the bulk review modal without starting a push.
+    RefreshStackBlockers,
 }
 
 pub enum NewScreen {
