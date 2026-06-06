@@ -622,6 +622,7 @@ fn generate_with(phase: GeneratePhase, pane: Pane, field_focus: FieldId) -> Gene
         bulk_editor: BulkItemEditor::default(),
         bulk_list_scroll: std::cell::Cell::new(0),
         bulk_form_scroll: std::cell::Cell::new(0),
+        bulk_messages_scroll: std::cell::Cell::new(0),
     }
 }
 
@@ -647,6 +648,7 @@ fn sample_stack_plan(n: usize) -> StackPlan {
                 status: PrStatus::Pending,
                 warnings: Vec::new(),
                 blockers: Vec::new(),
+                reuse_notes: Vec::new(),
             }
         })
         .collect();

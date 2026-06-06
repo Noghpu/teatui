@@ -225,19 +225,27 @@ fn on_bulk_review_key(state: &mut GenerateState, key: KeyEvent) -> Transition {
     ) {
         return match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
-                if state.bulk_review_focus == BulkReviewFocus::Preview {
-                    move_bulk_field_focus(state, -1);
-                } else {
-                    move_bulk_cursor(state, -1);
+                match state.bulk_review_focus {
+                    BulkReviewFocus::Preview => move_bulk_field_focus(state, -1),
+                    BulkReviewFocus::Messages => scroll_bulk_messages(state, -1),
+                    BulkReviewFocus::List => move_bulk_cursor(state, -1),
                 }
                 Transition::Dirty
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if state.bulk_review_focus == BulkReviewFocus::Preview {
-                    move_bulk_field_focus(state, 1);
-                } else {
-                    move_bulk_cursor(state, 1);
+                match state.bulk_review_focus {
+                    BulkReviewFocus::Preview => move_bulk_field_focus(state, 1),
+                    BulkReviewFocus::Messages => scroll_bulk_messages(state, 1),
+                    BulkReviewFocus::List => move_bulk_cursor(state, 1),
                 }
+                Transition::Dirty
+            }
+            KeyCode::PageUp if state.bulk_review_focus == BulkReviewFocus::Messages => {
+                scroll_bulk_messages(state, -5);
+                Transition::Dirty
+            }
+            KeyCode::PageDown if state.bulk_review_focus == BulkReviewFocus::Messages => {
+                scroll_bulk_messages(state, 5);
                 Transition::Dirty
             }
             _ => Transition::None,
@@ -250,13 +258,8 @@ fn on_bulk_review_key(state: &mut GenerateState, key: KeyEvent) -> Transition {
 
     match key.code {
         KeyCode::Esc => {
-            if state.bulk_review_focus == BulkReviewFocus::Preview {
-                state.bulk_review_focus = BulkReviewFocus::List;
-            } else {
-                // Flush edits to plan then close.
-                state.flush_bulk_editor_to_plan();
-                state.bulk = BulkPhase::Idle;
-            }
+            state.flush_bulk_editor_to_plan();
+            state.bulk = BulkPhase::Idle;
             Transition::Dirty
         }
         KeyCode::Char('p') => {
@@ -272,20 +275,36 @@ fn on_bulk_review_key(state: &mut GenerateState, key: KeyEvent) -> Transition {
             Transition::PushStackAll
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            if state.bulk_review_focus == BulkReviewFocus::Preview {
-                move_bulk_field_focus(state, -1);
-            } else {
-                move_bulk_cursor(state, -1);
+            match state.bulk_review_focus {
+                BulkReviewFocus::Preview => move_bulk_field_focus(state, -1),
+                BulkReviewFocus::Messages => scroll_bulk_messages(state, -1),
+                BulkReviewFocus::List => move_bulk_cursor(state, -1),
             }
             Transition::Dirty
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            if state.bulk_review_focus == BulkReviewFocus::Preview {
-                move_bulk_field_focus(state, 1);
-            } else {
-                move_bulk_cursor(state, 1);
+            match state.bulk_review_focus {
+                BulkReviewFocus::Preview => move_bulk_field_focus(state, 1),
+                BulkReviewFocus::Messages => scroll_bulk_messages(state, 1),
+                BulkReviewFocus::List => move_bulk_cursor(state, 1),
             }
             Transition::Dirty
+        }
+        KeyCode::PageUp => {
+            if state.bulk_review_focus == BulkReviewFocus::Messages {
+                scroll_bulk_messages(state, -5);
+                Transition::Dirty
+            } else {
+                Transition::None
+            }
+        }
+        KeyCode::PageDown => {
+            if state.bulk_review_focus == BulkReviewFocus::Messages {
+                scroll_bulk_messages(state, 5);
+                Transition::Dirty
+            } else {
+                Transition::None
+            }
         }
         KeyCode::Enter if state.bulk_review_focus == BulkReviewFocus::List => {
             state.flush_bulk_editor_to_plan();
@@ -294,23 +313,39 @@ fn on_bulk_review_key(state: &mut GenerateState, key: KeyEvent) -> Transition {
             Transition::Dirty
         }
         KeyCode::Right => {
-            if state.bulk_review_focus == BulkReviewFocus::List {
-                state.flush_bulk_editor_to_plan();
-                state.seed_bulk_editor_from_cursor();
-                state.bulk_review_focus = BulkReviewFocus::Preview;
-                Transition::Dirty
-            } else {
-                // Already in Preview — no-op.
-                Transition::None
+            match state.bulk_review_focus {
+                BulkReviewFocus::List => {
+                    state.flush_bulk_editor_to_plan();
+                    state.seed_bulk_editor_from_cursor();
+                    state.bulk_review_focus = BulkReviewFocus::Preview;
+                    Transition::Dirty
+                }
+                BulkReviewFocus::Preview => {
+                    // Move from Form to Messages pane.
+                    state.bulk_review_focus = BulkReviewFocus::Messages;
+                    Transition::Dirty
+                }
+                BulkReviewFocus::Messages => {
+                    // Already at rightmost pane — no-op.
+                    Transition::None
+                }
             }
         }
         KeyCode::Left => {
-            if state.bulk_review_focus == BulkReviewFocus::Preview {
-                state.bulk_review_focus = BulkReviewFocus::List;
-                Transition::Dirty
-            } else {
-                // Already in List — do NOT close the modal.
-                Transition::None
+            match state.bulk_review_focus {
+                BulkReviewFocus::Messages => {
+                    // Move from Messages back to Form (Preview).
+                    state.bulk_review_focus = BulkReviewFocus::Preview;
+                    Transition::Dirty
+                }
+                BulkReviewFocus::Preview => {
+                    state.bulk_review_focus = BulkReviewFocus::List;
+                    Transition::Dirty
+                }
+                BulkReviewFocus::List => {
+                    // Already at leftmost pane — do NOT close the modal.
+                    Transition::None
+                }
             }
         }
         KeyCode::Char('i') | KeyCode::Enter
@@ -337,6 +372,12 @@ fn on_bulk_review_key(state: &mut GenerateState, key: KeyEvent) -> Transition {
             }
             Transition::Dirty
         }
+        // Refresh blocker inputs without leaving the modal. Flush any unsaved
+        // editor changes first so they are visible in the refreshed plan.
+        KeyCode::Char('r') => {
+            state.flush_bulk_editor_to_plan();
+            Transition::RefreshStackBlockers
+        }
         _ => Transition::None,
     }
 }
@@ -355,10 +396,23 @@ fn on_bulk_editor_key(state: &mut GenerateState, key: KeyEvent) -> Transition {
         state.bulk_editor.editing = false;
         // Write the edit back into the plan so the list row updates.
         state.flush_bulk_editor_to_plan();
+        // A Branch commit can introduce or resolve a bookmark conflict or
+        // existing-PR conflict, so trigger a blocker refresh automatically.
+        if f == BulkItemField::Branch {
+            return Transition::RefreshStackBlockers;
+        }
     } else {
         state.bulk_editor.field_mut(f).input(key);
     }
     Transition::Dirty
+}
+
+/// Scroll the Messages pane by `delta` lines (clamped to valid range).
+fn scroll_bulk_messages(state: &mut GenerateState, delta: isize) {
+    let cur = state.bulk_messages_scroll.get() as isize;
+    let next = (cur + delta).max(0) as usize;
+    // Upper bound is enforced at render time; we just need a generous cap here.
+    state.bulk_messages_scroll.set(next);
 }
 
 fn move_bulk_field_focus(state: &mut GenerateState, delta: isize) {
@@ -556,6 +610,7 @@ mod tests {
             bulk_editor: crate::screens::generate::BulkItemEditor::default(),
             bulk_list_scroll: std::cell::Cell::new(0),
             bulk_form_scroll: std::cell::Cell::new(0),
+            bulk_messages_scroll: std::cell::Cell::new(0),
         }
     }
 
@@ -871,6 +926,7 @@ mod tests {
                         },
                         warnings: Vec::new(),
                         blockers: Vec::new(),
+                        reuse_notes: Vec::new(),
                     },
                     crate::domain::StackPlanItem {
                         input: crate::domain::StackPrInput {
@@ -886,6 +942,7 @@ mod tests {
                         status: crate::domain::PrStatus::Pending,
                         warnings: Vec::new(),
                         blockers: Vec::new(),
+                        reuse_notes: Vec::new(),
                     },
                 ],
                 labels: Vec::new(),
@@ -933,15 +990,14 @@ mod tests {
     }
 
     #[test]
-    fn esc_from_bulk_review_preview_returns_to_list() {
+    fn esc_from_bulk_review_preview_closes_modal() {
         let mut state = two_item_review(None);
         state.bulk_review_focus = BulkReviewFocus::Preview;
 
         let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Esc));
 
         assert!(matches!(transition, Transition::Dirty));
-        assert_eq!(state.bulk_review_focus, BulkReviewFocus::List);
-        assert!(matches!(state.bulk, BulkPhase::Review { .. }));
+        assert!(matches!(state.bulk, BulkPhase::Idle));
     }
 
     #[test]
@@ -1013,6 +1069,7 @@ mod tests {
             status: PrStatus::Pending,
             warnings: Vec::new(),
             blockers: Vec::new(),
+            reuse_notes: Vec::new(),
         };
         let mut state = draft_state();
         state.bulk = BulkPhase::Review {
@@ -1112,14 +1169,25 @@ mod tests {
     }
 
     #[test]
-    fn right_while_already_preview_is_noop() {
+    fn right_from_preview_moves_to_messages() {
         let mut state = two_item_review(None);
         state.bulk_review_focus = BulkReviewFocus::Preview;
 
         let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Right));
 
+        assert!(matches!(transition, Transition::Dirty));
+        assert_eq!(state.bulk_review_focus, BulkReviewFocus::Messages);
+    }
+
+    #[test]
+    fn right_while_already_messages_is_noop() {
+        let mut state = two_item_review(None);
+        state.bulk_review_focus = BulkReviewFocus::Messages;
+
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Right));
+
         assert!(matches!(transition, Transition::None));
-        assert_eq!(state.bulk_review_focus, BulkReviewFocus::Preview);
+        assert_eq!(state.bulk_review_focus, BulkReviewFocus::Messages);
     }
 
     #[test]
@@ -1133,6 +1201,97 @@ mod tests {
         assert_eq!(state.bulk_review_focus, BulkReviewFocus::List);
         // Modal must remain open.
         assert!(matches!(state.bulk, BulkPhase::Review { .. }));
+    }
+
+    #[test]
+    fn r_in_bulk_review_list_triggers_refresh() {
+        let mut state = two_item_review(None);
+        state.bulk_review_focus = BulkReviewFocus::List;
+
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Char('r')));
+
+        assert!(matches!(transition, Transition::RefreshStackBlockers));
+    }
+
+    #[test]
+    fn r_in_bulk_review_preview_triggers_refresh() {
+        let mut state = two_item_review(None);
+        state.bulk_review_focus = BulkReviewFocus::Preview;
+
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Char('r')));
+
+        assert!(matches!(transition, Transition::RefreshStackBlockers));
+    }
+
+    #[test]
+    fn r_while_editing_does_not_refresh() {
+        let mut state = two_item_review(None);
+        state.bulk_review_focus = BulkReviewFocus::Preview;
+        state.bulk_editor.editing = true;
+
+        // 'r' should be processed as character input, not as refresh.
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Char('r')));
+
+        // In a single-line field, 'r' is just input — returns Dirty, not Refresh.
+        assert!(matches!(transition, Transition::Dirty));
+        assert!(!matches!(transition, Transition::RefreshStackBlockers));
+    }
+
+    #[test]
+    fn r_during_push_is_ignored() {
+        let mut state = two_item_review(Some(0));
+
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Char('r')));
+
+        assert!(matches!(transition, Transition::None));
+    }
+
+    #[test]
+    fn branch_field_commit_triggers_refresh() {
+        let mut state = two_item_review(None);
+        state.bulk_review_focus = BulkReviewFocus::Preview;
+        // Set editor to Branch field and start editing.
+        state.bulk_editor.field_focus = BulkItemField::Branch;
+        state.bulk_editor.editing = true;
+
+        // Enter commits a single-line field.
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Enter));
+
+        assert!(matches!(transition, Transition::RefreshStackBlockers));
+        assert!(!state.bulk_editor.editing);
+    }
+
+    #[test]
+    fn title_field_commit_does_not_trigger_refresh() {
+        let mut state = two_item_review(None);
+        state.bulk_review_focus = BulkReviewFocus::Preview;
+        state.bulk_editor.field_focus = BulkItemField::Title;
+        state.bulk_editor.editing = true;
+
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Enter));
+
+        assert!(matches!(transition, Transition::Dirty));
+        assert!(!matches!(transition, Transition::RefreshStackBlockers));
+        assert!(!state.bulk_editor.editing);
+    }
+
+    #[test]
+    fn r_flush_editor_before_refresh() {
+        // Ensure flush_bulk_editor_to_plan is called before returning the transition
+        // by checking the plan reflects editor changes after an 'r' press.
+        let mut state = two_item_review(None);
+        state.bulk_review_focus = BulkReviewFocus::List;
+        // Manually set a different title in the editor without editing flag.
+        state.bulk_editor.title.value = "modified title".to_string();
+
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Char('r')));
+
+        assert!(matches!(transition, Transition::RefreshStackBlockers));
+        // The plan item at cursor 0 should now have the modified title.
+        let BulkPhase::Review { plan, cursor, .. } = &state.bulk else {
+            panic!("expected review phase");
+        };
+        assert_eq!(plan.items[*cursor].title, "modified title");
     }
 
     #[test]
@@ -1152,5 +1311,124 @@ mod tests {
                 "{code:?} must not switch panes during push"
             );
         }
+    }
+
+    #[test]
+    fn left_from_messages_returns_to_form() {
+        let mut state = two_item_review(None);
+        state.bulk_review_focus = BulkReviewFocus::Messages;
+
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Left));
+
+        assert!(matches!(transition, Transition::Dirty));
+        assert_eq!(state.bulk_review_focus, BulkReviewFocus::Preview);
+    }
+
+    #[test]
+    fn esc_from_messages_closes_modal() {
+        let mut state = two_item_review(None);
+        state.bulk_review_focus = BulkReviewFocus::Messages;
+
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Esc));
+
+        assert!(matches!(transition, Transition::Dirty));
+        assert!(matches!(state.bulk, BulkPhase::Idle));
+    }
+
+    #[test]
+    fn up_down_scroll_messages_when_focused() {
+        let mut state = two_item_review(None);
+        state.bulk_review_focus = BulkReviewFocus::Messages;
+        state.bulk_messages_scroll.set(5);
+
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::Char('j')));
+        assert_eq!(state.bulk_messages_scroll.get(), 6);
+
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::Char('k')));
+        assert_eq!(state.bulk_messages_scroll.get(), 5);
+
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::Down));
+        assert_eq!(state.bulk_messages_scroll.get(), 6);
+
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::Up));
+        assert_eq!(state.bulk_messages_scroll.get(), 5);
+    }
+
+    #[test]
+    fn up_down_move_fields_when_form_focused() {
+        let mut state = two_item_review(None);
+        state.bulk_review_focus = BulkReviewFocus::Preview;
+        state.bulk_editor.field_focus = BulkItemField::Title;
+
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::Down));
+        assert_eq!(state.bulk_editor.field_focus, BulkItemField::Branch);
+
+        // Messages scroll offset must not change.
+        assert_eq!(state.bulk_messages_scroll.get(), 0);
+    }
+
+    #[test]
+    fn page_up_down_scroll_messages_by_larger_step() {
+        let mut state = two_item_review(None);
+        state.bulk_review_focus = BulkReviewFocus::Messages;
+        state.bulk_messages_scroll.set(10);
+
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::PageUp));
+        assert_eq!(state.bulk_messages_scroll.get(), 5);
+
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::PageDown));
+        assert_eq!(state.bulk_messages_scroll.get(), 10);
+    }
+
+    #[test]
+    fn page_up_down_scroll_messages_during_push() {
+        // The Messages pane stays scrollable (including PageUp/PageDown) while a
+        // push is in flight, matching the live Up/Down/j/k navigation.
+        let mut state = two_item_review(Some(0));
+        state.bulk_review_focus = BulkReviewFocus::Messages;
+        state.bulk_messages_scroll.set(10);
+
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::PageUp));
+        assert_eq!(state.bulk_messages_scroll.get(), 5);
+
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::PageDown));
+        assert_eq!(state.bulk_messages_scroll.get(), 10);
+    }
+
+    #[test]
+    fn messages_scroll_does_not_go_below_zero() {
+        let mut state = two_item_review(None);
+        state.bulk_review_focus = BulkReviewFocus::Messages;
+        state.bulk_messages_scroll.set(0);
+
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::Up));
+        assert_eq!(state.bulk_messages_scroll.get(), 0);
+    }
+
+    #[test]
+    fn full_three_pane_navigation_round_trip() {
+        let mut state = two_item_review(None);
+        assert_eq!(state.bulk_review_focus, BulkReviewFocus::List);
+
+        // List → Form
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::Right));
+        assert_eq!(state.bulk_review_focus, BulkReviewFocus::Preview);
+
+        // Form → Messages
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::Right));
+        assert_eq!(state.bulk_review_focus, BulkReviewFocus::Messages);
+
+        // Messages → Form (Left)
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::Left));
+        assert_eq!(state.bulk_review_focus, BulkReviewFocus::Preview);
+
+        // Form → List (Left)
+        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::Left));
+        assert_eq!(state.bulk_review_focus, BulkReviewFocus::List);
+
+        // List Left → no-op
+        let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Left));
+        assert!(matches!(transition, Transition::None));
+        assert_eq!(state.bulk_review_focus, BulkReviewFocus::List);
     }
 }
