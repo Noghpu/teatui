@@ -2,18 +2,20 @@ use std::collections::HashMap;
 
 use crate::runtime::Cached;
 
+use super::forge::{ForgeAuthStatus, RepoOptions, StackExistingPrs};
 use super::probe::{
-    BaseBookmarks, LlmHealth, RepoOptions, RevsetStats, Revsets, StackExistingPrs, TeaAuthStatus,
-    ToolStatus, VersionKind, VersionResult, WorkspaceInfo,
+    BaseBookmarks, LlmHealth, RevsetStats, Revsets, ToolStatus, VersionKind, VersionResult,
+    WorkspaceInfo,
 };
 
 #[derive(Debug, Clone, Default)]
 pub struct StatusStore {
     pub jj: Cached<ToolStatus>,
     pub git: Cached<ToolStatus>,
-    pub tea: Cached<ToolStatus>,
+    pub forge: Cached<ToolStatus>,
+    pub forge_label: String,
     pub workspace: Cached<WorkspaceInfo>,
-    pub tea_auth: Cached<TeaAuthStatus>,
+    pub forge_auth: Cached<ForgeAuthStatus>,
     /// Health of the *active* backend — drives the landing LLM chip.
     pub llm: Cached<LlmHealth>,
     /// Health of every configured backend, keyed by name. Populated lazily
@@ -27,7 +29,10 @@ pub struct StatusStore {
 
 impl StatusStore {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            forge_label: "forge".into(),
+            ..Self::default()
+        }
     }
 
     /// Mark every probe-driven field as in-flight. Called immediately
@@ -36,9 +41,9 @@ impl StatusStore {
     pub fn mark_all_loading(&mut self) {
         self.jj.mark_loading();
         self.git.mark_loading();
-        self.tea.mark_loading();
+        self.forge.mark_loading();
         self.workspace.mark_loading();
-        self.tea_auth.mark_loading();
+        self.forge_auth.mark_loading();
         self.llm.mark_loading();
         self.revsets.mark_loading();
         self.base_bookmarks.mark_loading();
@@ -48,17 +53,26 @@ impl StatusStore {
         let slot = match result.kind {
             VersionKind::Jj => &mut self.jj,
             VersionKind::Git => &mut self.git,
-            VersionKind::Tea => &mut self.tea,
+            VersionKind::Forge => &mut self.forge,
         };
         slot.set(result.status);
+    }
+
+    pub fn set_forge_label(&mut self, label: impl Into<String>) {
+        self.forge_label = label.into();
+    }
+
+    pub fn mark_forge_loading(&mut self) {
+        self.forge.mark_loading();
+        self.forge_auth.mark_loading();
     }
 
     pub fn set_workspace(&mut self, info: WorkspaceInfo) {
         self.workspace.set(info);
     }
 
-    pub fn set_tea_auth(&mut self, status: TeaAuthStatus) {
-        self.tea_auth.set(status);
+    pub fn set_forge_auth(&mut self, status: ForgeAuthStatus) {
+        self.forge_auth.set(status);
     }
 
     pub fn set_llm(&mut self, health: LlmHealth) {

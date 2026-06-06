@@ -84,8 +84,7 @@ pub fn on_key(state: &mut GenerateState, status: &StatusStore, key: KeyEvent) ->
                 && state.pane == Pane::Preview =>
         {
             if state.form.validate() {
-                state.begin_confirmation();
-                Transition::Dirty
+                Transition::ReviewExecution
             } else {
                 Transition::Dirty
             }
@@ -561,18 +560,18 @@ mod tests {
     }
 
     #[test]
-    fn x_on_draft_enters_confirmation_instead_of_executing() {
+    fn x_on_draft_requests_execution_review() {
         let mut state = draft_state();
         let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Char('x')));
 
-        assert!(matches!(transition, Transition::Dirty));
-        assert!(matches!(state.phase, GeneratePhase::Confirming { .. }));
+        assert!(matches!(transition, Transition::ReviewExecution));
+        assert!(matches!(state.phase, GeneratePhase::DraftReady { .. }));
     }
 
     #[test]
     fn esc_from_confirmation_returns_to_draft() {
         let mut state = draft_state();
-        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::Char('x')));
+        state.begin_confirmation(&sample_forge());
         let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Esc));
 
         assert!(matches!(transition, Transition::Dirty));
@@ -582,10 +581,14 @@ mod tests {
     #[test]
     fn enter_from_confirmation_requests_execute() {
         let mut state = draft_state();
-        let _ = on_key(&mut state, &StatusStore::new(), key(KeyCode::Char('x')));
+        state.begin_confirmation(&sample_forge());
         let transition = on_key(&mut state, &StatusStore::new(), key(KeyCode::Enter));
 
         assert!(matches!(transition, Transition::Execute));
+    }
+
+    fn sample_forge() -> crate::domain::ForgeCli {
+        crate::domain::ForgeCli::new(crate::domain::ForgeKind::Gitea, "tea".into(), None)
     }
 
     #[test]

@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::domain::execute::ExecuteStep;
-use crate::domain::probe::{RevsetSummary, StackExistingPr};
+use crate::domain::forge::StackExistingPr;
+use crate::domain::probe::RevsetSummary;
 
 // ============================== Domain Types ================================
 

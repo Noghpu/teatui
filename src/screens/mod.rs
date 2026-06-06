@@ -36,6 +36,8 @@ pub enum Transition {
     Generate,
     /// User asked to abort an in-flight generation (context collection or LLM).
     CancelGeneration,
+    /// User asked to review the concrete shell commands for a ready draft.
+    ReviewExecution,
     /// User requested PR execution from a ready draft.
     Execute,
     /// User asked to copy the completed PR URL to the clipboard.

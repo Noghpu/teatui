@@ -9,12 +9,28 @@ use std::process::{Command, Output, Stdio};
 /// ran and failed, and can inspect exit status, stdout, and stderr separately.
 /// [`capture`] builds the success-or-error-string convenience layer on top.
 pub(crate) fn output<S: AsRef<str>>(binary: &str, args: &[S]) -> io::Result<Output> {
-    Command::new(binary)
+    let mut command = Command::new(binary);
+    apply_process_local_git_safe_directory(&mut command);
+    command
         .args(args.iter().map(AsRef::as_ref))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
+}
+
+fn apply_process_local_git_safe_directory(command: &mut Command) {
+    let count = git_config_count_index(std::env::var("GIT_CONFIG_COUNT").ok().as_deref());
+    command
+        .env("GIT_CONFIG_COUNT", (count + 1).to_string())
+        .env(format!("GIT_CONFIG_KEY_{count}"), "safe.directory")
+        .env(format!("GIT_CONFIG_VALUE_{count}"), "*");
+}
+
+fn git_config_count_index(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0)
 }
 
 /// Run `binary` with `args`, with stdin nulled and stdout/stderr captured.
@@ -53,11 +69,6 @@ pub(crate) fn jj<S: AsRef<str>>(binary: &str, args: &[S]) -> Result<String, Stri
     capture(binary, &all)
 }
 
-/// tea invocation; no pager flag is needed.
-pub(crate) fn tea<S: AsRef<str>>(binary: &str, args: &[S]) -> Result<String, String> {
-    capture(binary, args)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,9 +103,9 @@ mod tests {
     }
 
     #[test]
-    fn tea_accepts_string_args_without_no_pager() {
-        let args = vec!["pr".to_string(), "list".to_string()];
-        let err = tea(MISSING_BINARY, &args).unwrap_err();
-        assert!(err.starts_with("__teatui_missing_process_binary__ [\"pr\", \"list\"]: "));
+    fn process_local_git_safe_directory_appends_to_existing_config_env() {
+        assert_eq!(git_config_count_index(None), 0);
+        assert_eq!(git_config_count_index(Some("2")), 2);
+        assert_eq!(git_config_count_index(Some("not-a-number")), 0);
     }
 }

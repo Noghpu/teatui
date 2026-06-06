@@ -8,10 +8,12 @@ use ratatui::style::{Color, Modifier};
 use ratatui::{Frame, Terminal};
 
 use teatui::domain::{
-    BaseBookmark, BulkPhase, ChangeContext, ContextBundle, DiffContext, GeneratedDraft, JjOp,
-    JjOpKind, LlmHealth, PrStatus, PromptBuild, PromptManifest, PromptSection, RepoOptions,
-    RevsetSummary, Revsets, StackDraft, StackIntent, StackPlan, StackPlanItem, StackPrInput,
-    StatusStore, TeaAuthStatus, ToolStatus, VersionKind, VersionResult, WorkspaceInfo,
+    BaseBookmark, BulkPhase, ChangeContext, ContextBundle, DiffContext, ForgeAuthStatus,
+    GeneratedDraft, JjOp, JjOpKind, LlmHealth, PrStatus, PromptBuild, PromptManifest,
+    PromptSection, RemoteInfo, RepoOptions, RevsetSummary, Revsets, StackDraft, StackIntent,
+    StackPlan,
+    StackPlanItem, StackPrInput, StatusStore, ToolStatus, VersionKind, VersionResult,
+    WorkspaceInfo,
 };
 use teatui::screens::generate::{
     CommandPreview, FieldId, GeneratePhase, GenerateState, InputMode, JjOpDialog, Pane,
@@ -505,16 +507,22 @@ fn populated_status() -> StatusStore {
         },
     });
     status.set_version(VersionResult {
-        kind: VersionKind::Tea,
+        kind: VersionKind::Forge,
         status: ToolStatus::Available {
             version: "tea 0.14.0".into(),
         },
     });
+    status.set_forge_label("tea");
     status.set_workspace(WorkspaceInfo::Inside {
         root: PathBuf::from("/home/dev/projects/teatui"),
-        remote: None,
+        remote: Some(RemoteInfo {
+            host: "gitea.example.com".into(),
+            owner: "owner".into(),
+            repo: "teatui".into(),
+        }),
+        remote_name: Some("origin".into()),
     });
-    status.set_tea_auth(TeaAuthStatus::Configured {
+    status.set_forge_auth(ForgeAuthStatus::Configured {
         logins: vec!["gitea".into()],
     });
     status.set_llm(LlmHealth::Available {
@@ -552,7 +560,7 @@ fn populated_status() -> StatusStore {
     ]);
     status.set_repo_options(RepoOptions {
         labels: vec!["ui".into(), "rewrite".into(), "bug".into()],
-        assignees: vec!["dev".into(), "reviewer".into()],
+        assignees: vec!["alice".into(), "reviewer".into()],
         milestones: vec!["rewrite".into()],
     });
     status
@@ -594,7 +602,7 @@ fn generate_with(phase: GeneratePhase, pane: Pane, field_focus: FieldId) -> Gene
             .into(),
     );
     form.labels.set_values(vec!["ui".into(), "rewrite".into()]);
-    form.assignees.set_values(vec!["dev".into()]);
+    form.assignees.set_values(vec!["alice".into()]);
     use teatui::screens::generate::{BulkItemEditor, BulkReviewFocus};
     GenerateState {
         pane,
