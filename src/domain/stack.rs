@@ -69,6 +69,10 @@ pub struct StackPlanItem {
     pub status: PrStatus,
     pub warnings: Vec<String>,
     pub blockers: Vec<String>,
+    /// Non-blocking notes populated by `annotate_blockers` each call (cleared
+    /// and repopulated like `blockers`). Currently used for reuse notices when
+    /// a suggested bookmark already sits on the item's own head change.
+    pub reuse_notes: Vec<String>,
 }
 
 /// Full stack plan presented in the review modal.
@@ -83,17 +87,41 @@ pub struct StackPlan {
 
 // ============================== Blockers ====================================
 
-/// Annotate each plan item with bookmark / existing-PR blockers.
+/// Annotate each plan item with bookmark / existing-PR blockers and reuse
+/// notes.
 ///
 /// Checks are intentionally pure and side-effect free beyond rewriting the
-/// `blockers` vector on each item. This is the shared logic used when the plan
-/// enters review and later when an item is re-checked before push.
+/// `blockers` and `reuse_notes` vectors on each item. Both vectors are cleared
+/// at the start of each call so repeated invocations are idempotent. This is
+/// the shared logic used when the plan enters review and later when an item is
+/// re-checked before push.
+///
+/// # Bookmark conflict vs. reuse
+/// For a `Pending` item with bookmark `name` and head change `head`:
+/// 1. If `name` is listed in `bookmark_targets[name]` as sitting on `head`
+///    → **reuse**: add a non-blocking note, no blocker.
+/// 2. If `name` exists anywhere (`bookmark_targets` keys ∪ `local_bookmarks`)
+///    but is NOT confirmed on `head` → **conflict**: `already exists on
+///    another change` blocker.
+/// 3. Otherwise → clean.
+///
+/// The `bookmark_targets` map is keyed by bookmark name and maps to the list of
+/// short change ids the bookmark sits on (from the revset summary). Bookmarks
+/// that are only known by name (e.g. base/remote bookmarks) are expressed as
+/// `local_bookmarks` with no entry in `bookmark_targets`; they are treated as
+/// "unknown target" and continue to block (safe default).
+///
+/// Change-id matching: `item.input.head` is compared against the target change
+/// ids using a prefix match — the revset template emits `change_id.short()`
+/// (12 chars) while `item.input.head` may be full or short. A match is
+/// declared when either string is a prefix of the other.
 pub fn annotate_blockers(
     plan: &mut StackPlan,
     local_bookmarks: &[String],
     existing_prs: &[StackExistingPr],
+    bookmark_targets: &HashMap<String, Vec<String>>,
 ) {
-    let local_bookmarks: HashSet<&str> = local_bookmarks.iter().map(String::as_str).collect();
+    let local_bookmarks_set: HashSet<&str> = local_bookmarks.iter().map(String::as_str).collect();
     let existing_prs_by_head: HashMap<&str, &StackExistingPr> = existing_prs
         .iter()
         .map(|pr| (pr.head_branch.as_str(), pr))
@@ -102,6 +130,7 @@ pub fn annotate_blockers(
 
     for (index, item) in plan.items.iter_mut().enumerate() {
         item.blockers.clear();
+        item.reuse_notes.clear();
         let bookmark = item.bookmark.clone();
 
         if let Some(previous_index) = seen_bookmarks.insert(bookmark.clone(), index) {
@@ -118,9 +147,30 @@ pub fn annotate_blockers(
                 continue;
             }
 
-            if local_bookmarks.contains(bookmark.as_str()) {
-                item.blockers
-                    .push(format!("bookmark {bookmark} already exists"));
+            // Determine whether the bookmark exists and if so whether it is
+            // already on this item's own head change.
+            let head = &item.input.head;
+            let in_targets = bookmark_targets.get(&bookmark);
+            let in_name_set =
+                local_bookmarks_set.contains(bookmark.as_str()) || in_targets.is_some();
+
+            if in_name_set {
+                // Check if any target change id prefix-matches the item's head.
+                let on_same_change = in_targets.is_some_and(|targets| {
+                    targets.iter().any(|tid| {
+                        // Accept when either is a prefix of the other.
+                        tid.starts_with(head.as_str()) || head.starts_with(tid.as_str())
+                    })
+                });
+
+                if on_same_change {
+                    item.reuse_notes
+                        .push(format!("reusing existing bookmark {bookmark}"));
+                } else {
+                    item.blockers.push(format!(
+                        "bookmark {bookmark} already exists on another change"
+                    ));
+                }
             }
         }
     }
@@ -489,6 +539,7 @@ mod tests {
             status: PrStatus::Pending,
             warnings: Vec::new(),
             blockers: Vec::new(),
+            reuse_notes: Vec::new(),
         }
     }
 
@@ -506,7 +557,7 @@ mod tests {
             },
         };
 
-        annotate_blockers(&mut plan, &[], &[]);
+        annotate_blockers(&mut plan, &[], &[], &HashMap::new());
 
         assert!(plan.items[0].blockers.is_empty());
         assert_eq!(plan.items[1].blockers.len(), 1);
@@ -531,15 +582,18 @@ mod tests {
             &mut plan,
             &["pr/feat/foo".to_string(), "pr/fix/bar".to_string()],
             &[],
+            &HashMap::new(),
         );
 
+        // Names known only via local_bookmarks (no target) → still block as
+        // "another change" because target is unknown.
         assert_eq!(
             plan.items[0].blockers,
-            vec!["bookmark pr/feat/foo already exists"]
+            vec!["bookmark pr/feat/foo already exists on another change"]
         );
         assert_eq!(
             plan.items[1].blockers,
-            vec!["bookmark pr/fix/bar already exists"]
+            vec!["bookmark pr/fix/bar already exists on another change"]
         );
     }
 
@@ -565,6 +619,7 @@ mod tests {
                 state: "open".into(),
                 url: Some("https://example.com/pulls/17".into()),
             }],
+            &HashMap::new(),
         );
 
         assert_eq!(plan.items[0].blockers.len(), 1);
@@ -587,7 +642,7 @@ mod tests {
             },
         };
 
-        annotate_blockers(&mut plan, &[], &[]);
+        annotate_blockers(&mut plan, &[], &[], &HashMap::new());
         assert!(plan.items[0].blockers.is_empty());
     }
 
@@ -609,7 +664,12 @@ mod tests {
             },
         };
 
-        annotate_blockers(&mut plan, &["pr/feat/foo".to_string()], &[]);
+        annotate_blockers(
+            &mut plan,
+            &["pr/feat/foo".to_string()],
+            &[],
+            &HashMap::new(),
+        );
         assert!(plan.items[0].blockers.is_empty());
     }
 
@@ -673,5 +733,121 @@ mod tests {
         annotate_order_blockers(&mut plan);
 
         assert!(plan.items[1].blockers.is_empty());
+    }
+
+    fn make_targets(entries: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
+        entries
+            .iter()
+            .map(|(name, ids)| {
+                (
+                    name.to_string(),
+                    ids.iter().map(|s| s.to_string()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bookmark_on_same_change_is_reused_not_blocked() {
+        // item.input.head is "head"
+        let mut plan = StackPlan {
+            items: vec![plan_item("pr/feat/foo")],
+            labels: Vec::new(),
+            assignees: Vec::new(),
+            milestone: String::new(),
+            intent: StackIntent {
+                title: String::new(),
+                description: String::new(),
+                branch: String::new(),
+            },
+        };
+
+        // bookmark_targets says "pr/feat/foo" is on change "head" (same as item head)
+        let targets = make_targets(&[("pr/feat/foo", &["head"])]);
+        annotate_blockers(&mut plan, &[], &[], &targets);
+
+        assert!(plan.items[0].blockers.is_empty());
+        assert_eq!(
+            plan.items[0].reuse_notes,
+            vec!["reusing existing bookmark pr/feat/foo"]
+        );
+    }
+
+    #[test]
+    fn bookmark_on_same_change_is_idempotent() {
+        let item = plan_item("pr/feat/foo");
+        let mut plan = StackPlan {
+            items: vec![item],
+            labels: Vec::new(),
+            assignees: Vec::new(),
+            milestone: String::new(),
+            intent: StackIntent {
+                title: String::new(),
+                description: String::new(),
+                branch: String::new(),
+            },
+        };
+        let targets = make_targets(&[("pr/feat/foo", &["head"])]);
+
+        // Run twice — reuse_notes must not accumulate.
+        annotate_blockers(&mut plan, &[], &[], &targets);
+        annotate_blockers(&mut plan, &[], &[], &targets);
+
+        assert_eq!(plan.items[0].reuse_notes.len(), 1);
+        assert!(plan.items[0].blockers.is_empty());
+    }
+
+    #[test]
+    fn bookmark_on_different_change_blocks() {
+        let item = plan_item("pr/feat/foo");
+        // item.input.head is "head"
+        let mut plan = StackPlan {
+            items: vec![item],
+            labels: Vec::new(),
+            assignees: Vec::new(),
+            milestone: String::new(),
+            intent: StackIntent {
+                title: String::new(),
+                description: String::new(),
+                branch: String::new(),
+            },
+        };
+
+        // bookmark_targets says "pr/feat/foo" is on "other-change", not "head"
+        let targets = make_targets(&[("pr/feat/foo", &["other-change"])]);
+        annotate_blockers(&mut plan, &[], &[], &targets);
+
+        assert_eq!(plan.items[0].blockers.len(), 1);
+        assert!(
+            plan.items[0].blockers[0].contains("already exists on another change"),
+            "unexpected blocker: {}",
+            plan.items[0].blockers[0]
+        );
+        assert!(plan.items[0].reuse_notes.is_empty());
+    }
+
+    #[test]
+    fn bookmark_prefix_match_triggers_reuse() {
+        let mut item = plan_item("pr/feat/foo");
+        // item.input.head is "head" — targets use a short id that is a prefix
+        item.input.head = "abcdef123456".into();
+        let mut plan = StackPlan {
+            items: vec![item],
+            labels: Vec::new(),
+            assignees: Vec::new(),
+            milestone: String::new(),
+            intent: StackIntent {
+                title: String::new(),
+                description: String::new(),
+                branch: String::new(),
+            },
+        };
+
+        // short (12-char) id as stored by revset template
+        let targets = make_targets(&[("pr/feat/foo", &["abcdef123456"])]);
+        annotate_blockers(&mut plan, &[], &[], &targets);
+
+        assert!(plan.items[0].blockers.is_empty());
+        assert_eq!(plan.items[0].reuse_notes.len(), 1);
     }
 }
