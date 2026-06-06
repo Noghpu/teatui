@@ -205,4 +205,3 @@
              at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\sys\thread\windows.rs:58
   26: BaseThreadInitThunk
   27: RtlUserThreadStart
-

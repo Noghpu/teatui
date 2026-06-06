@@ -13,9 +13,9 @@ use teatui::domain::{
     StackPrInput, annotate_blockers,
 };
 use teatui::domain::{
-    ChangeContext, ContextBundle, DiffContext, GeneratedDraft, JjOp, JjOpKind, LlmHealth,
-    PromptBuild, PromptForm, PromptManifest, PromptSection, RevsetSummary, Revsets, StatusStore,
-    TeaAuthStatus, ToolStatus, VersionKind, VersionResult, WorkspaceInfo, build_prompt,
+    ChangeContext, ContextBundle, DiffContext, ForgeAuthStatus, GeneratedDraft, JjOp, JjOpKind,
+    LlmHealth, PromptBuild, PromptForm, PromptManifest, PromptSection, RemoteInfo, RevsetSummary,
+    Revsets, StatusStore, ToolStatus, VersionKind, VersionResult, WorkspaceInfo, build_prompt,
 };
 use teatui::runtime::Cached;
 use teatui::screens::generate::{
@@ -102,16 +102,22 @@ fn populated_status() -> StatusStore {
         },
     });
     s.set_version(VersionResult {
-        kind: VersionKind::Tea,
+        kind: VersionKind::Forge,
         status: ToolStatus::Available {
             version: "tea 0.10.0".into(),
         },
     });
+    s.set_forge_label("tea");
     s.set_workspace(WorkspaceInfo::Inside {
         root: PathBuf::from("/home/user/proj"),
-        remote: None,
+        remote: Some(RemoteInfo {
+            host: "gitea.example.com".into(),
+            owner: "owner".into(),
+            repo: "repo".into(),
+        }),
+        remote_name: Some("origin".into()),
     });
-    s.set_tea_auth(TeaAuthStatus::Configured {
+    s.set_forge_auth(ForgeAuthStatus::Configured {
         logins: vec!["gitea".into()],
     });
     s.set_llm(LlmHealth::Available {
@@ -231,7 +237,7 @@ fn landing_with_missing_tools_renders() {
         status: ToolStatus::Missing,
     });
     s.set_version(VersionResult {
-        kind: VersionKind::Tea,
+        kind: VersionKind::Forge,
         status: ToolStatus::Errored {
             message: "permission denied".into(),
         },
@@ -240,7 +246,8 @@ fn landing_with_missing_tools_renders() {
         message: "connection refused".into(),
     });
     s.set_workspace(WorkspaceInfo::Outside);
-    s.set_tea_auth(TeaAuthStatus::None);
+    s.set_forge_label("tea");
+    s.set_forge_auth(ForgeAuthStatus::None);
     draw_landing(&LandingState::default(), &s);
 }
 
@@ -822,7 +829,9 @@ fn generate_bulk_review_long_push_error_stays_readable() {
     s.bulk_editor.field_focus = BulkItemField::Description;
 
     let text = generate_small_text(&s, &populated_status());
-    assert!(text.contains("final-token-visible"), "{text}");
+    // The failure step is visible in the Messages pane result section.
+    // The full error body is accessible by scrolling Messages.
+    assert!(text.contains("failed at create PR"), "{text}");
 }
 
 #[test]

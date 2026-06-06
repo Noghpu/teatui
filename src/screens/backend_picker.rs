@@ -19,12 +19,23 @@ use crate::runtime::Cached;
 
 use super::{theme, util};
 
+/// Banner shown at the top of the picker when it was opened programmatically.
+#[derive(Debug)]
+pub enum PickerBanner {
+    /// Active backend is known-unreachable — orange warning.
+    Warning(String),
+    /// Health probe is in-flight, result not yet known — muted info.
+    Info(String),
+}
+
 #[derive(Debug, Default)]
 pub struct BackendPicker {
     pub highlighted: usize,
     /// Top index of the scrolled list window. A `Cell` so render can keep it in
     /// sync with `highlighted` without a mutable borrow; edge-clamped there.
     pub scroll: Cell<usize>,
+    /// Optional banner shown above the backend list (e.g. "server unreachable").
+    pub banner: Option<PickerBanner>,
 }
 
 /// What the App should do after handing a key to the open picker.
@@ -47,6 +58,7 @@ impl BackendPicker {
         Self {
             highlighted,
             scroll: Cell::new(0),
+            banner: None,
         }
     }
 
@@ -89,7 +101,9 @@ pub fn render(
 ) {
     let width = area.width.saturating_sub(8).clamp(40, 72);
     // backends + border (2) + blank + hint (2), clamped to the screen.
-    let desired = backends.len() as u16 + 5;
+    // Add 2 extra rows (banner line + blank separator) when a banner is set.
+    let banner_rows: u16 = if picker.banner.is_some() { 2 } else { 0 };
+    let desired = backends.len() as u16 + 5 + banner_rows;
     let height = desired.clamp(6, area.height.saturating_sub(2));
     let rect = util::open_modal(frame, area, width, height);
 
@@ -97,9 +111,12 @@ pub fn render(
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
-    // Reserve the last two inner rows for a blank + hint line. Scroll naturally:
-    // hold the window steady and only move it when the highlight crosses an edge.
-    let list_rows = (inner.height as usize).saturating_sub(2).max(1);
+    // Reserve the last two inner rows for a blank + hint line, plus any banner
+    // rows at the top. Scroll naturally: hold the window steady and only move
+    // it when the highlight crosses an edge.
+    let list_rows = (inner.height as usize)
+        .saturating_sub(2 + banner_rows as usize)
+        .max(1);
     let window = util::scroll_window(
         picker.scroll.get(),
         picker.highlighted,
@@ -110,6 +127,23 @@ pub fn render(
     picker.scroll.set(window.offset);
 
     let mut lines: Vec<Line> = Vec::new();
+    match &picker.banner {
+        Some(PickerBanner::Warning(msg)) => {
+            lines.push(Line::from(Span::styled(
+                format!("  ⚠  {}", util::truncate(msg, inner.width as usize - 5)),
+                theme::warning(),
+            )));
+            lines.push(Line::from(""));
+        }
+        Some(PickerBanner::Info(msg)) => {
+            lines.push(Line::from(Span::styled(
+                format!("  ◌  {}", util::truncate(msg, inner.width as usize - 5)),
+                theme::muted(),
+            )));
+            lines.push(Line::from(""));
+        }
+        None => {}
+    }
     if backends.is_empty() {
         lines.push(Line::from(Span::styled(
             "  no backends configured",

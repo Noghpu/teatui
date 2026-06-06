@@ -246,7 +246,7 @@ Whether the freeze is actually gone is **not yet confirmed by the user**.
 1. Start in a fresh nushell session (not one that has hosted a previous
    crashed teatui run — residual console state confounds the test).
 2. ```nushell
-   cd C:\Users\dev\projects\teatui-rs\teatui
+cd C:\Users\dev\projects\teatui-rs\teatui
    $env.RUST_BACKTRACE = "full"
    cargo run --quiet -- --debug err> stderr.log
    ```
