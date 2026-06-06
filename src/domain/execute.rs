@@ -1,5 +1,6 @@
 use super::process;
 use super::stack::{PrStatus, StackPlanItem};
+use super::{CreatePrInput, ForgeCli};
 use crate::runtime::{Job, JobOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +28,7 @@ pub enum ExecuteResult {
 
 pub struct ExecutePrJob {
     pub jj_binary: String,
-    pub tea_binary: String,
+    pub forge: ForgeCli,
     pub change_id: String,
     pub bookmark: String,
     pub base: String,
@@ -36,6 +37,7 @@ pub struct ExecutePrJob {
     pub labels: Vec<String>,
     pub assignees: Vec<String>,
     pub milestone: String,
+    pub remote: String,
 }
 
 impl Job for ExecutePrJob {
@@ -51,7 +53,7 @@ impl Job for ExecutePrJob {
 fn run_execute(job: ExecutePrJob) -> ExecuteResult {
     let args = PrPushArgs {
         jj_binary: &job.jj_binary,
-        tea_binary: &job.tea_binary,
+        forge: &job.forge,
         change_id: &job.change_id,
         bookmark: &job.bookmark,
         base: &job.base,
@@ -60,6 +62,7 @@ fn run_execute(job: ExecutePrJob) -> ExecuteResult {
         labels: &job.labels,
         assignees: &job.assignees,
         milestone: &job.milestone,
+        remote: &job.remote,
     };
     match run_pr_steps(&args) {
         Ok(url) => ExecuteResult::Ready { url },
@@ -70,7 +73,7 @@ fn run_execute(job: ExecutePrJob) -> ExecuteResult {
 /// Borrowed inputs for the shared bookmark → push → create-PR sequence.
 struct PrPushArgs<'a> {
     jj_binary: &'a str,
-    tea_binary: &'a str,
+    forge: &'a ForgeCli,
     change_id: &'a str,
     bookmark: &'a str,
     base: &'a str,
@@ -79,6 +82,7 @@ struct PrPushArgs<'a> {
     labels: &'a [String],
     assignees: &'a [String],
     milestone: &'a str,
+    remote: &'a str,
 }
 
 /// Run the three-step bookmark → push → create-PR sequence shared by the
@@ -94,23 +98,25 @@ fn run_pr_steps(args: &PrPushArgs) -> Result<String, (ExecuteStep, String)> {
     )
     .map_err(|message| (ExecuteStep::Bookmark, message))?;
 
-    // Step 2: push the bookmark to the remote. A brand-new bookmark needs no
-    // special flag: `jj git push --bookmark <name>` auto-creates and tracks an
-    // untracked bookmark's remote counterpart.
-    process::jj(args.jj_binary, &push_args(args.bookmark))
+    // Step 2: push the bookmark to the remote. Explicit --remote avoids jj
+    // defaulting to "origin" when the repo uses a different remote name or
+    // when gitoxide can't read the remote list via git safe.directory.
+    process::jj(args.jj_binary, &push_args(args.bookmark, args.remote))
         .map_err(|message| (ExecuteStep::Push, message))?;
 
-    // Step 3: create the PR via tea.
-    let tea_args = tea_create_args(
-        args.base,
-        args.bookmark,
-        args.title,
-        args.description,
-        args.labels,
-        args.assignees,
-        args.milestone,
-    );
-    let stdout = process::tea(args.tea_binary, &tea_args)
+    // Step 3: create the PR via the selected forge CLI.
+    let create = CreatePrInput {
+        base: args.base,
+        head: args.bookmark,
+        title: args.title,
+        description: args.description,
+        labels: args.labels,
+        assignees: args.assignees,
+        milestone: args.milestone,
+    };
+    let stdout = args
+        .forge
+        .create_pr(&create)
         .map_err(|message| (ExecuteStep::Create, message))?;
     Ok(extract_url(&stdout).unwrap_or_else(|| stdout.trim().to_string()))
 }
@@ -118,11 +124,12 @@ fn run_pr_steps(args: &PrPushArgs) -> Result<String, (ExecuteStep, String)> {
 #[derive(Debug, Clone)]
 pub struct StackPushJob {
     pub jj_binary: String,
-    pub tea_binary: String,
+    pub forge: ForgeCli,
     pub item: StackPlanItem,
     pub labels: Vec<String>,
     pub assignees: Vec<String>,
     pub milestone: String,
+    pub remote: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,56 +160,22 @@ fn bookmark_args(change_id: &str, bookmark: &str) -> Vec<String> {
     ]
 }
 
-fn push_args(bookmark: &str) -> Vec<String> {
+fn push_args(bookmark: &str, remote: &str) -> Vec<String> {
     vec![
         "git".to_string(),
         "push".to_string(),
+        "--remote".to_string(),
+        remote.to_string(),
         "--bookmark".to_string(),
         bookmark.to_string(),
     ]
-}
-
-fn tea_create_args(
-    base: &str,
-    head: &str,
-    title: &str,
-    description: &str,
-    labels: &[String],
-    assignees: &[String],
-    milestone: &str,
-) -> Vec<String> {
-    let mut args = vec![
-        "pr".to_string(),
-        "create".to_string(),
-        "--base".to_string(),
-        base.to_string(),
-        "--head".to_string(),
-        head.to_string(),
-        "--title".to_string(),
-        title.to_string(),
-        "--description".to_string(),
-        description.to_string(),
-    ];
-    if !labels.is_empty() {
-        args.push("--labels".to_string());
-        args.push(labels.join(","));
-    }
-    if !assignees.is_empty() {
-        args.push("--assignees".to_string());
-        args.push(assignees.join(","));
-    }
-    if !milestone.is_empty() {
-        args.push("--milestone".to_string());
-        args.push(milestone.to_string());
-    }
-    args
 }
 
 fn run_stack_push(job: StackPushJob) -> StackPushResult {
     let index = job.item.input.index;
     let args = PrPushArgs {
         jj_binary: &job.jj_binary,
-        tea_binary: &job.tea_binary,
+        forge: &job.forge,
         change_id: &job.item.input.head,
         bookmark: &job.item.bookmark,
         base: &job.item.input.base,
@@ -211,6 +184,7 @@ fn run_stack_push(job: StackPushJob) -> StackPushResult {
         labels: &job.labels,
         assignees: &job.assignees,
         milestone: &job.milestone,
+        remote: &job.remote,
     };
     let status = match run_pr_steps(&args) {
         Ok(url) => PrStatus::Created { url },
@@ -270,46 +244,14 @@ mod tests {
     #[test]
     fn push_args_match_execute_path() {
         assert_eq!(
-            push_args("pr/feat/add-foo"),
+            push_args("pr/feat/add-foo", "origin"),
             vec![
                 "git".to_string(),
                 "push".to_string(),
+                "--remote".to_string(),
+                "origin".to_string(),
                 "--bookmark".to_string(),
                 "pr/feat/add-foo".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn tea_create_args_include_shared_metadata() {
-        let args = tea_create_args(
-            "main",
-            "pr/feat/add-foo",
-            "Add foo",
-            "Body",
-            &["ui".into(), "rewrite".into()],
-            &["dev".into()],
-            "v1",
-        );
-        assert_eq!(
-            args,
-            vec![
-                "pr".to_string(),
-                "create".to_string(),
-                "--base".to_string(),
-                "main".to_string(),
-                "--head".to_string(),
-                "pr/feat/add-foo".to_string(),
-                "--title".to_string(),
-                "Add foo".to_string(),
-                "--description".to_string(),
-                "Body".to_string(),
-                "--labels".to_string(),
-                "ui,rewrite".to_string(),
-                "--assignees".to_string(),
-                "dev".to_string(),
-                "--milestone".to_string(),
-                "v1".to_string(),
             ]
         );
     }
