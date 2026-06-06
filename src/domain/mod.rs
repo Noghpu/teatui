@@ -1,6 +1,7 @@
 pub mod bookmark;
 pub mod context;
 pub mod execute;
+pub mod forge;
 pub mod jj_mutate;
 pub mod llm;
 pub mod probe;
@@ -15,17 +16,21 @@ pub use context::{
     StackContextJob, StackContextResult, divide_budget,
 };
 pub use execute::{ExecutePrJob, ExecuteResult, ExecuteStep, StackPushJob, StackPushResult};
+pub use forge::{
+    CreatePrInput, ForgeAuthStatus, ForgeCli, ForgeKind, RepoOptions, StackExistingPr,
+    StackExistingPrs,
+};
 pub use jj_mutate::{JjMutateJob, JjMutateResult, JjOp, JjOpKind};
 pub use llm::{
     CacheHealth, GeneratedDraft, LlmGenerateJob, LlmResult, StackLlmResult, StackPrLlmJob,
     fallback_stack_draft, parse_stack_drafts,
 };
 pub use probe::{
-    BackendHealth, BackendHealthProbe, BaseBookmark, BaseBookmarks, BaseBookmarksProbe, LlmHealth,
-    RemoteInfo, RepoOptions, RepoOptionsProbe, RevsetProbe, RevsetStats, RevsetStatsProbe,
-    RevsetSummary, Revsets, StackExistingPr, StackExistingPrs, StackExistingPrsProbe,
-    StackPushPrecheck, StackPushPrecheckJob, TeaAuthProbe, TeaAuthStatus, ToolStatus, VersionKind,
-    VersionProbe, VersionResult, WorkspaceInfo, WorkspaceProbe,
+    BackendHealth, BackendHealthProbe, BaseBookmark, BaseBookmarks, BaseBookmarksProbe,
+    ForgeAuthProbe, LlmHealth, RemoteInfo, RepoOptionsProbe, RevsetProbe, RevsetStats,
+    RevsetStatsProbe, RevsetSummary, Revsets, StackExistingPrsProbe, StackPushPrecheck,
+    StackPushPrecheckJob, ToolStatus, VersionKind, VersionProbe, VersionResult, WorkspaceInfo,
+    WorkspaceProbe,
 };
 pub use prompt::{
     PromptBuild, PromptForm, PromptManifest, PromptSection, StackPrefix, build_prompt,
