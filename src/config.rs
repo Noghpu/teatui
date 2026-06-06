@@ -18,6 +18,7 @@ pub struct CommandConfig {
     pub jj: String,
     pub git: String,
     pub tea: String,
+    pub gh: String,
 }
 
 impl Default for CommandConfig {
@@ -26,6 +27,7 @@ impl Default for CommandConfig {
             jj: "jj".into(),
             git: "git".into(),
             tea: "tea".into(),
+            gh: "gh".into(),
         }
     }
 }
@@ -119,14 +121,25 @@ impl Default for LlmBackend {
 #[serde(default)]
 pub struct PrConfig {
     pub default_base: String,
+    pub forge: ForgeSelection,
 }
 
 impl Default for PrConfig {
     fn default() -> Self {
         Self {
             default_base: "main".into(),
+            forge: ForgeSelection::Auto,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ForgeSelection {
+    #[default]
+    Auto,
+    Gitea,
+    Github,
 }
 
 impl Config {
@@ -238,10 +251,14 @@ diff_budget_bytes = 0
 jj = "jj"
 git = "git"
 tea = "tea"
+gh = "gh"
 
 [pr]
 # Default base revision/branch a pull request is opened against.
 default_base = "main"
+# Forge CLI selection. "auto" uses GitHub CLI for github.com remotes and Gitea
+# tea everywhere else. Set "github" or "gitea" to lock the integration.
+forge = "auto"
 "##;
 
 #[cfg(test)]
@@ -280,6 +297,7 @@ mod tests {
         assert_eq!(llama.api, LlmApi::Openai);
         assert_eq!(llama.diff_budget_bytes, Some(0));
         assert_eq!(config.pr.default_base, "main");
+        assert_eq!(config.pr.forge, ForgeSelection::Auto);
     }
 
     #[test]
@@ -288,6 +306,7 @@ mod tests {
         assert_eq!(config.commands.jj, "jj");
         assert_eq!(config.commands.git, "git");
         assert_eq!(config.commands.tea, "tea");
+        assert_eq!(config.commands.gh, "gh");
     }
 
     #[test]
@@ -297,11 +316,13 @@ mod tests {
 [commands]
 jj = "/usr/local/bin/jj"
 tea = "/opt/tea/bin/tea"
+gh = "/usr/local/bin/gh"
 "#,
         );
         assert_eq!(config.commands.jj, "/usr/local/bin/jj");
         assert_eq!(config.commands.git, "git");
         assert_eq!(config.commands.tea, "/opt/tea/bin/tea");
+        assert_eq!(config.commands.gh, "/usr/local/bin/gh");
     }
 
     #[test]
@@ -438,5 +459,17 @@ default_base = "trunk"
 "#,
         );
         assert_eq!(config.pr.default_base, "trunk");
+    }
+
+    #[test]
+    fn pr_forge_selection_defaults_auto_and_overrides() {
+        assert_eq!(Config::default().pr.forge, ForgeSelection::Auto);
+        let config = deserialize(
+            r#"
+[pr]
+forge = "github"
+"#,
+        );
+        assert_eq!(config.pr.forge, ForgeSelection::Github);
     }
 }

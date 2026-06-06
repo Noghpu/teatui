@@ -13,8 +13,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::domain::{
-    BulkPhase, ContextBundle, ExecuteStep, GeneratedDraft, JjOp, JjOpKind, PromptBuild,
-    RevsetSummary, Revsets, StackPlanItem, StatusStore,
+    BulkPhase, ContextBundle, CreatePrInput, ExecuteStep, ForgeCli, GeneratedDraft, JjOp, JjOpKind,
+    PromptBuild, RevsetSummary, Revsets, StackPlanItem, StatusStore,
 };
 use crate::runtime::Cached;
 
@@ -140,34 +140,26 @@ pub struct CommandPreview {
 }
 
 impl CommandPreview {
-    fn from_form(form: &PrForm) -> Self {
-        let mut create = vec![
-            "tea".to_string(),
-            "pr".to_string(),
-            "create".to_string(),
-            "--base".to_string(),
-            quote_arg(form.base()),
-            "--head".to_string(),
-            quote_arg(form.branch()),
-            "--title".to_string(),
-            quote_arg(form.title()),
-            "--description".to_string(),
-            "<description>".to_string(),
-        ];
+    fn from_form(form: &PrForm, forge: &ForgeCli) -> Self {
         let labels = form.labels();
-        if !labels.is_empty() {
-            create.push("--labels".to_string());
-            create.push(quote_arg(&labels.join(",")));
-        }
         let assignees = form.assignees();
-        if !assignees.is_empty() {
-            create.push("--assignees".to_string());
-            create.push(quote_arg(&assignees.join(",")));
-        }
-        if !form.milestone().is_empty() {
-            create.push("--milestone".to_string());
-            create.push(quote_arg(form.milestone()));
-        }
+        let input = CreatePrInput {
+            base: form.base(),
+            head: form.branch(),
+            title: form.title(),
+            description: "<description>",
+            labels: &labels,
+            assignees: &assignees,
+            milestone: form.milestone(),
+        };
+        let create = std::iter::once(forge.binary().to_string())
+            .chain(
+                forge
+                    .create_args(&input)
+                    .into_iter()
+                    .map(|arg| quote_arg(&arg)),
+            )
+            .collect::<Vec<_>>();
         Self {
             bookmark: format!(
                 "jj --no-pager bookmark set --allow-backwards {} -r {}",
@@ -456,13 +448,13 @@ impl GenerateState {
         self.form.sync_options(status);
     }
 
-    pub fn begin_confirmation(&mut self) {
+    pub fn begin_confirmation(&mut self, forge: &ForgeCli) {
         let phase = std::mem::replace(&mut self.phase, GeneratePhase::Idle);
         self.phase = match phase {
             GeneratePhase::DraftReady { draft, prompt } => GeneratePhase::Confirming {
                 draft,
                 prompt,
-                commands: CommandPreview::from_form(&self.form),
+                commands: CommandPreview::from_form(&self.form, forge),
             },
             other => other,
         };

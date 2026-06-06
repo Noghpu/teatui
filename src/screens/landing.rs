@@ -112,7 +112,7 @@ fn render_landing_hero(state: &LandingState, status: &StatusStore, frame: &mut F
         Line::from(vec![
             Span::styled("jj ", theme::muted()),
             Span::raw("·"),
-            Span::styled(" Gitea ", theme::muted()),
+            Span::styled(" Forge ", theme::muted()),
             Span::raw("·"),
             Span::styled(" LLM", theme::muted()),
         ]),
@@ -180,7 +180,7 @@ fn render_landing_footer(status: &StatusStore, frame: &mut Frame, area: Rect) {
     spans.push(Span::raw("  "));
     push_tool(&mut spans, "git", &status.git);
     spans.push(Span::raw("  "));
-    push_tool(&mut spans, "tea", &status.tea);
+    push_tool(&mut spans, status.forge_label.clone(), &status.forge);
     spans.push(Span::raw("  "));
     push_llm(&mut spans, status);
     spans.push(Span::raw("  "));
@@ -191,13 +191,13 @@ fn render_landing_footer(status: &StatusStore, frame: &mut Frame, area: Rect) {
     );
 }
 
-fn push_tool(spans: &mut Vec<Span<'static>>, name: &'static str, c: &Cached<ToolStatus>) {
+fn push_tool(spans: &mut Vec<Span<'static>>, name: impl Into<String>, c: &Cached<ToolStatus>) {
     let (symbol, style) = match tool_health(c) {
         Health::Good => ("✓", theme::success()),
         Health::Bad => ("✗", theme::error()),
         Health::Warn | Health::Pending => ("·", theme::muted()),
     };
-    spans.push(Span::styled(format!("{symbol} {name}"), style));
+    spans.push(Span::styled(format!("{symbol} {}", name.into()), style));
 }
 
 fn push_llm(spans: &mut Vec<Span<'static>>, status: &StatusStore) {
