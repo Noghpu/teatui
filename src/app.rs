@@ -47,6 +47,12 @@ pub struct App {
     /// LLM backend switcher overlay, shown over any screen when `Some`.
     backend_picker: Option<BackendPicker>,
     pending_stack_push: Option<PendingStackPush>,
+    /// True when a blocker-refresh precheck job has been submitted from the
+    /// bulk review modal and no result has landed yet. Used to coalesce
+    /// duplicate refresh keypresses: a second `r` while this is set is ignored.
+    /// Also used in `handle_stack_push_precheck` to detect refresh results and
+    /// return early before any push-continuation logic.
+    pending_stack_blocker_refresh: bool,
     /// Aborts the in-flight LLM generation request. `Some` only while a
     /// generation job is running; taken when the result lands or the user
     /// cancels. See [`App::cancel_generation`].
@@ -149,6 +155,7 @@ impl App {
             screen: Screen::default(),
             backend_picker: None,
             pending_stack_push: None,
+            pending_stack_blocker_refresh: false,
             gen_cancel: None,
             quit: false,
             dirty: true,
@@ -382,6 +389,7 @@ impl App {
             Transition::CancelStack => self.cancel_stack_generation(),
             Transition::PushStackPr(index) => self.start_stack_push(index, false),
             Transition::PushStackAll => self.start_stack_push(0, true),
+            Transition::RefreshStackBlockers => self.refresh_stack_blockers_from_modal(),
         }
     }
 
@@ -612,6 +620,16 @@ impl App {
     }
 
     fn start_stack_push(&mut self, requested_index: usize, push_all: bool) {
+        if self.pending_stack_blocker_refresh {
+            if let Screen::Generate(state) = &mut self.screen
+                && matches!(state.bulk, BulkPhase::Review { pushing: None, .. })
+            {
+                state.last_action = Some("wait for blocker refresh to finish".to_string());
+                self.dirty = true;
+            }
+            return;
+        }
+
         let Screen::Generate(state) = &mut self.screen else {
             return;
         };
@@ -703,6 +721,50 @@ impl App {
             repo: remote.as_ref().map(|remote| remote.repo.clone()),
         });
         tracing::info!(target: "teatui::stack", index, push_all, "submitted push precheck");
+    }
+
+    /// Trigger a blocker refresh from the bulk review modal (`r` key or Branch
+    /// field commit). Submits a fresh `StackPushPrecheckJob` to re-fetch both
+    /// local bookmarks and existing remote PRs, then re-runs blocker annotation.
+    ///
+    /// Coalescing: if a push precheck or another refresh is already in flight,
+    /// this is silently ignored. Push initiation is also disabled while a refresh
+    /// is in flight so the shared precheck payload type cannot cross intents.
+    fn refresh_stack_blockers_from_modal(&mut self) {
+        // Guard: only run while in Review phase and not while a push is running.
+        let in_review = matches!(
+            &self.screen,
+            Screen::Generate(state)
+                if matches!(&state.bulk, BulkPhase::Review { pushing: None, .. })
+        );
+        if !in_review {
+            return;
+        }
+        // Coalesce: ignore if a push precheck or a refresh is already in flight.
+        if self.pending_stack_push.is_some() || self.pending_stack_blocker_refresh {
+            return;
+        }
+        self.pending_stack_blocker_refresh = true;
+        if let Screen::Generate(state) = &mut self.screen {
+            state.last_action = Some("refreshing blockers\u{2026}".to_string());
+        }
+        self.dirty = true;
+        let Some(forge) = self.resolve_forge() else {
+            self.pending_stack_blocker_refresh = false;
+            if let Screen::Generate(state) = &mut self.screen {
+                state.last_action = Some("forge unresolved: no remote detected".to_string());
+            }
+            self.dirty = true;
+            return;
+        };
+        let remote = self.current_remote();
+        self.submitter.submit(StackPushPrecheckJob {
+            jj_binary: self.config.commands.jj.clone(),
+            forge,
+            owner: remote.as_ref().map(|r| r.owner.clone()),
+            repo: remote.as_ref().map(|r| r.repo.clone()),
+        });
+        tracing::info!(target: "teatui::stack", "submitted blocker refresh");
     }
 
     fn submit_stack_push(&mut self, index: usize, push_all: bool) {
@@ -1054,6 +1116,21 @@ impl App {
         self.status.set_base_bookmarks(result.bookmarks);
         self.status.set_stack_existing_prs(result.existing_prs);
         self.refresh_stack_review_blockers();
+
+        // If this result was requested by a blocker refresh (not a push precheck),
+        // clear the flag, show a completion hint, and return — never continue to
+        // push logic.
+        if self.pending_stack_blocker_refresh {
+            self.pending_stack_blocker_refresh = false;
+            if let Screen::Generate(state) = &mut self.screen
+                && matches!(state.bulk, BulkPhase::Review { .. })
+            {
+                state.last_action = Some("blockers refreshed".to_string());
+            }
+            tracing::debug!(target: "teatui::stack", "blocker refresh complete");
+            self.dirty = true;
+            return;
+        }
 
         let Some(pending) = self.pending_stack_push.take() else {
             tracing::debug!(target: "teatui::stack", "stale stack push precheck ignored");
@@ -1532,6 +1609,7 @@ impl App {
 
     fn refresh_stack_review_blockers(&mut self) {
         let local_bookmarks = collect_stack_bookmarks(&self.status);
+        let bookmark_targets = collect_bookmark_targets(&self.status);
         let existing_prs = self
             .status
             .stack_existing_prs
@@ -1547,7 +1625,7 @@ impl App {
         };
 
         mark_created_from_existing_prs(plan, &existing_prs);
-        annotate_blockers(plan, &local_bookmarks, &existing_prs);
+        annotate_blockers(plan, &local_bookmarks, &existing_prs, &bookmark_targets);
         annotate_order_blockers(plan);
     }
 }
@@ -1567,6 +1645,33 @@ fn prompt_form_from_generate(form: &PrForm) -> PromptForm {
         title: form.title().to_string(),
         description: form.description().to_string(),
     }
+}
+
+/// Build a bookmark-name → change-ids map from the loaded revset entries.
+///
+/// Used by `annotate_blockers` to distinguish "bookmark is on the same change
+/// as the plan item" (reuse) from "bookmark exists but on a different change"
+/// (conflict). Only revset entries are included; base/remote bookmarks that
+/// carry no target are omitted so the caller falls back to the names-only
+/// blocking path.
+fn collect_bookmark_targets(
+    status: &StatusStore,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut out: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    if let Some(crate::domain::Revsets::Loaded(items)) = status.revsets.value() {
+        for item in items {
+            for bookmark in &item.bookmarks {
+                let name = bookmark.trim();
+                if name.is_empty() {
+                    continue;
+                }
+                out.entry(name.to_string())
+                    .or_default()
+                    .push(item.change_id.clone());
+            }
+        }
+    }
+    out
 }
 
 fn collect_stack_bookmarks(status: &StatusStore) -> Vec<String> {
@@ -1669,6 +1774,7 @@ fn build_plan_items(
                 status: PrStatus::Pending,
                 warnings: warnings.get(i).cloned().unwrap_or_default(),
                 blockers: Vec::new(),
+                reuse_notes: Vec::new(),
             }
         })
         .collect()
@@ -1699,6 +1805,50 @@ fn branch_from_draft(draft: &GeneratedDraft) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::Jobs;
+
+    fn review_app_with_pending_refresh() -> App {
+        let jobs = Jobs::new(0);
+        let mut app = App::new(Config::default(), jobs.submitter());
+        let item = StackPlanItem {
+            input: StackPrInput {
+                index: 0,
+                base: "main".into(),
+                head: "abc123".into(),
+                included_change_ids: vec!["abc123".into()],
+                subject: "change".into(),
+            },
+            bookmark: "pr/fix/change".into(),
+            title: "Fix change".into(),
+            description: "Body".into(),
+            status: crate::domain::PrStatus::Pending,
+            warnings: Vec::new(),
+            blockers: Vec::new(),
+            reuse_notes: Vec::new(),
+        };
+        let mut state = GenerateState::new("main".into());
+        state.bulk = BulkPhase::Review {
+            plan: StackPlan {
+                items: vec![item],
+                labels: Vec::new(),
+                assignees: Vec::new(),
+                milestone: String::new(),
+                intent: StackIntent {
+                    title: "Stack".into(),
+                    description: "Intent".into(),
+                    branch: "stack".into(),
+                },
+            },
+            cursor: 0,
+            pushing: None,
+            push_all: false,
+        };
+        state.seed_bulk_editor_from_cursor();
+        app.screen = Screen::Generate(Box::new(state));
+        app.pending_stack_blocker_refresh = true;
+        app.dirty = false;
+        app
+    }
 
     #[test]
     fn branch_from_draft_uses_standard_pr_prefix() {
@@ -1768,6 +1918,28 @@ mod tests {
         assert_eq!(
             select_forge_kind(ForgeSelection::Github, None),
             Some(ForgeKind::Github)
+        );
+    }
+
+    #[test]
+    fn stack_push_waits_for_in_flight_blocker_refresh() {
+        let mut app = review_app_with_pending_refresh();
+
+        app.start_stack_push(0, false);
+
+        assert!(app.pending_stack_push.is_none());
+        assert!(app.pending_stack_blocker_refresh);
+        assert!(app.dirty);
+        let Screen::Generate(state) = &app.screen else {
+            panic!("expected generate screen");
+        };
+        let BulkPhase::Review { pushing, .. } = &state.bulk else {
+            panic!("expected review phase");
+        };
+        assert_eq!(*pushing, None);
+        assert_eq!(
+            state.last_action.as_deref(),
+            Some("wait for blocker refresh to finish")
         );
     }
 }
