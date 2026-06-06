@@ -1,6 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use super::forge::{ForgeCli, StackExistingPrs};
 use super::process;
 use crate::config::LlmApi;
 use crate::runtime::{Job, JobOutcome};
@@ -11,7 +12,7 @@ use crate::runtime::{Job, JobOutcome};
 pub enum VersionKind {
     Jj,
     Git,
-    Tea,
+    Forge,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,7 +38,7 @@ impl Job for VersionProbe {
         match self.kind {
             VersionKind::Jj => "probe.jj.version",
             VersionKind::Git => "probe.git.version",
-            VersionKind::Tea => "probe.tea.version",
+            VersionKind::Forge => "probe.forge.version",
         }
     }
     fn run(self: Box<Self>) -> JobOutcome {
@@ -77,6 +78,10 @@ pub enum WorkspaceInfo {
     Inside {
         root: PathBuf,
         remote: Option<RemoteInfo>,
+        /// Git remote name used for push (e.g. "origin", "gitea"). Read from
+        /// .git/config directly so it's available even when git safe.directory
+        /// blocks process-based git access.
+        remote_name: Option<String>,
     },
     Outside,
     Errored {
@@ -102,14 +107,13 @@ impl Job for WorkspaceProbe {
     fn run(self: Box<Self>) -> JobOutcome {
         let result = match process::jj_output(&self.jj_binary, &["workspace", "root"]) {
             Ok(out) if out.status.success() => {
-                let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                let remote = origin_remote_url(&self.jj_binary)
-                    .as_deref()
-                    .and_then(parse_remote_info);
-                WorkspaceInfo::Inside {
-                    root: PathBuf::from(root),
-                    remote,
-                }
+                let root = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
+                let (remote, remote_name) =
+                    match remote_url_from_colocated_git_config(&root) {
+                        Some((name, url)) => (parse_remote_info(&url), Some(name)),
+                        None => (None, None),
+                    };
+                WorkspaceInfo::Inside { root, remote, remote_name }
             }
             Ok(_) => WorkspaceInfo::Outside,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => WorkspaceInfo::Errored {
@@ -123,18 +127,48 @@ impl Job for WorkspaceProbe {
     }
 }
 
-fn origin_remote_url(jj_binary: &str) -> Option<String> {
-    let out = process::jj_output(jj_binary, &["git", "remote", "list"]).ok()?;
-    if !out.status.success() {
-        return None;
+fn remote_url_from_colocated_git_config(root: &Path) -> Option<(String, String)> {
+    let target_raw = std::fs::read_to_string(root.join(".jj/repo/store/git_target")).ok()?;
+    let git_target = root.join(".jj/repo/store").join(target_raw.trim());
+    let config = std::fs::read_to_string(git_target.join("config")).ok()?;
+    remote_url_from_git_config(&config)
+}
+
+/// Returns `(remote_name, url)` for the best remote found in a raw git config.
+/// Prefers "origin"; falls back to the first remote with a parseable URL.
+fn remote_url_from_git_config(config: &str) -> Option<(String, String)> {
+    let mut current_remote = None::<String>;
+    let mut fallback = None;
+    for line in config.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            current_remote = parse_git_remote_section(trimmed);
+            continue;
+        }
+        let Some(remote) = current_remote.as_deref() else {
+            continue;
+        };
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "url" {
+            continue;
+        }
+        let url = value.trim().to_string();
+        if fallback.is_none() && parse_remote_info(&url).is_some() {
+            fallback = Some((remote.to_string(), url.clone()));
+        }
+        if remote == "origin" {
+            return Some(("origin".to_string(), url));
+        }
     }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    stdout.lines().find_map(|line| {
-        let mut parts = line.split_whitespace();
-        let name = parts.next()?;
-        let url = parts.next()?;
-        (name == "origin").then(|| url.to_string())
-    })
+    fallback
+}
+
+fn parse_git_remote_section(line: &str) -> Option<String> {
+    let inner = line.strip_prefix('[')?.strip_suffix(']')?.trim();
+    let name = inner.strip_prefix("remote ")?.trim();
+    Some(name.trim_matches('"').to_string())
 }
 
 fn parse_remote_info(url: &str) -> Option<RemoteInfo> {
@@ -159,59 +193,19 @@ fn parse_remote_info(url: &str) -> Option<RemoteInfo> {
     Some(RemoteInfo { host, owner, repo })
 }
 
-// =========================== Tea auth =======================================
+// =========================== Forge auth =====================================
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TeaAuthStatus {
-    Configured { logins: Vec<String> },
-    None,
-    Errored { message: String },
+pub struct ForgeAuthProbe {
+    pub forge: ForgeCli,
 }
 
-pub struct TeaAuthProbe {
-    pub tea_binary: String,
-}
-
-impl Job for TeaAuthProbe {
+impl Job for ForgeAuthProbe {
     fn name(&self) -> &'static str {
-        "probe.tea.auth"
+        "probe.forge.auth"
     }
     fn run(self: Box<Self>) -> JobOutcome {
-        let result = match process::output(&self.tea_binary, &["login", "list"]) {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let logins = parse_tea_logins(&stdout);
-                if logins.is_empty() {
-                    TeaAuthStatus::None
-                } else {
-                    TeaAuthStatus::Configured { logins }
-                }
-            }
-            Ok(out) => TeaAuthStatus::Errored {
-                message: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => TeaAuthStatus::Errored {
-                message: format!("{} not found", self.tea_binary),
-            },
-            Err(e) => TeaAuthStatus::Errored {
-                message: e.to_string(),
-            },
-        };
-        JobOutcome::Done(Box::new(result))
+        JobOutcome::Done(Box::new(self.forge.auth_status()))
     }
-}
-
-fn parse_tea_logins(stdout: &str) -> Vec<String> {
-    // Output format (whitespace-aligned table):
-    //   Name      URL                                Default
-    //   gitea     https://gitea.example.com          *
-    // Skip the header row, take the first column.
-    let mut lines = stdout.lines().filter(|l| !l.trim().is_empty());
-    let _ = lines.next();
-    lines
-        .map(|line| line.split_whitespace().next().unwrap_or("").to_string())
-        .filter(|name| !name.is_empty())
-        .collect()
 }
 
 // =========================== LLM health =====================================
@@ -565,15 +559,6 @@ pub struct BaseBookmark {
 
 pub type BaseBookmarks = Vec<BaseBookmark>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StackExistingPr {
-    pub head_branch: String,
-    pub state: String,
-    pub url: Option<String>,
-}
-
-pub type StackExistingPrs = Vec<StackExistingPr>;
-
 pub struct BaseBookmarksProbe {
     pub jj_binary: String,
 }
@@ -632,7 +617,9 @@ fn parse_base_bookmarks(stdout: &str) -> BaseBookmarks {
 // ======================== Existing stack PRs ================================
 
 pub struct StackExistingPrsProbe {
-    pub tea_binary: String,
+    pub forge: ForgeCli,
+    pub owner: Option<String>,
+    pub repo: Option<String>,
 }
 
 impl Job for StackExistingPrsProbe {
@@ -641,15 +628,20 @@ impl Job for StackExistingPrsProbe {
     }
 
     fn run(self: Box<Self>) -> JobOutcome {
-        JobOutcome::Done(Box::new(fetch_existing_prs(&self.tea_binary)))
+        JobOutcome::Done(Box::new(fetch_existing_prs(
+            &self.forge,
+            self.owner.as_deref(),
+            self.repo.as_deref(),
+        )))
     }
 }
 
-fn fetch_existing_prs(tea_binary: &str) -> StackExistingPrs {
-    match process::tea(tea_binary, &["pr", "list", "--output", "json"]) {
-        Ok(stdout) => parse_existing_prs(&stdout),
-        Err(_) => Vec::new(),
-    }
+fn fetch_existing_prs(
+    forge: &ForgeCli,
+    owner: Option<&str>,
+    repo: Option<&str>,
+) -> StackExistingPrs {
+    forge.existing_prs(owner, repo)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -660,7 +652,9 @@ pub struct StackPushPrecheck {
 
 pub struct StackPushPrecheckJob {
     pub jj_binary: String,
-    pub tea_binary: String,
+    pub forge: ForgeCli,
+    pub owner: Option<String>,
+    pub repo: Option<String>,
 }
 
 impl Job for StackPushPrecheckJob {
@@ -671,101 +665,19 @@ impl Job for StackPushPrecheckJob {
     fn run(self: Box<Self>) -> JobOutcome {
         JobOutcome::Done(Box::new(StackPushPrecheck {
             bookmarks: fetch_base_bookmarks(&self.jj_binary),
-            existing_prs: fetch_existing_prs(&self.tea_binary),
+            existing_prs: fetch_existing_prs(
+                &self.forge,
+                self.owner.as_deref(),
+                self.repo.as_deref(),
+            ),
         }))
-    }
-}
-
-fn parse_existing_prs(stdout: &str) -> StackExistingPrs {
-    let Ok(root) = serde_json::from_str::<serde_json::Value>(stdout) else {
-        return Vec::new();
-    };
-    let Some(items) = root.as_array() else {
-        return Vec::new();
-    };
-
-    items.iter().filter_map(parse_existing_pr_item).collect()
-}
-
-fn parse_existing_pr_item(item: &serde_json::Value) -> Option<StackExistingPr> {
-    let obj = item.as_object()?;
-    let head_branch = field_string(
-        obj,
-        &[
-            "head_branch",
-            "headBranch",
-            "head_ref",
-            "headRefName",
-            "source_branch",
-            "sourceBranch",
-            "branch",
-            "head",
-        ],
-    )?;
-    let state = field_string(obj, &["state", "status"]).unwrap_or_default();
-    let url = field_string(obj, &["url", "html_url", "href", "web_url"]);
-    Some(StackExistingPr {
-        head_branch,
-        state,
-        url,
-    })
-}
-
-fn field_string(obj: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<String> {
-    for key in keys {
-        if let Some(value) = obj.get(*key)
-            && let Some(text) = json_string(value)
-        {
-            return Some(text);
-        }
-    }
-    None
-}
-
-fn json_string(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(s) => {
-            let text = s.trim();
-            (!text.is_empty()).then(|| text.to_string())
-        }
-        serde_json::Value::Number(n) => Some(n.to_string()),
-        serde_json::Value::Bool(b) => Some(b.to_string()),
-        serde_json::Value::Array(items) => items.iter().find_map(json_string),
-        serde_json::Value::Object(map) => {
-            for key in [
-                "ref",
-                "name",
-                "label",
-                "title",
-                "value",
-                "url",
-                "text",
-                "state",
-                "head_branch",
-            ] {
-                if let Some(value) = map.get(key)
-                    && let Some(text) = json_string(value)
-                {
-                    return Some(text);
-                }
-            }
-            map.values().find_map(json_string)
-        }
-        serde_json::Value::Null => None,
     }
 }
 
 // ======================== Repo options =====================================
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RepoOptions {
-    pub labels: Vec<String>,
-    pub assignees: Vec<String>,
-    pub milestones: Vec<String>,
-}
-
 pub struct RepoOptionsProbe {
-    pub tea_binary: String,
+    pub forge: ForgeCli,
     pub owner: String,
     pub repo: String,
 }
@@ -776,42 +688,8 @@ impl Job for RepoOptionsProbe {
     }
 
     fn run(self: Box<Self>) -> JobOutcome {
-        let labels = tea_names(
-            &self.tea_binary,
-            &format!("repos/{}/{}/labels", self.owner, self.repo),
-        );
-        let assignees = tea_names(
-            &self.tea_binary,
-            &format!("repos/{}/{}/collaborators", self.owner, self.repo),
-        );
-        let milestones = tea_names(
-            &self.tea_binary,
-            &format!("repos/{}/{}/milestones", self.owner, self.repo),
-        );
-        JobOutcome::Done(Box::new(RepoOptions {
-            labels,
-            assignees,
-            milestones,
-        }))
+        JobOutcome::Done(Box::new(self.forge.repo_options(&self.owner, &self.repo)))
     }
-}
-
-fn tea_names(binary: &str, path: &str) -> Vec<String> {
-    let Ok(stdout) = process::tea(binary, &["api", path]) else {
-        return Vec::new();
-    };
-    serde_json::from_str::<Vec<NameItem>>(&stdout)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|item| item.name.or(item.login).or(item.title))
-        .collect()
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct NameItem {
-    name: Option<String>,
-    login: Option<String>,
-    title: Option<String>,
 }
 
 #[cfg(test)]
@@ -884,6 +762,60 @@ mod tests {
     }
 
     #[test]
+    fn extracts_origin_remote_url_from_git_config() {
+        let raw = r#"
+[core]
+    repositoryformatversion = 0
+[remote "upstream"]
+    url = https://gitea.example.com/owner/repo.git
+[remote "origin"]
+    url = https://github.com/Noghpu/teatui.git
+    fetch = +refs/heads/*:refs/remotes/origin/*
+"#;
+        assert_eq!(
+            remote_url_from_git_config(raw),
+            Some(("origin".to_string(), "https://github.com/Noghpu/teatui.git".to_string()))
+        );
+    }
+
+    #[test]
+    fn falls_back_to_first_parseable_git_config_remote_without_origin() {
+        let raw = r#"
+[remote "fork"]
+    url = git@github.com:Noghpu/teatui.git
+"#;
+        assert_eq!(
+            remote_url_from_git_config(raw),
+            Some(("fork".to_string(), "git@github.com:Noghpu/teatui.git".to_string()))
+        );
+    }
+
+    #[test]
+    fn reads_colocated_git_config_from_jj_git_target() {
+        let root =
+            std::env::temp_dir().join(format!("teatui-jj-git-target-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".jj/repo/store")).expect("create jj store");
+        std::fs::create_dir_all(root.join(".git")).expect("create git dir");
+        std::fs::write(root.join(".jj/repo/store/git_target"), "../../../.git")
+            .expect("write git_target");
+        std::fs::write(
+            root.join(".git/config"),
+            r#"[remote "origin"]
+    url = https://github.com/Noghpu/teatui.git
+"#,
+        )
+        .expect("write git config");
+
+        assert_eq!(
+            remote_url_from_colocated_git_config(&root),
+            Some(("origin".to_string(), "https://github.com/Noghpu/teatui.git".to_string()))
+        );
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn revset_stats_probe_falls_back_on_missing_jj() {
         let stats: RevsetStats = run_job(RevsetStatsProbe {
             jj_binary: MISSING_BINARY.into(),
@@ -891,27 +823,6 @@ mod tests {
         });
 
         assert_eq!(stats, RevsetStats::default());
-    }
-
-    #[test]
-    fn parses_tea_login_list_with_one_login() {
-        let raw = "Name      URL                                Default\ngitea     https://gitea.example.com         *\n";
-        let logins = parse_tea_logins(raw);
-        assert_eq!(logins, vec!["gitea".to_string()]);
-    }
-
-    #[test]
-    fn parses_tea_login_list_with_no_logins() {
-        let raw = "Name      URL                                Default\n";
-        let logins = parse_tea_logins(raw);
-        assert!(logins.is_empty());
-    }
-
-    #[test]
-    fn parses_tea_login_list_with_multiple() {
-        let raw = "Name    URL                          Default\ngitea   https://gitea.example.com    *\nother   https://other.example.com\n";
-        let logins = parse_tea_logins(raw);
-        assert_eq!(logins, vec!["gitea".to_string(), "other".to_string()]);
     }
 
     #[test]
@@ -956,51 +867,5 @@ mod tests {
         let revsets = parse_revset_log_with_stats(raw);
         assert_eq!(revsets.len(), 1);
         assert_eq!(revsets[0].stats, "");
-    }
-
-    #[test]
-    fn parses_existing_prs_tolerates_string_and_object_fields() {
-        let raw = r#"
-        [
-          {
-            "head_branch": "pr/feat/add-foo",
-            "state": "open",
-            "url": "https://example.com/pulls/1",
-            "ignored": {"nested": true}
-          },
-          {
-            "head_branch": {"name": "pr/fix/rework"},
-            "state": {"title": "merged"},
-            "url": {"html_url": "https://example.com/pulls/2"}
-          },
-          {
-            "head": {"ref": "pr/chore/nested-head", "label": "owner:pr/chore/nested-head"},
-            "status": "closed",
-            "html_url": "https://example.com/pulls/3",
-            "title": "Do not parse title as a branch"
-          },
-          {
-            "state": "open",
-            "title": "Do not parse title-only entries"
-          }
-        ]
-        "#;
-        let prs = parse_existing_prs(raw);
-        assert_eq!(prs.len(), 3);
-        assert_eq!(prs[0].head_branch, "pr/feat/add-foo");
-        assert_eq!(prs[0].state, "open");
-        assert_eq!(prs[0].url.as_deref(), Some("https://example.com/pulls/1"));
-        assert_eq!(prs[1].head_branch, "pr/fix/rework");
-        assert_eq!(prs[1].state, "merged");
-        assert_eq!(prs[1].url.as_deref(), Some("https://example.com/pulls/2"));
-        assert_eq!(prs[2].head_branch, "pr/chore/nested-head");
-        assert_eq!(prs[2].state, "closed");
-        assert_eq!(prs[2].url.as_deref(), Some("https://example.com/pulls/3"));
-    }
-
-    #[test]
-    fn parses_existing_prs_handles_malformed_json() {
-        let prs = parse_existing_prs("{ definitely not json");
-        assert!(prs.is_empty());
     }
 }

@@ -546,3 +546,17 @@ Surprises / things to remember:
 - The shared theme module is intentionally screen-local (`screens::theme`) rather than a resurrected monolithic `ui.rs`; it should stay presentation-only.
 - The command preview is display-only and uses the current form values. `ExecutePrJob` remains the source of actual argv construction.
 - `just fmt` is a format check in this repo. Use `cargo fmt` to apply formatting, then `just verify` for handoff.
+
+### Phase 9 — Forge CLI abstraction
+
+- **Status:** done. `cargo test` green (210 unit + 53 render smoke).
+- Added `domain::forge` as the provider boundary: a small `ForgeDriver` protocol with `gitea` and `github` modules behind a cloneable `ForgeCli`.
+- Config now has `pr.forge = "auto" | "gitea" | "github"` and `commands.gh = "gh"`. Auto is the default and selects GitHub CLI for `github.com` remotes; other or unknown hosts keep the previous Gitea/`tea` behavior.
+- `ExecutePrJob`, stacked push jobs, existing-PR checks, repo-option discovery, and auth/version probes now carry/use the resolved `ForgeCli` instead of hard-coding `tea`.
+- GitHub support uses `gh auth status`, `gh api` for labels/collaborators/milestones/existing PRs, and `gh pr create` for creation; Gitea keeps the existing `tea` command shapes.
+- Landing status now shows a generic forge CLI chip using the resolved CLI label. Command preview generation is app-owned so it can show the actual selected forge command.
+
+Surprises / things to remember:
+
+- GitHub paginated `gh api --slurp` responses are nested arrays, so shared name/PR JSON parsers flatten one pagination layer.
+- Auto detection intentionally remains conservative: only `github.com` maps to GitHub without config. GitHub Enterprise or nonstandard hosts need `pr.forge = "github"`.

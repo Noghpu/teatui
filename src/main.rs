@@ -13,7 +13,7 @@ use teatui::terminal::Terminal;
 
 #[derive(Parser)]
 #[command(name = "teatui")]
-#[command(about = "Generate Gitea PRs from jj repos with tea and an LLM")]
+#[command(about = "Generate forge PRs from jj repos with a CLI and an LLM")]
 struct Cli {
     #[arg(short, long)]
     config: Option<PathBuf>,

@@ -5,24 +5,25 @@ use std::time::Duration;
 use crossterm::event::KeyEvent;
 use ratatui::Frame;
 
-use crate::config::{Config, LlmApi};
+use crate::config::{Config, ForgeSelection, LlmApi};
 use crate::domain::{
     BackendHealth, BackendHealthProbe, BaseBookmarks, BaseBookmarksProbe, ContextJob,
-    ContextResult, ExecutePrJob, ExecuteResult, GeneratedDraft, JjMutateJob, JjMutateResult, JjOp,
-    LlmGenerateJob, LlmResult, PromptForm, RepoOptions, RepoOptionsProbe, RevsetProbe, RevsetStats,
+    ContextResult, ExecutePrJob, ExecuteResult, ForgeAuthProbe, ForgeAuthStatus, ForgeCli,
+    ForgeKind, GeneratedDraft, JjMutateJob, JjMutateResult, JjOp, LlmGenerateJob, LlmResult,
+    PromptForm, RemoteInfo, RepoOptions, RepoOptionsProbe, RevsetProbe, RevsetStats,
     RevsetStatsProbe, Revsets, StackContextJob, StackContextResult, StackExistingPrsProbe,
     StackLlmResult, StackPrLlmJob, StackPushJob, StackPushPrecheck, StackPushPrecheckJob,
-    StackPushResult, StatusStore, TeaAuthProbe, TeaAuthStatus, VersionKind, VersionProbe,
-    VersionResult, WorkspaceInfo, WorkspaceProbe, annotate_blockers, annotate_order_blockers,
-    build_prompt, build_stack_prefix, derive_stack_ranges, fallback_stack_draft,
-    mark_created_from_existing_prs, slugify, stack_pr_suffix,
+    LlmHealth, StackPushResult, StatusStore, VersionKind, VersionProbe, VersionResult, WorkspaceInfo,
+    WorkspaceProbe, annotate_blockers, annotate_order_blockers, build_prompt, build_stack_prefix,
+    derive_stack_ranges, fallback_stack_draft, mark_created_from_existing_prs, slugify,
+    stack_pr_suffix,
 };
 use crate::domain::{
     BulkPhase, CacheHealth, StackDraft, StackIntent, StackPlan, StackPlanItem, StackPrInput,
 };
 use crate::input::InputEvent;
 use crate::runtime::{CancelHandle, JobEvent, JobOutcomeEvent, JobSubmitter};
-use crate::screens::backend_picker::{BackendPicker, PickerOutcome};
+use crate::screens::backend_picker::{BackendPicker, PickerBanner, PickerOutcome};
 use crate::screens::generate::{GeneratePhase, PrForm};
 use crate::screens::{self, GenerateState, LandingState, NewScreen, Screen, Transition};
 
@@ -67,6 +68,20 @@ enum StackGenerationAction {
     Finish,
 }
 
+fn select_forge_kind(selection: ForgeSelection, remote: Option<&RemoteInfo>) -> Option<ForgeKind> {
+    match selection {
+        ForgeSelection::Gitea => Some(ForgeKind::Gitea),
+        ForgeSelection::Github => Some(ForgeKind::Github),
+        ForgeSelection::Auto => match remote {
+            Some(remote) if remote.host.eq_ignore_ascii_case("github.com") => {
+                Some(ForgeKind::Github)
+            }
+            Some(_) => Some(ForgeKind::Gitea),
+            None => None,
+        },
+    }
+}
+
 /// Downcast and dispatch one job payload in [`App::absorb_payload`].
 ///
 /// Every job result arrives type-erased as `Box<dyn Any + Send>`, so the
@@ -109,15 +124,8 @@ impl App {
             kind: VersionKind::Git,
             binary: config.commands.git.clone(),
         });
-        submitter.submit(VersionProbe {
-            kind: VersionKind::Tea,
-            binary: config.commands.tea.clone(),
-        });
         submitter.submit(WorkspaceProbe {
             jj_binary: config.commands.jj.clone(),
-        });
-        submitter.submit(TeaAuthProbe {
-            tea_binary: config.commands.tea.clone(),
         });
         submitter.submit(BackendHealthProbe {
             name: llm.name.clone(),
@@ -149,6 +157,71 @@ impl App {
 
     pub fn should_quit(&self) -> bool {
         self.quit
+    }
+
+    fn resolve_forge(&self) -> Option<ForgeCli> {
+        self.resolve_forge_for(self.current_remote().as_ref())
+    }
+
+    fn resolve_forge_for(&self, remote: Option<&RemoteInfo>) -> Option<ForgeCli> {
+        let kind = select_forge_kind(self.config.pr.forge, remote)?;
+        let binary = match kind {
+            ForgeKind::Gitea => self.config.commands.tea.clone(),
+            ForgeKind::Github => self.config.commands.gh.clone(),
+        };
+        let host = remote.map(|remote| remote.host.clone());
+        Some(ForgeCli::new(kind, binary, host))
+    }
+
+    fn current_remote(&self) -> Option<RemoteInfo> {
+        match self.status.workspace.value() {
+            Some(WorkspaceInfo::Inside {
+                remote: Some(remote),
+                ..
+            }) => Some(remote.clone()),
+            _ => None,
+        }
+    }
+
+    fn current_remote_name(&self) -> String {
+        match self.status.workspace.value() {
+            Some(WorkspaceInfo::Inside {
+                remote_name: Some(name),
+                ..
+            }) => name.clone(),
+            _ => "origin".to_string(),
+        }
+    }
+
+    fn submit_forge_discovery(&mut self, remote: Option<&RemoteInfo>) {
+        let Some(forge) = self.resolve_forge_for(remote) else {
+            self.status.set_forge_label("unresolved");
+            self.status.set_version(VersionResult {
+                kind: VersionKind::Forge,
+                status: crate::domain::ToolStatus::Errored {
+                    message: "no forge remote detected".into(),
+                },
+            });
+            self.status.set_forge_auth(ForgeAuthStatus::None);
+            return;
+        };
+        self.status.set_forge_label(forge.label());
+        self.status.mark_forge_loading();
+        self.submitter.submit(VersionProbe {
+            kind: VersionKind::Forge,
+            binary: forge.binary().to_string(),
+        });
+        self.submitter.submit(ForgeAuthProbe {
+            forge: forge.clone(),
+        });
+        if let Some(remote) = remote {
+            self.status.mark_repo_options_loading();
+            self.submitter.submit(RepoOptionsProbe {
+                forge,
+                owner: remote.owner.clone(),
+                repo: remote.repo.clone(),
+            });
+        }
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -215,6 +288,26 @@ impl App {
         }
     }
 
+    /// Returns `true` if the active LLM backend is known-available and
+    /// generation can proceed. Returns `false` and opens the backend picker
+    /// with a contextual banner when the backend is unreachable or has never
+    /// been probed — blocking generation before a context-collection round-trip
+    /// is wasted on a dead server.
+    fn llm_ready(&mut self) -> bool {
+        let banner = match self.status.llm.value() {
+            Some(LlmHealth::Available { .. }) => return true,
+            Some(LlmHealth::Unreachable { message }) => {
+                PickerBanner::Warning(format!("LLM server unreachable: {message}"))
+            }
+            None => PickerBanner::Info("Checking LLM server availability…".into()),
+        };
+        self.open_backend_picker();
+        if let Some(picker) = &mut self.backend_picker {
+            picker.banner = Some(banner);
+        }
+        false
+    }
+
     fn open_backend_picker(&mut self) {
         let active = self.config.llm.active_backend().name.clone();
         self.backend_picker = Some(BackendPicker::new(&active, &self.config.llm.backends));
@@ -266,8 +359,13 @@ impl App {
                 tracing::info!(target: "teatui::lifecycle", screen = screen_label(&self.screen), "navigated");
                 self.dirty = true;
             }
-            Transition::Generate => self.start_generation(),
+            Transition::Generate => {
+                if self.llm_ready() {
+                    self.start_generation();
+                }
+            }
             Transition::CancelGeneration => self.cancel_generation(),
+            Transition::ReviewExecution => self.review_execution(),
             Transition::Execute => self.start_execution(),
             Transition::CopyUrl => self.copy_done_url(),
             Transition::OpenUrl => self.open_done_url(),
@@ -276,7 +374,11 @@ impl App {
             }
             Transition::OpenBackendPicker => self.open_backend_picker(),
             Transition::JjOp(op) => self.start_jj_mutation(op),
-            Transition::GenerateStack => self.start_stack_generation(),
+            Transition::GenerateStack => {
+                if self.llm_ready() {
+                    self.start_stack_generation();
+                }
+            }
             Transition::CancelStack => self.cancel_stack_generation(),
             Transition::PushStackPr(index) => self.start_stack_push(index, false),
             Transition::PushStackAll => self.start_stack_push(0, true),
@@ -350,7 +452,36 @@ impl App {
         self.dirty = true;
     }
 
+    fn review_execution(&mut self) {
+        let Some(forge) = self.resolve_forge() else {
+            if let Screen::Generate(state) = &mut self.screen {
+                state.last_action = Some("forge unresolved: no remote detected".to_string());
+            }
+            self.dirty = true;
+            return;
+        };
+        let Screen::Generate(state) = &mut self.screen else {
+            return;
+        };
+        if !state.form.validate() {
+            self.dirty = true;
+            return;
+        }
+        state.begin_confirmation(&forge);
+        self.dirty = true;
+    }
+
     fn start_execution(&mut self) {
+        let Some(forge) = self.resolve_forge() else {
+            if let Screen::Generate(state) = &mut self.screen {
+                state.phase = GeneratePhase::Failed {
+                    message: "forge unresolved: no remote detected".into(),
+                };
+            }
+            self.dirty = true;
+            return;
+        };
+        let remote = self.current_remote_name();
         let Screen::Generate(state) = &mut self.screen else {
             return;
         };
@@ -372,7 +503,7 @@ impl App {
         }
         let job = ExecutePrJob {
             jj_binary: self.config.commands.jj.clone(),
-            tea_binary: self.config.commands.tea.clone(),
+            forge,
             change_id: state.form.head().to_string(),
             bookmark: state.form.branch().to_string(),
             base: state.form.base().to_string(),
@@ -381,6 +512,7 @@ impl App {
             labels: state.form.labels(),
             assignees: state.form.assignees(),
             milestone: state.form.milestone().to_string(),
+            remote,
         };
         state.phase = GeneratePhase::Executing { draft };
         state.last_action = None;
@@ -555,9 +687,20 @@ impl App {
         state.last_action = Some("checking current PR state".to_string());
         self.pending_stack_push = Some(PendingStackPush { index, push_all });
         self.dirty = true;
+        let Some(forge) = self.resolve_forge() else {
+            if let Screen::Generate(state) = &mut self.screen {
+                state.last_action = Some("forge unresolved: no remote detected".to_string());
+            }
+            self.pending_stack_push = None;
+            self.dirty = true;
+            return;
+        };
+        let remote = self.current_remote();
         self.submitter.submit(StackPushPrecheckJob {
             jj_binary: self.config.commands.jj.clone(),
-            tea_binary: self.config.commands.tea.clone(),
+            forge,
+            owner: remote.as_ref().map(|remote| remote.owner.clone()),
+            repo: remote.as_ref().map(|remote| remote.repo.clone()),
         });
         tracing::info!(target: "teatui::stack", index, push_all, "submitted push precheck");
     }
@@ -605,13 +748,21 @@ impl App {
         }
         self.dirty = true;
 
+        let Some(forge) = self.resolve_forge() else {
+            if let Screen::Generate(state) = &mut self.screen {
+                state.last_action = Some("forge unresolved: no remote detected".to_string());
+            }
+            self.dirty = true;
+            return;
+        };
         self.submitter.submit(StackPushJob {
             jj_binary: self.config.commands.jj.clone(),
-            tea_binary: self.config.commands.tea.clone(),
+            forge,
             item,
             labels,
             assignees,
             milestone,
+            remote: self.current_remote_name(),
         });
         tracing::info!(target: "teatui::stack", index, push_all, "submitted push job");
     }
@@ -885,10 +1036,17 @@ impl App {
             state.seed_bulk_editor_from_cursor();
         }
         self.refresh_stack_review_blockers();
-        self.status.mark_stack_existing_prs_loading();
-        self.submitter.submit(StackExistingPrsProbe {
-            tea_binary: self.config.commands.tea.clone(),
-        });
+        if let Some(forge) = self.resolve_forge() {
+            self.status.mark_stack_existing_prs_loading();
+            let remote = self.current_remote();
+            self.submitter.submit(StackExistingPrsProbe {
+                forge,
+                owner: remote.as_ref().map(|remote| remote.owner.clone()),
+                repo: remote.as_ref().map(|remote| remote.repo.clone()),
+            });
+        } else if let Screen::Generate(state) = &mut self.screen {
+            state.last_action = Some("forge unresolved: no remote detected".to_string());
+        }
         tracing::info!(target: "teatui::stack", "stack llm complete, entering review");
     }
 
@@ -1020,9 +1178,8 @@ impl App {
 
             state.last_action = match &status {
                 crate::domain::PrStatus::Created { .. } => Some("PR created".to_string()),
-                crate::domain::PrStatus::Failed { step, message } => {
-                    Some(format!("{}: {}", step.label(), message))
-                }
+                // Failure is recorded in item.status and shown by the result section; no note needed.
+                crate::domain::PrStatus::Failed { .. } => None,
                 crate::domain::PrStatus::Bookmarked => Some("bookmark set".to_string()),
                 crate::domain::PrStatus::Pushed => Some("bookmark pushed".to_string()),
                 crate::domain::PrStatus::Pending => None,
@@ -1107,23 +1264,19 @@ impl App {
             self.dirty = true;
         });
         try_payload!(any, WorkspaceInfo, workspace => {
-            if let WorkspaceInfo::Inside {
-                remote: Some(remote),
-                ..
-            } = &workspace
-            {
-                self.status.mark_repo_options_loading();
-                self.submitter.submit(RepoOptionsProbe {
-                    tea_binary: self.config.commands.tea.clone(),
-                    owner: remote.owner.clone(),
-                    repo: remote.repo.clone(),
-                });
-            }
+            let remote = match &workspace {
+                WorkspaceInfo::Inside {
+                    remote: Some(remote),
+                    ..
+                } => Some(remote.clone()),
+                _ => None,
+            };
             self.status.set_workspace(workspace);
+            self.submit_forge_discovery(remote.as_ref());
             self.dirty = true;
         });
-        try_payload!(any, TeaAuthStatus, auth => {
-            self.status.set_tea_auth(auth);
+        try_payload!(any, ForgeAuthStatus, auth => {
+            self.status.set_forge_auth(auth);
             self.dirty = true;
         });
         try_payload!(any, BackendHealth, payload => {
@@ -1572,5 +1725,49 @@ mod tests {
         };
 
         assert_eq!(branch_from_draft(&draft), "pr/chore/clean-up-prompt-shape");
+    }
+
+    #[test]
+    fn auto_forge_selects_github_for_github_dot_com() {
+        let remote = RemoteInfo {
+            host: "github.com".into(),
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        assert_eq!(
+            select_forge_kind(ForgeSelection::Auto, Some(&remote)),
+            Some(ForgeKind::Github)
+        );
+    }
+
+    #[test]
+    fn auto_forge_uses_gitea_for_non_github_hosts_but_not_missing_remote() {
+        let remote = RemoteInfo {
+            host: "git.example.com".into(),
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        assert_eq!(
+            select_forge_kind(ForgeSelection::Auto, Some(&remote)),
+            Some(ForgeKind::Gitea)
+        );
+        assert_eq!(select_forge_kind(ForgeSelection::Auto, None), None);
+    }
+
+    #[test]
+    fn configured_forge_overrides_auto_host_detection() {
+        let remote = RemoteInfo {
+            host: "github.com".into(),
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        assert_eq!(
+            select_forge_kind(ForgeSelection::Gitea, Some(&remote)),
+            Some(ForgeKind::Gitea)
+        );
+        assert_eq!(
+            select_forge_kind(ForgeSelection::Github, None),
+            Some(ForgeKind::Github)
+        );
     }
 }
