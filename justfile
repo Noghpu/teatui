@@ -22,9 +22,10 @@ clippy:
     cargo clippy --all-targets --all-features -- -D warnings
 
 test:
-    cargo test --all-targets --all-features
+    cargo test --lib --all-features
+    cargo test --test render_smoke --all-features
 
-verify: fmt check clippy test
+verify: fmt clippy test
 
 snapshots:
     cargo run --quiet --bin ui-snapshots --

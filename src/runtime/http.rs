@@ -393,7 +393,8 @@ mod tests {
         // Server accepts but never replies, holding the socket open.
         let url = serve_once(|mut stream| {
             drain_request(&mut stream);
-            thread::sleep(Duration::from_secs(30));
+            let mut buf = [0u8; 1];
+            let _ = stream.read(&mut buf);
         });
 
         let cancel = CancelHandle::new();
