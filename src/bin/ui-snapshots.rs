@@ -7,12 +7,12 @@ use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
 use ratatui::{Frame, Terminal};
 
+use teatui::config::{Config, ForgeSelection};
 use teatui::domain::{
     BaseBookmark, BulkPhase, ChangeContext, ContextBundle, DiffContext, ForgeAuthStatus,
     GeneratedDraft, JjOp, JjOpKind, LlmHealth, PrStatus, PromptBuild, PromptManifest,
     PromptSection, RemoteInfo, RepoOptions, RevsetSummary, Revsets, StackDraft, StackIntent,
-    StackPlan,
-    StackPlanItem, StackPrInput, StatusStore, ToolStatus, VersionKind, VersionResult,
+    StackPlan, StackPlanItem, StackPrInput, StatusStore, ToolStatus, VersionKind, VersionResult,
     WorkspaceInfo,
 };
 use teatui::screens::generate::{
@@ -36,6 +36,8 @@ struct Args {
 #[derive(Debug, Clone, Copy)]
 enum SnapshotKind {
     LandingPopulated,
+    LandingManualForge,
+    LandingAuthError,
     LandingSmall,
     GenerateIdle,
     GenerateFormFocused,
@@ -100,6 +102,18 @@ fn snapshot_specs() -> Vec<SnapshotSpec> {
             width: 120,
             height: 30,
             kind: SnapshotKind::LandingPopulated,
+        },
+        SnapshotSpec {
+            name: "landing-manual-forge",
+            width: 120,
+            height: 30,
+            kind: SnapshotKind::LandingManualForge,
+        },
+        SnapshotSpec {
+            name: "landing-auth-error",
+            width: 120,
+            height: 30,
+            kind: SnapshotKind::LandingAuthError,
         },
         SnapshotSpec {
             name: "landing-small",
@@ -224,20 +238,54 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
     let status = populated_status();
     terminal.draw(|frame| match spec.kind {
         SnapshotKind::LandingPopulated => {
-            screens::landing::render(&LandingState::default(), &status, frame, frame.area());
+            screens::landing::render(
+                &LandingState::default(),
+                &status,
+                ForgeSelection::Auto,
+                frame,
+                frame.area(),
+            );
+        }
+        SnapshotKind::LandingManualForge => {
+            screens::landing::render(
+                &LandingState::default(),
+                &status,
+                ForgeSelection::Gitea,
+                frame,
+                frame.area(),
+            );
+        }
+        SnapshotKind::LandingAuthError => {
+            let mut status = status.clone();
+            status.set_forge_auth(ForgeAuthStatus::Errored {
+                message: "token expired".into(),
+            });
+            screens::landing::render(
+                &LandingState::default(),
+                &status,
+                ForgeSelection::Auto,
+                frame,
+                frame.area(),
+            );
         }
         SnapshotKind::LandingSmall => {
-            screens::landing::render(&LandingState { selected: 3 }, &status, frame, frame.area());
+            screens::landing::render(
+                &LandingState { selected: 3 },
+                &status,
+                ForgeSelection::Auto,
+                frame,
+                frame.area(),
+            );
         }
         SnapshotKind::GenerateIdle => {
             let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
             state.ensure_field_options_synced(&status);
-            screens::generate::render(&state, &status, frame, frame.area());
+            screens::generate::render(&state, &status, &Config::default(), frame, frame.area());
         }
         SnapshotKind::GenerateFormFocused => {
             let mut state = generate_with(GeneratePhase::Idle, Pane::Form, FieldId::Description);
             state.ensure_field_options_synced(&status);
-            screens::generate::render(&state, &status, frame, frame.area());
+            screens::generate::render(&state, &status, &Config::default(), frame, frame.area());
         }
         SnapshotKind::GenerateDraftReady => {
             let mut state = generate_with(
@@ -249,7 +297,7 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
                 FieldId::Description,
             );
             state.ensure_field_options_synced(&status);
-            screens::generate::render(&state, &status, frame, frame.area());
+            screens::generate::render(&state, &status, &Config::default(), frame, frame.area());
         }
         SnapshotKind::GenerateConfirming => {
             let mut state = generate_with(
@@ -262,7 +310,7 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
                 FieldId::Description,
             );
             state.ensure_field_options_synced(&status);
-            screens::generate::render(&state, &status, frame, frame.area());
+            screens::generate::render(&state, &status, &Config::default(), frame, frame.area());
         }
         SnapshotKind::GenerateJjMutating => {
             let mut state = generate_with(
@@ -275,7 +323,7 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
                 FieldId::Head,
             );
             state.ensure_field_options_synced(&status);
-            screens::generate::render(&state, &status, frame, frame.area());
+            screens::generate::render(&state, &status, &Config::default(), frame, frame.area());
         }
         SnapshotKind::GenerateJjConfirm => {
             let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
@@ -289,7 +337,7 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
                 change: "zzzzzzzz restore-pr-ui".into(),
                 target: "yyyyyyyy Add deterministic UI snapshots".into(),
             }));
-            screens::generate::render(&state, &status, frame, frame.area());
+            screens::generate::render(&state, &status, &Config::default(), frame, frame.area());
         }
         SnapshotKind::GenerateJjError => {
             let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
@@ -298,7 +346,7 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
                 title: "move below failed".into(),
                 message: "conflicts exist in trunk()..@".into(),
             });
-            screens::generate::render(&state, &status, frame, frame.area());
+            screens::generate::render(&state, &status, &Config::default(), frame, frame.area());
         }
         SnapshotKind::GeneratePickerModal => {
             let mut state = generate_with(GeneratePhase::Idle, Pane::Form, FieldId::Head);
@@ -307,7 +355,7 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
             state.form.head.set_value("yyyyyyyy".into());
             state.input_mode = InputMode::Editing;
             state.form.head.begin_edit();
-            screens::generate::render(&state, &status, frame, frame.area());
+            screens::generate::render(&state, &status, &Config::default(), frame, frame.area());
         }
         SnapshotKind::GenerateSmall => {
             let mut state = generate_with(
@@ -319,7 +367,7 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
                 FieldId::Description,
             );
             state.ensure_field_options_synced(&status);
-            screens::generate::render(&state, &status, frame, frame.area());
+            screens::generate::render(&state, &status, &Config::default(), frame, frame.area());
         }
         SnapshotKind::BackendPicker => {
             use teatui::config::LlmBackend;
@@ -348,7 +396,7 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
             // Behind the modal: the Generate screen, to show the backdrop.
             let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
             state.ensure_field_options_synced(&status);
-            screens::generate::render(&state, &status, frame, frame.area());
+            screens::generate::render(&state, &status, &Config::default(), frame, frame.area());
 
             // Reachable / unreachable / pending, one of each.
             let mut status = status.clone();
@@ -375,7 +423,7 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
             state.selected_heads.push("yyyyyyyy".into());
             state.bulk = BulkPhase::Collecting;
             state.ensure_field_options_synced(&status);
-            screens::generate::render(&state, &status, frame, frame.area());
+            screens::generate::render(&state, &status, &Config::default(), frame, frame.area());
         }
         SnapshotKind::GenerateBulkGenerating => {
             let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
@@ -383,7 +431,7 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
             state.selected_heads.push("yyyyyyyy".into());
             state.bulk = sample_bulk_generating();
             state.ensure_field_options_synced(&status);
-            screens::generate::render(&state, &status, frame, frame.area());
+            screens::generate::render(&state, &status, &Config::default(), frame, frame.area());
         }
         SnapshotKind::GenerateBulkReview => {
             render_bulk_review_snapshot(frame, &status);
@@ -404,7 +452,7 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
             };
             state.seed_bulk_editor_from_cursor();
             state.ensure_field_options_synced(&status);
-            screens::generate::render(&state, &status, frame, frame.area());
+            screens::generate::render(&state, &status, &Config::default(), frame, frame.area());
         }
         SnapshotKind::GenerateBulkPushDone => {
             let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
@@ -425,7 +473,7 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
             };
             state.seed_bulk_editor_from_cursor();
             state.ensure_field_options_synced(&status);
-            screens::generate::render(&state, &status, frame, frame.area());
+            screens::generate::render(&state, &status, &Config::default(), frame, frame.area());
         }
         SnapshotKind::GenerateBulkPushFailed => {
             let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
@@ -447,7 +495,7 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
             };
             state.seed_bulk_editor_from_cursor();
             state.ensure_field_options_synced(&status);
-            screens::generate::render(&state, &status, frame, frame.area());
+            screens::generate::render(&state, &status, &Config::default(), frame, frame.area());
         }
         SnapshotKind::GenerateBulkFailed => {
             let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
@@ -455,7 +503,7 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
                 message: "LLM server unreachable: connection refused".into(),
             };
             state.ensure_field_options_synced(&status);
-            screens::generate::render(&state, &status, frame, frame.area());
+            screens::generate::render(&state, &status, &Config::default(), frame, frame.area());
         }
         SnapshotKind::GenerateBulkSmall => {
             let mut state = generate_with(GeneratePhase::Idle, Pane::Menu, FieldId::Head);
@@ -468,7 +516,7 @@ fn render_snapshot(spec: SnapshotSpec) -> color_eyre::Result<Buffer> {
             };
             state.seed_bulk_editor_from_cursor();
             state.ensure_field_options_synced(&status);
-            screens::generate::render(&state, &status, frame, frame.area());
+            screens::generate::render(&state, &status, &Config::default(), frame, frame.area());
         }
     })?;
     Ok(terminal.backend().buffer().clone())
@@ -489,7 +537,7 @@ fn render_bulk_review_snapshot(frame: &mut Frame, status: &StatusStore) {
     };
     state.seed_bulk_editor_from_cursor();
     state.ensure_field_options_synced(status);
-    screens::generate::render(&state, status, frame, frame.area());
+    screens::generate::render(&state, status, &Config::default(), frame, frame.area());
 }
 
 fn populated_status() -> StatusStore {
