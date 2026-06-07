@@ -4,6 +4,8 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use crate::config::ForgeSelection;
+use crate::domain::ForgeAuthStatus;
 use crate::domain::{LlmHealth, StatusStore, ToolStatus, WorkspaceInfo};
 use crate::runtime::Cached;
 
@@ -81,19 +83,31 @@ pub fn on_key(state: &mut LandingState, key: KeyEvent) -> Transition {
     }
 }
 
-pub fn render(state: &LandingState, status: &StatusStore, frame: &mut Frame, area: Rect) {
+pub fn render(
+    state: &LandingState,
+    status: &StatusStore,
+    forge_selection: ForgeSelection,
+    frame: &mut Frame,
+    area: Rect,
+) {
     let [main, status_area, help_area] = Layout::vertical([
         Constraint::Fill(1),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(area);
-    render_landing_hero(state, status, frame, main);
+    render_landing_hero(state, status, forge_selection, frame, main);
     render_status_bar(state, frame, status_area);
     render_help(frame, help_area);
 }
 
-fn render_landing_hero(state: &LandingState, status: &StatusStore, frame: &mut Frame, area: Rect) {
+fn render_landing_hero(
+    state: &LandingState,
+    status: &StatusStore,
+    forge_selection: ForgeSelection,
+    frame: &mut Frame,
+    area: Rect,
+) {
     let [header_area, actions_area, footer_area] = Layout::vertical([
         Constraint::Length(5),
         Constraint::Fill(1),
@@ -121,7 +135,7 @@ fn render_landing_hero(state: &LandingState, status: &StatusStore, frame: &mut F
     .alignment(Alignment::Center);
     frame.render_widget(header, header_center);
     render_landing_actions(state.selected, frame, actions_center);
-    render_landing_footer(status, frame, footer_area);
+    render_landing_footer(status, forge_selection, frame, footer_area);
 }
 
 fn center_horizontally(area: Rect) -> Rect {
@@ -174,21 +188,39 @@ fn landing_action_line(action: Action, selected: bool, center_width: usize) -> L
     }
 }
 
-fn render_landing_footer(status: &StatusStore, frame: &mut Frame, area: Rect) {
+fn render_landing_footer(
+    status: &StatusStore,
+    forge_selection: ForgeSelection,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let show_auto_prefix = forge_selection == ForgeSelection::Auto;
+    let mut spans = landing_footer_spans(status, show_auto_prefix);
+    if show_auto_prefix && spans_width(&spans) > usize::from(area.width) {
+        spans = landing_footer_spans(status, false);
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
+        area,
+    );
+}
+
+fn landing_footer_spans(status: &StatusStore, show_auto_prefix: bool) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     push_tool(&mut spans, "jj", &status.jj);
     spans.push(Span::raw("  "));
     push_tool(&mut spans, "git", &status.git);
     spans.push(Span::raw("  "));
-    push_tool(&mut spans, status.forge_label.clone(), &status.forge);
+    push_forge(&mut spans, status, show_auto_prefix);
     spans.push(Span::raw("  "));
     push_llm(&mut spans, status);
     spans.push(Span::raw("  "));
     push_workspace(&mut spans, status);
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
-        area,
-    );
+    spans
+}
+
+fn spans_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|span| span.content.chars().count()).sum()
 }
 
 fn push_tool(spans: &mut Vec<Span<'static>>, name: impl Into<String>, c: &Cached<ToolStatus>) {
@@ -198,6 +230,28 @@ fn push_tool(spans: &mut Vec<Span<'static>>, name: impl Into<String>, c: &Cached
         Health::Warn | Health::Pending => ("·", theme::muted()),
     };
     spans.push(Span::styled(format!("{symbol} {}", name.into()), style));
+}
+
+fn push_forge(spans: &mut Vec<Span<'static>>, status: &StatusStore, show_auto_prefix: bool) {
+    let (symbol, style) = match tool_health(&status.forge) {
+        Health::Good => ("✓", theme::success()),
+        Health::Bad => ("✗", theme::error()),
+        Health::Warn | Health::Pending => ("·", theme::muted()),
+    };
+
+    let prefix = if show_auto_prefix { "auto: " } else { "" };
+    spans.push(Span::styled(
+        format!("{symbol} {prefix}{}", status.forge_label),
+        style,
+    ));
+
+    match status.forge_auth.value() {
+        Some(ForgeAuthStatus::Configured { .. }) => {}
+        Some(ForgeAuthStatus::Errored { .. }) => {
+            spans.push(Span::styled(" · auth error", theme::error()));
+        }
+        Some(ForgeAuthStatus::None) | None => {}
+    }
 }
 
 fn push_llm(spans: &mut Vec<Span<'static>>, status: &StatusStore) {
