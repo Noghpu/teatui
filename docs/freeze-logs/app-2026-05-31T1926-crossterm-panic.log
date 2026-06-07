@@ -1,0 +1,208 @@
+2026-05-31T19:26:29.872992Z  INFO teatui: Starting application
+2026-05-31T19:26:29.875624Z  INFO teatui::lifecycle: main loop entered
+2026-05-31T19:26:29.875654Z  INFO teatui::heartbeat: alive tick=1
+2026-05-31T19:26:29.875701Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.878309Z DEBUG reqwest::connect: starting new connection: http://10.2.118.173:11434/
+2026-05-31T19:26:29.878433Z DEBUG hyper_util::client::legacy::connect::http: connecting to 10.2.118.173:11434
+2026-05-31T19:26:29.886600Z DEBUG teatui::perf: slow tui.draw elapsed_ms=10 screen=Landing
+2026-05-31T19:26:29.886681Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.886981Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.888927Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.889183Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.891432Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.891720Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.894261Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.894824Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.897950Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.898251Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.900951Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.901518Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.904367Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.904666Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.907781Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.908108Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.910901Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.911354Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.913852Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.914266Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.916891Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.917137Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.919457Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.919794Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.922096Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.922582Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.925138Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.925569Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.928032Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.928301Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.930645Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.930930Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.932524Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.932843Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.934712Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.935055Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.937540Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.937808Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.939350Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.939573Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.940973Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.941277Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.943385Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.943811Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.947258Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.947701Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.950120Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.950400Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.952810Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.953118Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.955821Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.956652Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.958899Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.959225Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.961134Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.961443Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.963708Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.963978Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.965963Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.966292Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.968363Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.968566Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.971227Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.971475Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.973035Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.973299Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.975001Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.975269Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.977619Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.977950Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.980299Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.980573Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.982479Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.982676Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.984862Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.985140Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.987064Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.987317Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.989045Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.989327Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.991809Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.992092Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.994950Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.995680Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:29.997714Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:29.998033Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.000237Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.000577Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.003322Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.003908Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.007021Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.007376Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.011402Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.012126Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.017585Z DEBUG teatui::perf: slow tui.draw elapsed_ms=5 screen=Landing
+2026-05-31T19:26:30.017708Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.018485Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.021977Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.023213Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.027271Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.027686Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.031816Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.032371Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.037365Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.038045Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.040204Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.041106Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.044557Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.045023Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.048951Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.049571Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.053233Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.111974Z DEBUG teatui::perf: long await on events.next elapsed_ms=58 event="key"
+2026-05-31T19:26:30.112128Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.114608Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.117906Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.119939Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.139603Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.142242Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.226778Z DEBUG teatui::perf: long await on events.next elapsed_ms=84 event="tick"
+2026-05-31T19:26:30.226909Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.229554Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.267260Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.270013Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.358262Z DEBUG teatui::perf: long await on events.next elapsed_ms=88 event="tick"
+2026-05-31T19:26:30.358359Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.360212Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.374717Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.376783Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.401183Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.402975Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.637233Z DEBUG teatui::perf: long await on events.next elapsed_ms=234 event="tick"
+2026-05-31T19:26:30.637442Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.639271Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.887152Z DEBUG teatui::perf: long await on events.next elapsed_ms=247 event="tick"
+2026-05-31T19:26:30.887270Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:30.888714Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:30.887175Z  INFO teatui::heartbeat: alive tick=2
+2026-05-31T19:26:31.136889Z DEBUG teatui::perf: long await on events.next elapsed_ms=248 event="tick"
+2026-05-31T19:26:31.136997Z TRACE teatui::loop: phase="pre_draw"
+2026-05-31T19:26:31.138418Z TRACE teatui::loop: phase="pre_await"
+2026-05-31T19:26:31.270935Z ERROR teatui::panic: panic captured location=C:\Users\dev\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crossterm_winapi-0.9.1\src\console.rs:169:13 payload=assertion failed: num_read == 1
+2026-05-31T19:26:31.383869Z DEBUG teatui::perf: long await on events.next elapsed_ms=245 event="tick"
+2026-05-31T19:26:31.387829Z  WARN teatui::lifecycle: main loop exiting: panic_occurred
+2026-05-31T19:26:31.387878Z  INFO teatui::lifecycle: main loop returned cleanly
+2026-05-31T19:26:31.387928Z  INFO teatui::lifecycle: app.run returned run_ok=true
+2026-05-31T19:26:31.388388Z  INFO teatui::lifecycle: tui.exit succeeded
+2026-05-31T19:26:31.271106Z ERROR teatui::panic: panic backtrace backtrace=   0: std::backtrace_rs::backtrace::win64::trace
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\..\..\backtrace\src\backtrace\win64.rs:85
+   1: std::backtrace_rs::backtrace::trace_unsynchronized
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\..\..\backtrace\src\backtrace\mod.rs:66
+   2: std::backtrace::Backtrace::create
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\backtrace.rs:331
+   3: std::backtrace::Backtrace::force_capture
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\backtrace.rs:312
+   4: teatui::tui::impl$0::enter::closure$0
+             at .\src\tui.rs:76
+   5: std::panicking::panic_with_hook
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\panicking.rs:833
+   6: std::panicking::panic_handler::closure$0
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\panicking.rs:691
+   7: std::sys::backtrace::__rust_end_short_backtrace<std::panicking::panic_handler::closure_env$0,never$>
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\sys\backtrace.rs:182
+   8: std::panicking::panic_handler
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\panicking.rs:689
+   9: core::panicking::panic_fmt
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\core\src\panicking.rs:80
+  10: core::panicking::panic
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\core\src\panicking.rs:150
+  11: crossterm_winapi::console::Console::read_single_input_event
+             at C:\Users\dev\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crossterm_winapi-0.9.1\src\console.rs:169
+  12: crossterm::event::source::windows::impl$1::try_read
+             at C:\Users\dev\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crossterm-0.29.0\src\event\source\windows.rs:51
+  13: crossterm::event::read::InternalEventReader::poll<crossterm::event::filter::EventFilter>
+             at C:\Users\dev\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crossterm-0.29.0\src\event\read.rs:65
+  14: crossterm::event::poll_internal<crossterm::event::filter::EventFilter>
+             at C:\Users\dev\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crossterm-0.29.0\src\event.rs:272
+  15: crossterm::event::stream::impl$0::default::closure$0
+             at C:\Users\dev\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crossterm-0.29.0\src\event\stream.rs:47
+  16: std::sys::backtrace::__rust_begin_short_backtrace<crossterm::event::stream::impl$0::default::closure_env$0,tuple$<> >
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\sys\backtrace.rs:166
+  17: std::thread::lifecycle::spawn_unchecked::closure$1::closure$0<crossterm::event::stream::impl$0::default::closure_env$0,tuple$<> >
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\thread\lifecycle.rs:91
+  18: core::panic::unwind_safe::impl$25::call_once<tuple$<>,std::thread::lifecycle::spawn_unchecked::closure$1::closure_env$0<crossterm::event::stream::impl$0::default::closure_env$0,tuple$<> > >
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\core\src\panic\unwind_safe.rs:274
+  19: std::panicking::catch_unwind::do_call<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::closure$1::closure_env$0<crossterm::event::stream::impl$0::default::closure_env$0,tuple$<> > >,tuple$<> >
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\panicking.rs:581
+  20: crossterm::style::types::attribute::Attribute::sgr
+  21: std::panicking::catch_unwind
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\panicking.rs:544
+  22: std::panic::catch_unwind
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\panic.rs:359
+  23: std::thread::lifecycle::spawn_unchecked::closure$1<crossterm::event::stream::impl$0::default::closure_env$0,tuple$<> >
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\thread\lifecycle.rs:89
+  24: core::ops::function::FnOnce::call_once<std::thread::lifecycle::spawn_unchecked::closure_env$1<crossterm::event::stream::impl$0::default::closure_env$0,tuple$<> >,tuple$<> >
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\core\src\ops\function.rs:250
+  25: std::sys::thread::windows::impl$0::new::thread_start
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\sys\thread\windows.rs:58
+  26: BaseThreadInitThunk
+  27: RtlUserThreadStart
+
