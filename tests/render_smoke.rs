@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
+use teatui::config::{Config, ForgeSelection};
 use teatui::domain::{
     BulkPhase, PrStatus, StackDraft, StackExistingPr, StackIntent, StackPlan, StackPlanItem,
     StackPrInput, annotate_blockers,
@@ -36,7 +37,7 @@ fn draw_landing(state: &LandingState, status: &StatusStore) {
     let mut t = term();
     t.draw(|frame| {
         let area = frame.area();
-        screens::landing::render(state, status, frame, area);
+        screens::landing::render(state, status, ForgeSelection::Auto, frame, area);
     })
     .expect("draw");
 }
@@ -45,16 +46,46 @@ fn draw_landing_small(state: &LandingState, status: &StatusStore) {
     let mut t = small_term();
     t.draw(|frame| {
         let area = frame.area();
-        screens::landing::render(state, status, frame, area);
+        screens::landing::render(state, status, ForgeSelection::Auto, frame, area);
     })
     .expect("draw");
+}
+
+fn landing_text(
+    state: &LandingState,
+    status: &StatusStore,
+    forge_selection: ForgeSelection,
+) -> String {
+    let mut t = term();
+    t.draw(|frame| {
+        let area = frame.area();
+        screens::landing::render(state, status, forge_selection, frame, area);
+    })
+    .expect("draw");
+    buffer_text(t.backend().buffer())
+}
+
+fn landing_text_with_size(
+    state: &LandingState,
+    status: &StatusStore,
+    forge_selection: ForgeSelection,
+    width: u16,
+    height: u16,
+) -> String {
+    let mut t = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+    t.draw(|frame| {
+        let area = frame.area();
+        screens::landing::render(state, status, forge_selection, frame, area);
+    })
+    .expect("draw");
+    buffer_text(t.backend().buffer())
 }
 
 fn draw_generate(state: &GenerateState, status: &StatusStore) {
     let mut t = term();
     t.draw(|frame| {
         let area = frame.area();
-        screens::generate::render(state, status, frame, area);
+        screens::generate::render(state, status, &Config::default(), frame, area);
     })
     .expect("draw");
 }
@@ -63,7 +94,7 @@ fn draw_generate_small(state: &GenerateState, status: &StatusStore) {
     let mut t = small_term();
     t.draw(|frame| {
         let area = frame.area();
-        screens::generate::render(state, status, frame, area);
+        screens::generate::render(state, status, &Config::default(), frame, area);
     })
     .expect("draw");
 }
@@ -72,7 +103,17 @@ fn generate_small_text(state: &GenerateState, status: &StatusStore) -> String {
     let mut t = small_term();
     t.draw(|frame| {
         let area = frame.area();
-        screens::generate::render(state, status, frame, area);
+        screens::generate::render(state, status, &Config::default(), frame, area);
+    })
+    .expect("draw");
+    buffer_text(t.backend().buffer())
+}
+
+fn generate_text(state: &GenerateState, status: &StatusStore) -> String {
+    let mut t = term();
+    t.draw(|frame| {
+        let area = frame.area();
+        screens::generate::render(state, status, &Config::default(), frame, area);
     })
     .expect("draw");
     buffer_text(t.backend().buffer())
@@ -262,6 +303,74 @@ fn landing_small_terminal_renders() {
     draw_landing_small(&LandingState::default(), &populated_status());
 }
 
+#[test]
+fn landing_forge_chip_shows_auto_label_without_host_or_login() {
+    let text = landing_text(
+        &LandingState::default(),
+        &populated_status(),
+        ForgeSelection::Auto,
+    );
+
+    assert!(text.contains("auto: tea"), "{text}");
+    assert!(!text.contains("gitea.example.com"), "{text}");
+    assert!(!text.contains("@gitea"), "{text}");
+}
+
+#[test]
+fn landing_forge_chip_omits_auto_for_manual_selection() {
+    let text = landing_text(
+        &LandingState::default(),
+        &populated_status(),
+        ForgeSelection::Gitea,
+    );
+
+    assert!(text.contains("✓ tea"), "{text}");
+    assert!(!text.contains("auto: tea"), "{text}");
+    assert!(!text.contains("gitea.example.com"), "{text}");
+    assert!(!text.contains("@gitea"), "{text}");
+}
+
+#[test]
+fn landing_forge_chip_shows_auth_error() {
+    let mut status = populated_status();
+    status.set_forge_auth(ForgeAuthStatus::Errored {
+        message: "token expired".into(),
+    });
+
+    let text = landing_text(&LandingState::default(), &status, ForgeSelection::Auto);
+
+    assert!(text.contains("auto: tea · auth error"), "{text}");
+    assert!(!text.contains("gitea.example.com"), "{text}");
+}
+
+#[test]
+fn landing_forge_chip_omits_host_and_login_without_remote_or_auth() {
+    let mut status = populated_status();
+    status.set_workspace(WorkspaceInfo::Outside);
+    status.set_forge_auth(ForgeAuthStatus::None);
+
+    let text = landing_text(&LandingState::default(), &status, ForgeSelection::Auto);
+
+    assert!(text.contains("✓ auto: tea"), "{text}");
+    assert!(!text.contains("gitea.example.com"), "{text}");
+    assert!(!text.contains("@gitea"), "{text}");
+}
+
+#[test]
+fn landing_forge_chip_keeps_auto_prefix_on_small_footer() {
+    let text = landing_text_with_size(
+        &LandingState::default(),
+        &populated_status(),
+        ForgeSelection::Auto,
+        80,
+        24,
+    );
+
+    assert!(text.contains("auto: tea"), "{text}");
+    assert!(!text.contains("gitea.example.com"), "{text}");
+    assert!(!text.contains("@gitea"), "{text}");
+}
+
 // ============================== Generate ====================================
 
 fn generate_with(phase: GeneratePhase) -> GenerateState {
@@ -295,6 +404,32 @@ fn generate_with(phase: GeneratePhase) -> GenerateState {
 #[test]
 fn generate_idle_renders() {
     draw_generate(&generate_with(GeneratePhase::Idle), &populated_status());
+}
+
+#[test]
+fn generate_status_bar_shows_context() {
+    let mut state = generate_with(GeneratePhase::Idle);
+    let status = populated_status();
+
+    let text = generate_text(&state, &status);
+    assert!(text.contains("Normal"));
+    assert!(text.contains("Generate"));
+    assert!(text.contains("tea · gitea.example.com"));
+    assert!(text.contains("LLM: qwen2.5-coder:latest"));
+
+    state.input_mode = InputMode::Editing;
+    let text = generate_text(&state, &status);
+    assert!(text.contains("Editing"));
+}
+
+#[test]
+fn generate_status_bar_shows_pending_llm_until_health_lands() {
+    let mut status = populated_status();
+    status.llm = Cached::Loading;
+
+    let text = generate_text(&generate_with(GeneratePhase::Idle), &status);
+
+    assert!(text.contains("LLM: pending"), "{text}");
 }
 
 #[test]
