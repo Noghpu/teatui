@@ -1586,8 +1586,12 @@ impl App {
     pub fn render(&self, frame: &mut Frame) {
         let area = frame.area();
         match &self.screen {
-            Screen::Landing(state) => screens::landing::render(state, &self.status, frame, area),
-            Screen::Generate(state) => screens::generate::render(state, &self.status, frame, area),
+            Screen::Landing(state) => {
+                screens::landing::render(state, &self.status, self.config.pr.forge, frame, area);
+            }
+            Screen::Generate(state) => {
+                screens::generate::render(state, &self.status, &self.config, frame, area);
+            }
         }
         if let Some(picker) = &self.backend_picker {
             screens::backend_picker::render(
