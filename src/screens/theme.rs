@@ -180,6 +180,7 @@ pub struct StatusChip {
 pub enum ChipKind {
     Mode,
     Plain,
+    Styled(Style),
 }
 
 impl StatusChip {
@@ -196,6 +197,14 @@ impl StatusChip {
             label: label.into(),
             priority,
             kind: ChipKind::Plain,
+        }
+    }
+
+    pub fn styled(label: impl Into<String>, priority: u8, style: Style) -> Self {
+        Self {
+            label: label.into(),
+            priority,
+            kind: ChipKind::Styled(style),
         }
     }
 
@@ -241,11 +250,16 @@ pub fn status_line(chips: Vec<StatusChip>, area_width: u16) -> Line<'static> {
                         .add_modifier(Modifier::BOLD),
                 ));
             }
-            ChipKind::Plain => {
+            ChipKind::Plain | ChipKind::Styled(_) => {
                 if i > 0 {
                     spans.push(Span::styled(" │ ", subtle()));
                 }
-                spans.push(Span::styled(format!(" {} ", chip.label), muted()));
+                let style = match chip.kind {
+                    ChipKind::Plain => muted(),
+                    ChipKind::Styled(style) => style,
+                    ChipKind::Mode => unreachable!(),
+                };
+                spans.push(Span::styled(format!(" {} ", chip.label), style));
             }
         }
     }

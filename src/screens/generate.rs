@@ -12,9 +12,11 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
+use crate::config::Config;
 use crate::domain::{
     BulkPhase, ContextBundle, CreatePrInput, ExecuteStep, ForgeCli, GeneratedDraft, JjOp, JjOpKind,
-    PromptBuild, RevsetSummary, Revsets, StackPlanItem, StatusStore,
+    LlmHealth, PromptBuild, RevsetSummary, Revsets, StackPlanItem, StatusStore, ToolStatus,
+    WorkspaceInfo,
 };
 use crate::runtime::Cached;
 
@@ -590,9 +592,19 @@ const MIN_3PANE_WIDTH: u16 = 100;
 /// pane (Menu/Form/Preview based on focus).
 const MIN_2PANE_WIDTH: u16 = 70;
 
-pub fn render(state: &GenerateState, status: &StatusStore, frame: &mut Frame, area: Rect) {
-    let [main, help_area] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
+pub fn render(
+    state: &GenerateState,
+    status: &StatusStore,
+    config: &Config,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let [main, status_area, help_area] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
 
     if main.width >= MIN_3PANE_WIDTH {
         let [menu_area, form_area, preview_area] = Layout::horizontal([
@@ -626,6 +638,7 @@ pub fn render(state: &GenerateState, status: &StatusStore, frame: &mut Frame, ar
         }
     }
 
+    render_generate_status_bar(state, status, config, frame, status_area);
     render_help(state, frame, help_area);
     if state.input_mode == InputMode::Editing
         && let FieldState::Picker(picker) = state.form.field(state.field_focus)
@@ -638,6 +651,113 @@ pub fn render(state: &GenerateState, status: &StatusStore, frame: &mut Frame, ar
     // The bulk modal is drawn last so it sits on top of all other content.
     if !matches!(state.bulk, BulkPhase::Idle) {
         render_bulk_modal(state, frame, main);
+    }
+}
+
+fn render_generate_status_bar(
+    state: &GenerateState,
+    status: &StatusStore,
+    config: &Config,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let mode = match state.input_mode {
+        InputMode::Normal => "Normal",
+        InputMode::Editing => "Editing",
+    };
+    let chips = vec![
+        theme::StatusChip::mode(mode),
+        theme::StatusChip::plain("Generate", 3),
+        theme::StatusChip::styled(forge_status_label(status), 2, forge_status_style(status)),
+        theme::StatusChip::styled(
+            llm_status_label(status, config),
+            1,
+            llm_status_style(status),
+        ),
+    ];
+    frame.render_widget(Paragraph::new(theme::status_line(chips, area.width)), area);
+}
+
+fn forge_status_label(status: &StatusStore) -> String {
+    let mut label = status.forge_label.clone();
+    if let Some(host) = workspace_remote_host(status) {
+        label.push_str(" · ");
+        label.push_str(host);
+    }
+    label
+}
+
+fn workspace_remote_host(status: &StatusStore) -> Option<&str> {
+    match status.workspace.value() {
+        Some(WorkspaceInfo::Inside {
+            remote: Some(remote),
+            ..
+        }) => Some(remote.host.as_str()),
+        _ => None,
+    }
+}
+
+fn forge_status_style(status: &StatusStore) -> ratatui::style::Style {
+    match cached_tool_health(&status.forge) {
+        GenerateChipHealth::Good => theme::success(),
+        GenerateChipHealth::Bad => theme::error(),
+        GenerateChipHealth::Pending => theme::muted(),
+    }
+}
+
+fn llm_status_style(status: &StatusStore) -> ratatui::style::Style {
+    match &status.llm {
+        Cached::Ready(LlmHealth::Available { .. })
+        | Cached::Stale {
+            value: LlmHealth::Available { .. },
+            ..
+        } => theme::success(),
+        Cached::Unknown
+        | Cached::Loading
+        | Cached::Ready(LlmHealth::Unreachable { .. })
+        | Cached::Stale {
+            value: LlmHealth::Unreachable { .. },
+            ..
+        } => theme::muted(),
+    }
+}
+
+fn llm_status_label(status: &StatusStore, config: &Config) -> String {
+    match &status.llm {
+        Cached::Unknown | Cached::Loading => "LLM: pending".to_string(),
+        Cached::Ready(LlmHealth::Available { .. })
+        | Cached::Stale {
+            value: LlmHealth::Available { .. },
+            ..
+        } => format!("LLM: {}", config.llm.active_backend().model),
+        Cached::Ready(LlmHealth::Unreachable { .. })
+        | Cached::Stale {
+            value: LlmHealth::Unreachable { .. },
+            ..
+        } => "LLM: unreachable".to_string(),
+    }
+}
+
+enum GenerateChipHealth {
+    Good,
+    Bad,
+    Pending,
+}
+
+fn cached_tool_health(c: &Cached<ToolStatus>) -> GenerateChipHealth {
+    match c {
+        Cached::Unknown | Cached::Loading => GenerateChipHealth::Pending,
+        Cached::Ready(ToolStatus::Available { .. })
+        | Cached::Stale {
+            value: ToolStatus::Available { .. },
+            ..
+        } => GenerateChipHealth::Good,
+        Cached::Ready(ToolStatus::Missing)
+        | Cached::Ready(ToolStatus::Errored { .. })
+        | Cached::Stale {
+            value: ToolStatus::Missing | ToolStatus::Errored { .. },
+            ..
+        } => GenerateChipHealth::Bad,
     }
 }
 
